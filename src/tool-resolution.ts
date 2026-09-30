@@ -18,6 +18,7 @@ const temporary: Record<string, { ecosystem: "python" | "npm"; packages: string[
 	"pyright-langserver": { ecosystem: "python", packages: ["pyright"] },
 	"basedpyright-langserver": { ecosystem: "python", packages: ["basedpyright"] },
 	"typescript-language-server": { ecosystem: "npm", packages: ["typescript-language-server", "typescript@5.9.3"] },
+	tsc: { ecosystem: "npm", packages: ["typescript@7.0.2"] },
 	"bash-language-server": { ecosystem: "npm", packages: ["bash-language-server"] },
 	"yaml-language-server": { ecosystem: "npm", packages: ["yaml-language-server"] },
 	"vscode-html-language-server": { ecosystem: "npm", packages: ["vscode-langservers-extracted"] },

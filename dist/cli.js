@@ -390,7 +390,12 @@ var web = {
   css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".less"] },
   json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] }
 };
-var builtins = { ...BUILTIN_SERVERS, ...web };
+var builtins = {
+  ...BUILTIN_SERVERS,
+  ...web,
+  tsc: { command: ["tsc", "--lsp", "--stdio"], extensions: BUILTIN_SERVERS["typescript"]?.extensions },
+  tsgo: { command: ["tsgo", "--lsp", "--stdio"], extensions: BUILTIN_SERVERS["typescript"]?.extensions }
+};
 function server(value, language, source) {
   if (value === false) return false;
   const builtin = typeof value === "string" ? builtins[value] : void 0;
@@ -869,6 +874,7 @@ var temporary = {
   "pyright-langserver": { ecosystem: "python", packages: ["pyright"] },
   "basedpyright-langserver": { ecosystem: "python", packages: ["basedpyright"] },
   "typescript-language-server": { ecosystem: "npm", packages: ["typescript-language-server", "typescript@5.9.3"] },
+  tsc: { ecosystem: "npm", packages: ["typescript@7.0.2"] },
   "bash-language-server": { ecosystem: "npm", packages: ["bash-language-server"] },
   "yaml-language-server": { ecosystem: "npm", packages: ["yaml-language-server"] },
   "vscode-html-language-server": { ecosystem: "npm", packages: ["vscode-langservers-extracted"] },
@@ -4421,6 +4427,9 @@ var Client = class extends LspClient {
       format: "documentFormattingProvider"
     };
     return Boolean(this.capabilities[names[operation] ?? operation]);
+  }
+  async sendNotification(method, params) {
+    await super.sendNotification(method, method === "initialized" ? params ?? {} : params);
   }
   async sendRequest(method, params) {
     if (method === "initialize" && record(params) && record(params["capabilities"])) {

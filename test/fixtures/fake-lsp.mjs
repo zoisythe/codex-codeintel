@@ -4,6 +4,7 @@ if (log) appendFileSync(log, `${process.pid}\n`);
 if (process.env.CODEX_LSP_TEST_MODE === "startup-fail") { console.error("fixture initialization failure"); process.exit(8); }
 let buffer = Buffer.alloc(0);
 const docs = new Map();
+let initialized = false;
 function send(value) {
 	const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", ...value }));
 	process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
@@ -12,6 +13,12 @@ function send(value) {
 function handle(value) {
 	const { method, params = {}, id } = value;
 	const mode = process.env.CODEX_LSP_TEST_MODE;
+	const pull = mode === "pull" || mode === "strict-initialize";
+	if (method === "initialized") { initialized = typeof value.params === "object" && value.params !== null; return; }
+	if (mode === "strict-initialize" && method !== "initialize" && method !== "exit" && !initialized) {
+		if (id !== undefined) send({ id, error: { code: -32002, message: "Server not initialized: initialized requires object params" } });
+		return;
+	}
 	if (mode === "slow" && ["textDocument/diagnostic", "shutdown", "textDocument/formatting"].includes(method)) return;
 	if (mode === "slow-second" && method === "textDocument/formatting" && params.textDocument.uri.endsWith("b.fake")) return;
 	if (method === "exit") { process.exit(0); }
@@ -23,14 +30,14 @@ function handle(value) {
 		const uri = process.platform === "win32" ? doc.uri.replace(/^file:\/\/\/([A-Z]):/i, (_, drive) => `file:///${drive.toLowerCase()}%3A`) : doc.uri;
 		if (mode === "empty-unversioned") { send({method: "textDocument/publishDiagnostics", params: {uri, diagnostics: []}}); return; }
 		if (mode === "stale-version") { send({method: "textDocument/publishDiagnostics", params: {uri, version: doc.version - 1, diagnostics: []}}); return; }
-		if (mode === "pull") return;
+		if (pull) return;
 		const publish = () => send({ method: "textDocument/publishDiagnostics", params: { uri, version: doc.version, diagnostics: text.includes("broken") ? [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } }, severity: 1, source: "fake", code: "E1", message: "broken fixture" }] : [] } });
 		if (mode === "late") { send({method: "textDocument/publishDiagnostics", params: {uri, version: doc.version, diagnostics: []}}); setTimeout(publish, 120); } else publish();
 		return;
 	}
 	if (id === undefined) return;
-	if (method === "initialize") { send({ id, result: { capabilities: { ...(mode === "pull" ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
-	if (method === "textDocument/diagnostic" && mode === "pull") { const text = docs.get(params.textDocument.uri) ?? ""; send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items: text.includes("broken") ? [{range:{start:{line:0,character:0},end:{line:0,character:6}},severity:1,source:"fake",message:"pull broken"}] : []}}); return; }
+	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
+	if (method === "textDocument/diagnostic" && pull) { const text = docs.get(params.textDocument.uri) ?? ""; send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items: text.includes("broken") ? [{range:{start:{line:0,character:0},end:{line:0,character:6}},severity:1,source:"fake",message:"pull broken"}] : []}}); return; }
 	if (method === "textDocument/diagnostic") { send({ id, error: { code: -32601, message: "Unhandled method textDocument/diagnostic" } }); return; }
 	const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } };
 	if (method === "textDocument/formatting") { send({ id, result: [{ range, newText: "fixed!" }] }); return; }

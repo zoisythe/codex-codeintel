@@ -75,7 +75,12 @@ const web = {
 	css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".less"] },
 	json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] },
 };
-const builtins: Record<string, unknown> = { ...BUILTIN_SERVERS, ...web };
+const builtins: Record<string, unknown> = {
+	...BUILTIN_SERVERS,
+	...web,
+	tsc: { command: ["tsc", "--lsp", "--stdio"], extensions: BUILTIN_SERVERS["typescript"]?.extensions },
+	tsgo: { command: ["tsgo", "--lsp", "--stdio"], extensions: BUILTIN_SERVERS["typescript"]?.extensions },
+};
 function server(value: unknown, language: string, source: string): Server | false {
 	if (value === false) return false;
 	const builtin = typeof value === "string" ? builtins[value] : undefined;

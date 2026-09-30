@@ -43,21 +43,25 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	result = await check(); assert(result.isError, JSON.stringify(result)); assert.match(result.content[0].text, /launch\/download|initialization failed/);
 });
 
-test("real npx TypeScript recipe includes tsserver and works offline after preparation", { timeout: 150000, skip: process.env.CODEX_LSP_REAL_TOOLS !== "1" || process.platform !== "linux" }, async t => {
+for (const [server, recipe] of [["typescript", "typescript@5.9.3"], ["tsc", "typescript@7.0.2"]]) {
+test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env.CODEX_LSP_REAL_TOOLS !== "1" || process.platform !== "linux" }, async t => {
 	const npx = spawnSync("which", ["npx"], { encoding: "utf8" }).stdout.trim(); assert(npx);
 	const dir = await mkdtemp(join(tmpdir(), "codex-npx-")), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(npx, join(bin, "npx")); await symlink(process.execPath, join(bin, "node")); await symlink("/bin/sh", join(bin, "sh"));
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { typescript: server } }));
 	await writeFile(join(root, "main.ts"), 'export const value: number = "wrong";\n');
 	await writeFile(join(root, "tsconfig.json"), '{"compilerOptions":{"strict":true,"noEmit":true}}');
 	const env = { PATH: bin, npm_config_cache: join(dir, "npm-cache"), CODEX_LSP_CACHE: join(dir, "metadata") };
 	let client = bundleClient(root, home, env);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	const check = () => client.call("check_diagnostics", { path: "main.ts", source: "lsp" });
+	const status = (await client.call("lsp_status", { path: "main.ts" })).structuredContent.tools[0];
+	assert.equal(status.tool.source, "temporary"); assert(status.tool.command.includes(recipe));
 	let result = await check(); assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0, JSON.stringify(result));
 	await client.close(); client = bundleClient(root, home, { ...env, npm_config_offline: "true" });
 	result = await check(); assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0, JSON.stringify(result));
 	assert.equal(await readFile(join(root, "package.json"), "utf8").catch(() => ""), "");
 	assert.equal(await readFile(join(root, "package-lock.json"), "utf8").catch(() => ""), "");
 });
+}

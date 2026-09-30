@@ -20,6 +20,8 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	const check = (extra = {}) => client.call("check_diagnostics", { path: "main.fake", source: "lsp", ...extra });
 	await configure("pull");
 	assert.equal((await check()).structuredContent.errors, 1);
+	await configure("strict-initialize");
+	assert.equal((await check()).structuredContent.errors, 1, "native servers require initialized object params");
 	assert.match((await check({ source: "both" })).content[0].text, /pull-unchanged/);
 	await writeFile(join(root, "main.fake"), "fixed\n"); assert.equal((await check()).structuredContent.errors, 0);
 	await configure("rename-only");

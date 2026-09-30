@@ -61,6 +61,11 @@ class Client extends LspClient {
 		return Boolean(this.capabilities[names[operation] ?? operation]);
 	}
 	private pulls = new Map<string, { resultId: string; items: Diagnostic[] }>();
+	protected override async sendNotification(method: string, params?: unknown): Promise<void> {
+		// InitializedParams is an object. Native TypeScript rejects an omitted params
+		// field and otherwise leaves subsequent language requests uninitialized.
+		await super.sendNotification(method, method === "initialized" ? (params ?? {}) : params);
+	}
 	protected override async sendRequest<T>(method: string, params?: unknown): Promise<T> {
 		if (method === "initialize" && record(params) && record(params["capabilities"])) {
 			const capabilities = params["capabilities"];

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Support native TypeScript 7 through the `tsc` built-in (`tsc --lsp --stdio`) with local-first resolution and a pinned temporary recipe; add a local-only `tsgo` preview built-in while preserving the legacy TypeScript default.
+- Send object parameters with the LSP `initialized` notification so native TypeScript completes initialization; cover real MCP diagnostics, dependency updates, navigation, rename and formatting.
+
 ## 0.5.0
 
 - Breaking: schemaVersion 1, fixed global/project paths, global-only workspace trust and language-keyed server replacement; removed environment overrides and priority competition.
@@ -24,8 +29,6 @@ See [migration](docs/migration-0.5.md) and [validation](docs/validation-0.5.md).
 - Report LSP/lint channels and partial write outcomes separately; preserve explicit-only formatting/rename and bounded local error logs.
 - Extend dependency-free delivery subprocess tests to all three CI platforms. See validation.md for actual run evidence; workflow configuration is not a remote pass.
 
-
-## Unreleased
 
 ## 0.3.0
 

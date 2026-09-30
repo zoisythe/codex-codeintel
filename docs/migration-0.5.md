@@ -41,6 +41,8 @@ For example, migrate an old `lsp.basedpyright` override to `"lsp": { "python": "
 
 Defaults include Python/ty, TypeScript, C/C++/clangd (`cpp`), Rust (`rust`), Bash, YAML, HTML/CSS/JSON, Svelte, Astro, Go, Lua and Java. Other languages can select a registered built-in or a custom object. `.py` and `.pyi` use Ruff without requiring a Ruff configuration file. `lint.python=off` disables lint, not explicit formatting.
 
+Native TypeScript 7 is available with `"lsp": { "typescript": "tsc" }`, launching `tsc --lsp --stdio`. The default `"typescript"` server still launches the legacy `typescript-language-server`. Preview packages exposing `tsgo` can use `"lsp": { "typescript": "tsgo" }`. These choices cover the same TypeScript/JavaScript extensions. Local `tsc` must be version 7 or newer; incompatible local tools fail without fallback. If `tsc` is missing, trusted active calls may use npx with `typescript@7.0.2`. The `tsgo` preview built-in has no temporary installer.
+
 Explicit commands execute exactly the configured entry and arguments; a failure never downloads a replacement. Built-ins resolve the nearest `.venv`/`node_modules/.bin` up to the workspace root, then PATH, then a registered ecosystem launcher. Temporary execution is restricted to trusted active MCP calls and does not edit dependencies or lockfiles. clangd and rust-analyzer have no automatic installer.
 
 ## MCP

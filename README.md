@@ -55,6 +55,8 @@ Precedence is built-ins < global < project. LSP language entries replace whole e
 
 Explicit commands always win and never fall back. Built-ins search nearest project `.venv` or `node_modules/.bin`, stopping at the workspace root, then PATH. Only missing tools may use registered temporary recipes: Python tries uvx, uv tool run, then pipx run; npm tools use npx. TypeScript's temporary recipe includes TypeScript 5.9.3, which provides tsserver.js. Launchers cannot replace an incompatible or broken local tool. A recipe indicates an available attempt; successful LSP initialization is required for running status.
 
+For native TypeScript 7, set `"lsp": { "typescript": "tsc" }`. This selects `tsc --lsp --stdio`; a missing local executable may use the registered `typescript@7.0.2` npx recipe. A locally selected TypeScript 6 or older `tsc` fails without downloading a replacement. The legacy `"typescript"` built-in remains the default (`typescript-language-server --stdio`). Preview installations can select `"tsgo"` for `tsgo --lsp --stdio`, which requires a project/PATH executable and has no temporary recipe. Replace the `typescript` language entry rather than adding another language with overlapping extensions.
+
 Trusted active MCP calls can download registered tools into tool caches without modifying project dependencies, lockfiles or global installations. Hooks never download. Ruff prepared through uv/uvx is recorded as an executable path for later direct Hook execution; if the cache disappears, Hook reports it unavailable. clangd and rust-analyzer have no automatic toolchain installation path.
 
 Python `.py`/`.pyi` defaults to `ty server` for type diagnostics/navigation and Ruff CLI for lint/format. Ruff uses its own defaults without a configuration file. Missing Ruff disables only Ruff capabilities. C/C++ use clangd diagnostics/navigation/formatting; Rust uses rust-analyzer and its rustfmt formatting integration. clangd can operate with its fallback compile command when no compilation database is present; this is not equivalent to a missing server.
@@ -95,6 +97,8 @@ npm run typecheck
 CODEX_LSP_REAL_TOOLS=1 npm run test:real
 node scripts/benchmark.mjs
 ```
+
+`npm test` includes real native TypeScript 7 MCP acceptance; use `npm run test:typescript` to run that acceptance alone. See [native TypeScript validation](docs/validation-typescript-native.md) for the verified scope.
 
 The bootstrap rebuilds the pinned upstream source. Tests exercise the delivered bundle in MCP/Hook subprocesses, including installation copies without development dependencies. Real-tool tests are opt-in and need working local Python, Clang and Rust tooling. [0.5 validation](docs/validation-0.5.md) distinguishes actual Linux evidence from historical [0.4](docs/validation.md) and [Windows](docs/windows-validation.md) results. No 0.5 Windows/macOS result is claimed by the CI workflow alone.
 

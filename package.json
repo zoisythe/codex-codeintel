@@ -41,7 +41,7 @@
 		"prebuild": "node scripts/bootstrap-submodule.mjs",
 		"build": "node scripts/build.mjs",
 		"pretest": "node scripts/bootstrap-submodule.mjs",
-		"test": "node ./node_modules/vitest/vitest.mjs --run && npm run test:install",
+		"test": "node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript",
 		"test:watch": "node ./node_modules/vitest/vitest.mjs",
 		"pretypecheck": "node scripts/bootstrap-submodule.mjs",
 		"typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
@@ -50,6 +50,7 @@
 		"precheck": "node scripts/bootstrap-submodule.mjs",
 		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
 		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs",
+		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
 		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs"
 	},
 	"devDependencies": {
