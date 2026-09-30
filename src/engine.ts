@@ -1,13 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { relative } from "node:path";
-import { configuration } from "./config.js";
+import { type Config, configuration } from "./config.js";
 import { hash, type Inventory, inventory, workspacePath } from "./files.js";
 import { analysisIdentity } from "./identity.js";
 import { Languages } from "./language.js";
 import { logEvent } from "./log.js";
 import { Metadata } from "./metadata.js";
-import { type FileResult, message, number, render, text } from "./results.js";
-import { formatWithRunner, lint } from "./runners.js";
+import { timings } from "./metrics.js";
+import { type FileResult, mergeFindings, message, record, render, text, WriteFailure } from "./results.js";
+import { formatWithRunner, lint, preflightRunner } from "./runners.js";
+import { codeLanguage, languageFor, withToolResolution } from "./tool-resolution.js";
 
 type Checker = (path: string, signal: AbortSignal, lspOnly: boolean) => Promise<FileResult>;
 interface Cached {
@@ -20,7 +23,6 @@ interface Session {
 	turn: string;
 	touched: Set<string>;
 	current: Set<string>;
-	shown: Map<string, string>;
 }
 export class Engine {
 	private readonly identities = new Map<string, string>();
@@ -31,6 +33,21 @@ export class Engine {
 	private previousSnapshot: Inventory | undefined;
 	private queue: Promise<unknown> = Promise.resolve();
 	private readonly checker: Checker;
+	private requestConfig: Config | undefined;
+	private source = "both";
+	private lastResults: FileResult[] = [];
+	private generation = 0;
+	private pages = new Map<
+		string,
+		{
+			version: string;
+			results: FileResult[];
+			index: number;
+			args: Record<string, unknown>;
+			identity: string;
+			generation: number;
+		}
+	>();
 	constructor(
 		readonly root: string,
 		checker?: Checker,
@@ -38,10 +55,18 @@ export class Engine {
 		this.checker =
 			checker ??
 			(async (path, signal, lspOnly) => {
-				this.language ??= new Languages(root, await configuration(root));
-				const lsp = await this.language.check(path, signal);
+				this.language ??= new Languages(root, this.requestConfig ?? (await configuration(root)));
+				const lsp: FileResult =
+					this.source === "lint"
+						? { path, state: "skipped", findings: [] }
+						: await this.language.check(path, signal);
 				if (lspOnly) return lsp;
-				const runner = await lint(root, path, signal);
+				if (lsp.state === "skipped" || lsp.state === "failed") {
+					if (this.source !== "lint") return lsp;
+				}
+				const runner = await lint(root, path, signal, this.requestConfig, true);
+				if (this.source === "lint")
+					return runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" };
 				if (!runner)
 					return {
 						...lsp,
@@ -52,7 +77,7 @@ export class Engine {
 					path,
 					state: lsp.state === "complete" ? (runner.state === "skipped" ? "complete" : runner.state) : lsp.state,
 					channels: { lsp: lsp.state, lint: runner.state },
-					findings: [...lsp.findings, ...runner.findings],
+					findings: mergeFindings([...lsp.findings, ...runner.findings]),
 					...(lsp.note || runner.note ? { note: [lsp.note, runner.note].filter(Boolean).join("; ") } : {}),
 				};
 			});
@@ -64,7 +89,6 @@ export class Engine {
 				turn: turn ?? "",
 				touched: new Set(),
 				current: new Set(),
-				shown: new Map(),
 			};
 			this.sessions.set(id, session);
 		}
@@ -89,8 +113,9 @@ export class Engine {
 		if (previous?.version !== snapshot.version && this.language) {
 			const configChanged = [...new Set([...snapshot.files.keys(), ...(previous?.files.keys() ?? [])])].some(
 				(path) =>
-					/(?:config|lock|manifest|Cargo\.toml|package\.json|go\.mod|pyproject)/i.test(path) &&
-					previous?.files.get(path) !== snapshot.files.get(path),
+					/(?:config|lock|manifest|Cargo\.toml|package\.json|go\.mod|pyproject|ty\.toml|ruff\.toml|\.clangd|compile_commands\.json|compile_flags\.txt|\.clang-format|rust-toolchain|rustfmt)/i.test(
+						path,
+					) && previous?.files.get(path) !== snapshot.files.get(path),
 			);
 			if (configChanged) {
 				await this.language.close();
@@ -107,10 +132,11 @@ export class Engine {
 		lspOnly = false,
 		signal: AbortSignal = new AbortController().signal,
 		offset = 0,
+		baseline?: Inventory,
 	): Promise<string> {
-		const config = await configuration(this.root);
-		const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
-		snapshot.version = hash(snapshot.version + config.version);
+		const config = this.requestConfig ?? (await configuration(this.root));
+		const snapshot = baseline ?? (await inventory(this.root, 10000, signal, config.exclude, this.root, true));
+		if (!baseline) snapshot.version = hash(snapshot.version + config.version);
 		await this.synchronize(snapshot);
 		const session = this.session(id, turn);
 		const results: FileResult[] = [];
@@ -134,7 +160,7 @@ export class Engine {
 				results.push({ path, state: "pending", findings: [], note: "Scan time budget reached" });
 				continue;
 			}
-			const key = `${lspOnly ? "lsp:" : ""}${path}`;
+			const key = `${lspOnly ? "lsp:" : this.source === "lint" ? "lint:" : ""}${path}`;
 			const cached = this.cache.get(key);
 			const identity = await analysisIdentity(this.root, [path], config, signal);
 			if (this.identities.has(path) && this.identities.get(path) !== identity) {
@@ -167,6 +193,7 @@ export class Engine {
 				result.state = "stale";
 				result.note = "File changed during diagnostics; retry";
 			}
+			if (JSON.stringify(this.cache.get(key)?.result) !== JSON.stringify(result)) this.generation++;
 			this.cache.set(key, { version: snapshot.version, identity, content, result });
 			results.push(result);
 		}
@@ -185,70 +212,20 @@ export class Engine {
 				findings: [],
 				note: "File/snapshot budget exceeded; narrow paths",
 			});
+		this.lastResults = results;
 		return (
 			render(results, 50, 8192, offset) +
 			(!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "")
 		);
 	}
-	private async entries(mode: string, id: string, signal = new AbortController().signal): Promise<FileResult[]> {
-		const config = await configuration(this.root);
-		const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
-		snapshot.version = hash(snapshot.version + config.version);
-		const session = this.session(id);
-		const files = mode === "delta" ? session.current : session.touched;
-		const results: FileResult[] = [];
-		for (const path of [...files].sort()) {
-			signal.throwIfAborted();
-			const entry = this.cache.get(path) ?? this.cache.get(`lsp:${path}`);
-			if (!entry) {
-				results.push({ path, state: "pending", findings: [] });
-				continue;
-			}
-			let content: string | undefined;
-			try {
-				content = hash(await readFile(await workspacePath(this.root, path), "utf8"));
-			} catch {
-				// Missing or inaccessible explicit paths cannot retain a fresh result.
-			}
-			results.push(
-				entry.version === snapshot.version &&
-					entry.content === content &&
-					snapshot.complete &&
-					entry.identity === (await analysisIdentity(this.root, [path], config, signal))
-					? entry.result
-					: { ...entry.result, state: "stale", note: "Workspace changed; run active diagnostics" },
-			);
-		}
-		return results;
-	}
-	async cached(mode: string, id: string, offset = 0): Promise<string> {
-		return render(await this.entries(mode, id), 50, 8192, offset);
-	}
-	async feedback(id: string): Promise<string> {
-		const session = this.session(id);
-		const changed: FileResult[] = [];
-		for (const result of await this.entries("all", id)) {
-			if (result.state === "complete" && result.findings.length === 0) {
-				session.shown.delete(result.path);
-				continue;
-			}
-			if (result.state === "skipped" && result.note?.startsWith("No LSP server configured")) continue;
-			const fingerprint = hash(JSON.stringify(result));
-			if (session.shown.get(result.path) === fingerprint) continue;
-			changed.push(result);
-			session.shown.set(result.path, fingerprint);
-		}
-		return changed.length
-			? `session=${id}\n${render(changed, 10, 1800)}\nDetails: check_diagnostics mode=all workspace=${this.root}`
-			: "";
-	}
+
 	dispatch(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-		const writes = operation === "lsp_format" || (operation === "lsp_navigation" && args["operation"] === "rename");
+		const writes = operation === "lsp_format" || operation === "lsp_rename";
 		let started = false;
 		const task = this.queue.then(() => {
 			started = true;
 			signal.throwIfAborted();
-			return this.execute(operation, args, signal);
+			return withToolResolution(() => this.execute(operation, args, signal));
 		});
 		this.queue = task.catch(() => undefined);
 		return new Promise((resolve, reject) => {
@@ -291,30 +268,6 @@ export class Engine {
 		}
 		return { paths: [...paths].sort().slice(0, 10000), complete };
 	}
-	private revision(args: Record<string, unknown>, version: string): void {
-		if ((number(args["start"], 0) || number(args["offset"], 0)) && args["revision"] !== version)
-			throw new Error("Invalid or missing revision; restart from start=0 offset=0");
-	}
-	private async fingerprints(paths: string[], signal: AbortSignal): Promise<string[]> {
-		const contents: string[] = [];
-		for (const path of paths) {
-			signal.throwIfAborted();
-			try {
-				const absolute = await workspacePath(this.root, path);
-				const info = await stat(absolute);
-				contents.push(
-					path,
-					info.size > 1024 * 1024
-						? `oversized:${info.size}:${info.mtimeMs}`
-						: hash(await readFile(absolute, { encoding: "utf8", signal })),
-				);
-			} catch (error) {
-				signal.throwIfAborted();
-				contents.push(path, `unavailable:${message(error)}`);
-			}
-		}
-		return contents;
-	}
 
 	private async execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
 		if (operation === "release") {
@@ -326,6 +279,7 @@ export class Engine {
 		if (this.configVersion !== config.version || args["refresh"] === true) {
 			await this.close();
 			this.cache.clear();
+			this.pages.clear();
 			this.configVersion = config.version;
 		}
 		const store = new Metadata(this.root);
@@ -342,35 +296,34 @@ export class Engine {
 			session.touched = new Set(state.touched);
 			session.current = new Set(state.current);
 		}
-		const mode = text(args["mode"], "delta");
-		if (operation === "check_diagnostics" && mode === "status")
-			return `workspace=${this.root}\nsessions=${[...this.sessions.keys()].join(",") || "none"}\ncache=${this.cache.size}`;
-		const id = this.id(args["session"]);
-		if (operation === "check_diagnostics" && (mode === "all" || mode === "delta")) {
-			let entries = await this.entries(mode, id, signal);
-			if (args["path"] || args["paths"]) {
-				const scope = await this.paths(args, signal);
-				entries = entries.filter((entry) => scope.paths.includes(entry.path));
-			}
-			const revision = hash(
-				JSON.stringify([
-					operation,
-					mode,
-					args["path"],
-					args["paths"],
-					config.version,
-					(await inventory(this.root, 10000, signal, config.exclude, this.root, true)).version,
-					await this.fingerprints(
-						entries.map((entry) => entry.path),
-						signal,
-					),
-					entries,
-				]),
-			);
-			this.revision(args, revision);
-			return `${render(entries, 50, 8192, number(args["offset"], 0))}\nrevision=${revision}`;
+		this.requestConfig = config;
+		if (operation === "lsp_status") {
+			this.language ??= new Languages(this.root, config);
+			const targets = args["path"]
+				? [text(args["path"])]
+				: Object.values(config.servers)
+						.filter((server) => !!server)
+						.map((server) => (server ? `status${server.extensions[0]}` : ""));
+			return JSON.stringify({
+				workspace: this.root,
+				trusted: config.trusted,
+				configuration: config,
+				tools: await Promise.all(
+					targets.map((path) => this.language?.status(path).catch((error) => ({ path, reason: message(error) }))),
+				),
+				timings: timings(),
+				cache: this.cache.size,
+				sessions: [...this.sessions.keys()],
+			});
 		}
-		if (operation === "lsp_navigation") {
+		const id =
+			args["scope"] === "paths" || args["scope"] === undefined
+				? text(args["session"], "manual")
+				: this.id(args["session"]);
+		if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
+		if (operation === "lsp_rename") args = { ...args, operation: "rename" };
+
+		if (operation === "lsp_navigation" || operation === "lsp_rename") {
 			const path = relative(this.root, await workspacePath(this.root, text(args["path"])));
 			const identity = await analysisIdentity(this.root, [path], config, signal);
 			if (this.identities.has(path) && this.identities.get(path) !== identity) {
@@ -381,7 +334,7 @@ export class Engine {
 			const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
 			snapshot.version = hash(snapshot.version + config.version);
 			await this.synchronize(snapshot);
-			this.language ??= new Languages(this.root, await configuration(this.root));
+			this.language ??= new Languages(this.root, config);
 			const before = args["operation"] === "rename" ? await inventory(this.root, 10000, signal) : undefined;
 			let output: string;
 			try {
@@ -390,9 +343,17 @@ export class Engine {
 				if (before) this.cache.clear();
 			}
 			if (before) {
+				let modifiedPaths: string[] = [];
+				try {
+					const result: unknown = JSON.parse(output);
+					if (record(result) && Array.isArray(result["modifiedPaths"]))
+						modifiedPaths = result["modifiedPaths"].filter((path): path is string => typeof path === "string");
+				} catch {
+					/* No rename edits. */
+				}
 				this.cache.clear();
 				const after = await inventory(this.root, 10000, signal).catch((error: unknown) => {
-					throw new Error(`${message(error)}; ${output}`);
+					throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
 				});
 				const changed = [...after.files]
 					.filter(([path, version]) => before.files.get(path) !== version)
@@ -406,7 +367,7 @@ export class Engine {
 						signal,
 					);
 				} catch (error) {
-					throw new Error(`${message(error)}; ${output}`);
+					throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
 				}
 			}
 			return output;
@@ -416,56 +377,256 @@ export class Engine {
 		if (operation === "lsp_format") {
 			if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
 			if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
-			this.language ??= new Languages(this.root, await configuration(this.root));
+			this.language ??= new Languages(this.root, config);
+			for (const path of paths) {
+				const runner = await preflightRunner(this.root, path, config, signal);
+				await this.language.preflight(path, signal, runner ? undefined : "format");
+			}
 			const lines: string[] = [];
+			const modifiedPaths: string[] = [];
 			try {
 				for (const path of paths) {
 					signal.throwIfAborted();
 					lines.push(
-						(await formatWithRunner(this.root, path, signal)) ?? (await this.language.format(path, signal)),
+						(await formatWithRunner(this.root, path, signal, config)) ??
+							(await this.language.format(path, signal)),
 					);
+					if (lines.at(-1)?.startsWith("Formatted:")) modifiedPaths.push(path);
 				}
 				await this.check(paths, id, "manual", false, signal);
 			} catch (error) {
-				throw new Error(`${message(error)}; completed writes: ${lines.join("; ") || "none"}`);
+				throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(lines)}`, modifiedPaths);
 			} finally {
 				this.cache.clear();
 			}
-			return lines.join("\n").slice(0, 8000) || "No files";
+			return JSON.stringify({ text: lines.join("\n").slice(0, 8000) || "No files", modifiedPaths, results: lines });
 		}
-		if (operation !== "lsp_diagnostics" && !(operation === "check_diagnostics" && mode === "full"))
-			throw new Error("Unknown tool or mode");
-		const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
-		const contents = await this.fingerprints(paths, signal);
-		const revision = hash(
-			JSON.stringify([
-				operation,
-				mode,
-				args["path"],
-				args["paths"],
-				contents,
-				snapshot.version,
-				await analysisIdentity(this.root, paths, config, signal),
-			]),
-		);
-		this.revision(args, revision);
-		const start = number(args["start"], 0);
-		const selected = paths.slice(start, start + 200);
-		await store.update(id, signal, (state) => {
-			state.touched.push(...selected);
-			state.current.push(...selected);
-		});
-		let output = await this.check(
-			selected,
-			id,
-			this.session(id).turn,
-			operation === "lsp_diagnostics",
-			signal,
-			number(args["offset"], 0),
-		);
-		if (start + 200 < paths.length || !scope.complete) output = output.replace(/^complete;/, "partial;");
-		return `${output}${start + 200 < paths.length ? `\npartial; next start=${start + 200}; remaining files=${paths.length - start - 200}` : ""}${!scope.complete ? "\npartial; scope inventory exceeded budget" : ""}\nrevision=${revision}`;
+		throw new Error("Unknown tool");
 	}
+
+	private async diagnostics(
+		args: Record<string, unknown>,
+		id: string,
+		signal: AbortSignal,
+		config: Config,
+		store: Metadata,
+	): Promise<string> {
+		for (const key of ["mode", "start", "offset", "revision"])
+			if (args[key] !== undefined)
+				throw new Error("Migration required: use scope/source/run/cursor; see docs/migration-0.5.md");
+		const scope = text(args["scope"], "paths");
+		const source = text(args["source"], "both");
+		const run = text(args["run"], "active");
+		if (
+			!["paths", "turn", "session"].includes(scope) ||
+			!["both", "lsp", "lint"].includes(source) ||
+			!["active", "cached"].includes(run)
+		)
+			throw new Error("Invalid scope/source/run");
+		this.source = source;
+		const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
+		snapshot.version = hash(snapshot.version + config.version);
+		const token = text(args["cursor"]);
+		let results: FileResult[];
+		let index = 0;
+		let identity: string;
+		if (token) {
+			const page = this.pages.get(token);
+			if (
+				!page ||
+				page.generation !== this.generation ||
+				page.version !== snapshot.version ||
+				hash(
+					JSON.stringify(
+						Object.entries(args)
+							.filter(([key]) => key !== "cursor" && key !== "workspace" && key !== "refresh")
+							.sort(),
+					),
+				) !==
+					hash(
+						JSON.stringify(
+							Object.entries(page.args)
+								.filter(([key]) => key !== "cursor" && key !== "workspace" && key !== "refresh")
+								.sort(),
+						),
+					)
+			)
+				throw new Error("Cursor invalid or stale; restart without cursor");
+			identity = await this.pageIdentity(
+				page.results.map((result) => result.path),
+				config,
+				snapshot,
+				signal,
+			);
+			if (identity !== page.identity) throw new Error("Cursor invalid: tool/configuration changed");
+			results = [...page.results];
+			index = page.index;
+			if (run === "active") {
+				const pending = results.slice(index, index + 50);
+				if (pending.some((result) => result.note === "Continue cursor for active analysis")) {
+					await this.check(
+						pending.map((result) => result.path),
+						id,
+						this.session(id).turn,
+						source === "lsp",
+						signal,
+						0,
+						snapshot,
+					);
+					results.splice(index, pending.length, ...this.lastResults);
+				}
+			}
+		} else {
+			let paths: string[];
+			if (scope === "paths") {
+				const values = Array.isArray(args["paths"]) ? args["paths"] : [text(args["path"], ".")];
+				const selected = new Set<string>();
+				for (const value of values) {
+					if (typeof value !== "string") throw new Error("paths requires strings");
+					const absolute = await workspacePath(this.root, value);
+					const path = relative(this.root, absolute);
+					if ((await stat(absolute)).isFile()) {
+						if (!languageFor(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
+						selected.add(path);
+					} else
+						for (const candidate of (snapshot.complete
+							? snapshot
+							: await inventory(this.root, 10000, signal, config.exclude, absolute)
+						).files.keys())
+							if ((!path || candidate.startsWith(`${path}/`)) && codeLanguage(config, candidate))
+								selected.add(candidate);
+				}
+				paths = [...selected].sort();
+			} else paths = [...(scope === "turn" ? this.session(id).current : this.session(id).touched)].sort();
+			identity = await this.pageIdentity(paths, config, snapshot, signal);
+			if (run === "cached") {
+				results = [];
+				for (const path of paths) {
+					const entry = this.cache.get((source === "lsp" ? "lsp:" : source === "lint" ? "lint:" : "") + path);
+					results.push(
+						!entry
+							? { path, state: "pending", findings: [] }
+							: entry.version === snapshot.version &&
+									entry.content === (await this.contentIdentity(path, snapshot, signal)) &&
+									snapshot.complete &&
+									entry.identity === (await analysisIdentity(this.root, [path], config, signal))
+								? entry.result
+								: { ...entry.result, state: "stale", note: "Run active diagnostics" },
+					);
+				}
+			} else {
+				await store.update(id, signal, (state) => {
+					state.touched.push(...paths);
+					state.current.push(...paths);
+				});
+				await this.check(paths.slice(0, 50), id, this.session(id).turn, source === "lsp", signal, 0, snapshot);
+				results = [
+					...this.lastResults,
+					...paths.slice(50).map((path) => ({
+						path,
+						state: "pending" as const,
+						findings: [],
+						note: "Continue cursor for active analysis",
+					})),
+				];
+			}
+		}
+		const selected: FileResult[] = [];
+		let size = 0;
+		for (const result of results.slice(index)) {
+			const bytes = JSON.stringify(result).length;
+			if (selected.length && (size + bytes > 24000 || selected.length >= 50)) break;
+			selected.push(result);
+			size += bytes;
+		}
+		let next: Record<string, unknown> | undefined;
+		if (index + selected.length < results.length) {
+			const cursor = randomUUID();
+			this.pages.set(cursor, {
+				version: snapshot.version,
+				results,
+				index: index + selected.length,
+				args,
+				identity,
+				generation: this.generation,
+			});
+			while (this.pages.size > 32) this.pages.delete(this.pages.keys().next().value ?? "");
+			next = { ...args, refresh: undefined, workspace: this.root, cursor };
+		}
+		const partial = !snapshot.complete || results.some((result) => result.state !== "complete");
+		return JSON.stringify({
+			text: (
+				(partial ? render(selected).replace(/^complete;/, "partial;") : render(selected)) +
+				(next ? "\nMore results: follow the structured next arguments." : "") +
+				(!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "")
+			).replace(/\n.*omitted; next offset=.*$/, ""),
+			scope,
+			source,
+			run,
+			partial,
+			errors: results.flatMap((result) => result.findings).filter((item) => item.severity === "error").length,
+			warnings: results.flatMap((result) => result.findings).filter((item) => item.severity === "warning").length,
+			results: selected,
+			unavailable: Object.fromEntries(
+				[
+					...new Set(
+						results
+							.filter((result) => result.state === "failed" || result.state === "skipped")
+							.map((result) => codeLanguage(config, result.path) ?? "unsupported"),
+					),
+				].map((language) => [
+					language,
+					[
+						...new Set(
+							results
+								.filter(
+									(result) =>
+										(codeLanguage(config, result.path) ?? "unsupported") === language &&
+										result.note &&
+										(result.state === "failed" || result.state === "skipped"),
+								)
+								.map((result) => result.note),
+						),
+					],
+				]),
+			),
+			...(next ? { next } : {}),
+			isError:
+				run === "active" &&
+				results.length > 0 &&
+				results.every(
+					(result) =>
+						(result.state === "failed" || result.state === "skipped") &&
+						result.channels?.lsp !== "complete" &&
+						result.channels?.lint !== "complete",
+				),
+		});
+	}
+
+	private async contentIdentity(path: string, snapshot: Inventory, signal: AbortSignal): Promise<string> {
+		const existing = snapshot.files.get(path);
+		if (existing) return existing;
+		try {
+			const absolute = await workspacePath(this.root, path);
+			const info = await stat(absolute);
+			if (info.size > 1024 * 1024) return "oversized";
+			return hash(await readFile(absolute, { encoding: "utf8", signal }));
+		} catch {
+			signal.throwIfAborted();
+			return "unavailable";
+		}
+	}
+	private async pageIdentity(
+		paths: string[],
+		config: Config,
+		snapshot: Inventory,
+		signal: AbortSignal,
+	): Promise<string> {
+		const contents: string[][] = [];
+		for (const path of paths) contents.push([path, await this.contentIdentity(path, snapshot, signal)]);
+		return hash(JSON.stringify([await analysisIdentity(this.root, paths, config, signal), contents]));
+	}
+
 	async dispose(): Promise<void> {
 		await this.close();
 		await this.queue;

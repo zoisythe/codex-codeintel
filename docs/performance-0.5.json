@@ -1,0 +1,161 @@
+{
+  "platform": "linux",
+  "node": "v26.10.0",
+  "iterations": 10,
+  "baselineRef": "94ba395",
+  "afterBundleSHA256": "b3149cf5878b1c318ab64dce19da5bdf6b779262768560f856b6584f4b1e616f",
+  "measurements": [
+    {
+      "count": 1000,
+      "revision": "before",
+      "run": "active",
+      "medianMs": 900.0574825000003,
+      "p95Ms": 926.7224759999999,
+      "scans": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ]
+    },
+    {
+      "count": 1000,
+      "revision": "before",
+      "run": "cached",
+      "medianMs": 591.2844329999998,
+      "p95Ms": 598.085982999999,
+      "scans": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "count": 1000,
+      "revision": "after",
+      "run": "active",
+      "medianMs": 828.6265209999983,
+      "p95Ms": 838.9750520000016,
+      "scans": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "count": 1000,
+      "revision": "after",
+      "run": "cached",
+      "medianMs": 302.96207700000014,
+      "p95Ms": 304.7586740000006,
+      "scans": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "count": 10000,
+      "revision": "before",
+      "run": "active",
+      "medianMs": 8814.9453865,
+      "p95Ms": 9163.967822000006,
+      "scans": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ]
+    },
+    {
+      "count": 10000,
+      "revision": "before",
+      "run": "cached",
+      "medianMs": 5865.758235999994,
+      "p95Ms": 6133.324127999993,
+      "scans": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "count": 10000,
+      "revision": "after",
+      "run": "active",
+      "medianMs": 6048.116828999991,
+      "p95Ms": 6169.350938999996,
+      "scans": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "count": 10000,
+      "revision": "after",
+      "run": "cached",
+      "medianMs": 2925.994080500037,
+      "p95Ms": 2948.2359900000156,
+      "scans": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

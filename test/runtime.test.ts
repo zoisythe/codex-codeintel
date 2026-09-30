@@ -21,8 +21,9 @@ describe("workspace diagnostics", () => {
 	it("keeps the tool schema fixed and small", () => {
 		expect(TOOLS.map((tool) => tool.name)).toEqual([
 			"check_diagnostics",
-			"lsp_diagnostics",
+			"lsp_status",
 			"lsp_navigation",
+			"lsp_rename",
 			"lsp_format",
 		]);
 	});
@@ -37,27 +38,46 @@ describe("workspace diagnostics", () => {
 				findings: [{ path, line: 1, column: 1, severity: "error", source: "fake", message: "broken" }],
 			};
 		});
-		await engine.check(["a.ts"], "s", "t");
-		await engine.check(["a.ts"], "s", "t");
+		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
+		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
 		expect(checks).toBe(1);
 		await writeFile(join(root, "dependency.ts"), "changed");
-		expect((await engine.cached("all", "s")).includes("stale")).toBe(true);
-		await engine.check(["a.ts"], "s", "t");
+		expect(
+			(
+				await engine.dispatch(
+					"check_diagnostics",
+					{ scope: "session", run: "cached", session: "s" },
+					new AbortController().signal,
+				)
+			).includes("stale"),
+		).toBe(true);
+		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
 		expect(checks).toBe(2);
 		await engine.close();
 	});
-	it("deduplicates delivery without deleting findings or mixing sessions", async () => {
+	it("keeps cached findings isolated between sessions", async () => {
 		const root = await fixture();
 		const engine = new Engine(root, async (path) => ({
 			path,
 			state: "complete",
 			findings: [{ path, line: 1, column: 1, severity: "warning", source: "fake", message: "warning" }],
 		}));
-		await engine.check(["a.ts"], "one", "t");
-		expect(await engine.feedback("one")).toContain("warning");
-		expect(await engine.feedback("one")).toBe("");
-		expect(await engine.cached("all", "one")).toContain("warning");
-		expect(await engine.cached("all", "two")).not.toContain("warning");
+		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "one" }, new AbortController().signal);
+
+		expect(
+			await engine.dispatch(
+				"check_diagnostics",
+				{ scope: "session", run: "cached", session: "one" },
+				new AbortController().signal,
+			),
+		).toContain("warning");
+		expect(
+			await engine.dispatch(
+				"check_diagnostics",
+				{ scope: "session", run: "cached", session: "two" },
+				new AbortController().signal,
+			),
+		).toContain('"results":[]');
 		await engine.close();
 	});
 	it("serializes concurrent checks and keeps status compact", async () => {
@@ -74,19 +94,17 @@ describe("workspace diagnostics", () => {
 		await Promise.all([
 			engine.dispatch(
 				"check_diagnostics",
-				{ mode: "full", path: "a.ts", session: "s" },
+				{ scope: "paths", path: "a.ts", session: "s" },
 				new AbortController().signal,
 			),
 			engine.dispatch(
 				"check_diagnostics",
-				{ mode: "full", path: "a.ts", session: "s" },
+				{ scope: "paths", path: "a.ts", session: "s" },
 				new AbortController().signal,
 			),
 		]);
 		expect(max).toBe(1);
-		expect(await engine.dispatch("check_diagnostics", { mode: "status" }, new AbortController().signal)).toContain(
-			"workspace=",
-		);
+		expect(await engine.dispatch("lsp_status", {}, new AbortController().signal)).toContain("workspace");
 		await engine.close();
 	});
 	it("does not call an incomplete diagnostic result clean", async () => {
@@ -97,7 +115,9 @@ describe("workspace diagnostics", () => {
 			findings: [],
 			note: "server has not published",
 		}));
-		expect(await engine.check(["a.ts"], "s", "t")).toContain("pending");
+		expect(
+			await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal),
+		).toContain("pending");
 		await engine.close();
 	});
 });

@@ -1,22 +1,26 @@
 ---
 name: lsp
-description: Use the codex-lsp plugin for scoped diagnostics, symbol navigation, rename, and explicit formatting. Consult when selecting or calling its MCP tools, especially after lint-only Hook feedback.
+description: Use the codex-lsp plugin for scoped diagnostics, status, symbol navigation, rename, and explicit formatting. Consult when selecting its MCP tools, especially after lint-only Hook feedback.
 ---
 
 # Codex LSP tools
 
 | Tool | Use |
 | --- | --- |
-| `check_diagnostics` | `full` actively checks LSP and lint; `all` reads session-touched results; `delta` reads the current turn; `status` reports runtime state. |
-| `lsp_diagnostics` | Actively check files or directories with LSP only. |
-| `lsp_navigation` | `definition`, `references`, `symbols`, `prepare_rename`, or `rename`. |
-| `lsp_format` | Explicitly format scoped files using a project formatter or LSP. |
+| `check_diagnostics` | `scope=paths/turn/session`, `source=lsp/lint/both`, `run=active/cached`. Defaults: paths, both, active; no path means workspace. |
+| `lsp_status` | Explain effective configuration, trust, selected commands, launchability and running state. Optional `path`, `refresh`; never starts LSP. |
+| `lsp_navigation` | Read-only definition, references, symbols, prepare_rename, hover, typeDefinition, implementation, signatureHelp. |
+| `lsp_rename` | Rename a symbol across files; `path`, `newName`, and 1-based position. |
+| `lsp_format` | Format explicitly scoped paths with Ruff for Python or project formatter/LSP for other languages. |
 
-- Set `workspace` to the absolute user repository path, never the plugin directory. Prefer narrow `path` or `paths`; relative paths resolve inside that workspace. Navigation uses 1-based `line` and `column` and requires `path`.
-- Hooks run independent lint, not LSP. Hook-only files appear pending in `all`/`delta`; use `full` or `lsp_diagnostics` for active checks. Results belong to the current MCP process. Specify `session` when multiple sessions share the workspace; use the ID in Hook feedback.
-- Scans check at most 200 files per request, with a 10,000-file inventory and 1 MiB per file. Explicit files bypass exclusions. An incomplete workspace dependency inventory prevents cache reuse even if a smaller scope finishes.
-- Follow returned `start`/`offset` continuations with the same tool, mode, scope, and `revision`. Every nonzero continuation requires that revision; if rejected, restart from zero.
-- Use `refresh: true` after external configuration or tool-installation changes. It bypasses cached results and rebuilds LSP clients; only `lsp_diagnostics` and `check_diagnostics mode=full` accept it.
-- Run rename/format only when requested or already authorized, and keep write calls sequential. Prepare rename when the symbol range is uncertain. On failure or cancellation, inspect reported modified paths before deciding what to do next; never automatically replay writes.
+Use the absolute user repository as `workspace`, never the plugin directory. Prefer narrow `path` or `paths`. Positions use 1-based `line` and `column`; symbols accepts an optional workspace `query`.
 
-`complete` describes the requested scope and executed channels, not a passing build or test suite. Report LSP and lint states separately; pending, stale, skipped, or failed checks do not establish a clean project. Missing tools require an explicit user-directed setup task, not automatic installation.
+Hooks run independent lint, never LSP or downloads. Hook-only touched files remain pending in cached requests. Use active checks for fresh LSP results; turn/session scopes require `session` when multiple sessions share a workspace. Results belong to this MCP process.
+
+Read both text and structured content. Follow the complete `next` arguments, including the opaque `cursor`, until no continuation remains. Content, configuration or result changes invalidate cursors; restart without cursor. Limits are 10,000 inventoried files and 1 MiB per file; active pages contain at most 50 files. An incomplete dependency inventory prevents fresh cache reuse.
+
+Python defaults to `ty server` plus Ruff CLI. Commands resolve nearest project environment, then PATH; explicit commands never fall back. Trusted active MCP calls may prepare registered tools in a tool cache. Hooks use only local or already prepared Ruff. A launch recipe means an attempt is possible, not that initialization succeeded. C/C++ and Rust require working local clangd/rust-analyzer toolchains. Use status to explain failures; `refresh: true` clears clients and failure state. External dependency changes require refresh.
+
+Run rename/format when requested or already authorized and keep writes sequential. Prepare rename if its range is uncertain. If a write fails or is cancelled, inspect the reported modified paths before continuing; do not replay automatically or assume rollback.
+
+`complete` describes the scope and channels executed, not a passing build. Report pending, stale, skipped, failed and unsupported capabilities explicitly. Ruff unavailability does not remove Python type/navigation support. Version 0.5 removed `lsp_diagnostics`, `mode`, `start`, `offset` and `revision`; do not send them.

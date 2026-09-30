@@ -1,15 +1,18 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { extname, relative, resolve } from "node:path";
+import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { LspClient } from "../packages/lsp-tools-mcp/dist/lsp/client.js";
-import { withLspClient } from "../packages/lsp-tools-mcp/dist/lsp/client-wrapper.js";
 import { getLanguageId } from "../packages/lsp-tools-mcp/dist/lsp/language-mappings.js";
 import { LspManager } from "../packages/lsp-tools-mcp/dist/lsp/manager.js";
 import type { Diagnostic, TextEdit, WorkspaceEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
-import { type Config, withConfiguration } from "./config.js";
-import { applyTextChanges, inside, inventory, workspacePath } from "./files.js";
+import { findWorkspaceRoot } from "../packages/lsp-tools-mcp/dist/lsp/workspace-root.js";
+import type { Config } from "./config.js";
+import { applyTextChanges, hash, inside, inventory, workspacePath } from "./files.js";
 import { logEvent } from "./log.js";
-import { type FileResult, message, number, record, text } from "./results.js";
+import { measured } from "./metrics.js";
+import { type FileResult, message, number, record, text, WriteFailure } from "./results.js";
+import { select } from "./runners.js";
+import { resolveServer } from "./tool-resolution.js";
 
 function diagnosticUriKey(uri: string): string {
 	try {
@@ -38,7 +41,74 @@ class Client extends LspClient {
 		this.stopTask = super.stop().finally(() => clearTimeout(timer));
 		return this.stopTask;
 	}
-	private published = new Map<string, { version?: number; items: Diagnostic[] }>();
+	private published = new Map<string, { version?: number; items: Diagnostic[]; time: number }>();
+	private capabilities: Record<string, unknown> = {};
+	private progress = new Set<string>();
+	private progressAt = 0;
+	supports(operation: string): boolean {
+		if (operation === "prepare_rename") {
+			const provider = this.capabilities["renameProvider"];
+			return record(provider) && provider["prepareProvider"] === true;
+		}
+		const names: Record<string, string> = {
+			definition: "definitionProvider",
+			references: "referencesProvider",
+			symbols: "documentSymbolProvider",
+			prepare_rename: "renameProvider",
+			rename: "renameProvider",
+			format: "documentFormattingProvider",
+		};
+		return Boolean(this.capabilities[names[operation] ?? operation]);
+	}
+	private pulls = new Map<string, { resultId: string; items: Diagnostic[] }>();
+	protected override async sendRequest<T>(method: string, params?: unknown): Promise<T> {
+		if (method === "initialize" && record(params) && record(params["capabilities"])) {
+			const capabilities = params["capabilities"];
+			capabilities["window"] = { workDoneProgress: true };
+			if (record(capabilities["textDocument"])) {
+				capabilities["textDocument"]["publishDiagnostics"] = { versionSupport: true };
+				capabilities["textDocument"]["diagnostic"] = { dynamicRegistration: false };
+			}
+		}
+		let result: T;
+		if (method === "initialize" && this.connection) {
+			let timer: NodeJS.Timeout | undefined;
+			try {
+				result = await Promise.race([
+					this.connection.sendRequest<T>(method, params),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(
+							() =>
+								reject(
+									new Error(`LSP initialization/download timeout: ${this.stderrBuffer.slice(-5).join("\n")}`),
+								),
+							35000,
+						);
+					}),
+				]);
+			} finally {
+				clearTimeout(timer);
+			}
+		} else result = await super.sendRequest<T>(method, params);
+		if (method === "initialize" && record(result) && record(result["capabilities"]))
+			this.capabilities = result["capabilities"];
+		return result;
+	}
+	async navigation(method: string, path: string, line: number, character: number): Promise<unknown> {
+		const capability: Record<string, string> = {
+			hover: "hoverProvider",
+			typeDefinition: "typeDefinitionProvider",
+			implementation: "implementationProvider",
+			signatureHelp: "signatureHelpProvider",
+		};
+		if (!this.capabilities[capability[method] ?? ""]) return { status: "unsupported", operation: method };
+		await this.openFile(path);
+		return this.sendRequest(`textDocument/${method}`, {
+			textDocument: { uri: pathToFileURL(path).href },
+			position: { line: line - 1, character },
+		});
+	}
+	private proven = new Set<string>();
 	private versions = new Map<string, { version: number; content: string }>();
 	override async start(): Promise<void> {
 		try {
@@ -51,13 +121,20 @@ class Client extends LspClient {
 			if (!this.stopping) return logEvent("abnormal-exit");
 			return undefined;
 		});
+		this.connection?.onNotification("$/progress", (value) => {
+			if (!record(value) || !record(value["value"])) return;
+			const token = String(value["token"]);
+			if (value["value"]["kind"] === "end") this.progress.delete(token);
+			else this.progress.add(token);
+			this.progressAt = Date.now();
+		});
 		this.connection?.onNotification("textDocument/publishDiagnostics", (value) => {
 			if (!record(value) || typeof value["uri"] !== "string" || !Array.isArray(value["diagnostics"])) return;
 			const items = value["diagnostics"] as Diagnostic[];
 			const version = value["version"];
 			this.published.set(
 				diagnosticUriKey(value["uri"]),
-				typeof version === "number" ? { version, items } : { items },
+				typeof version === "number" ? { version, items, time: Date.now() } : { items, time: Date.now() },
 			);
 		});
 	}
@@ -92,37 +169,82 @@ class Client extends LspClient {
 			changes: paths.map((path) => ({ uri: pathToFileURL(path).href, type: 2 })),
 		});
 	}
-	async collect(path: string, signal: AbortSignal): Promise<{ items: Diagnostic[]; ready: boolean }> {
+	async collect(
+		path: string,
+		signal: AbortSignal,
+	): Promise<{ items: Diagnostic[]; ready: boolean; evidence?: string }> {
 		const uri = pathToFileURL(path).href;
+		const cold = !this.versions.has(uri);
 		await this.openFile(path);
 		await this.sendNotification("textDocument/didSave", { textDocument: { uri } });
-		try {
-			const result = await this.sendRequest<{ items?: Diagnostic[] }>("textDocument/diagnostic", {
-				textDocument: { uri },
-			});
-			if (Array.isArray(result.items)) return { items: result.items, ready: true };
-		} catch (error) {
-			if (
-				!(record(error) && error["code"] === -32601) &&
-				!/method not found|unsupported|not supported|unknown request|unhandled method/i.test(message(error))
-			)
-				throw error;
+		const settling = Date.now() + (cold ? 5000 : 2000);
+		while ((this.progress.size || Date.now() - this.progressAt < 200) && Date.now() < settling) {
+			signal.throwIfAborted();
+			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
-		for (let i = 0; i < 40; i++) {
+		if (this.progress.size) return { items: [], ready: false };
+		if (this.capabilities["diagnosticProvider"]) {
+			const previous = this.pulls.get(uri);
+			const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, settling - Date.now()))]);
+			const result = await new Promise<{ kind: string; items?: Diagnostic[]; resultId?: string }>(
+				(resolve, reject) => {
+					const abort = () => {
+						void this.stop();
+						reject(new Error(signal.aborted ? "Diagnostics cancelled" : "Diagnostic request timeout"));
+					};
+					requestSignal.addEventListener("abort", abort, { once: true });
+					if (requestSignal.aborted) {
+						abort();
+						return;
+					}
+					void this.sendRequest<{ kind: string; items?: Diagnostic[]; resultId?: string }>(
+						"textDocument/diagnostic",
+						{ textDocument: { uri }, ...(previous ? { previousResultId: previous.resultId } : {}) },
+					)
+						.then(resolve, reject)
+						.finally(() => requestSignal.removeEventListener("abort", abort));
+				},
+			);
+			if (result.kind === "unchanged" && previous)
+				return { items: previous.items, ready: true, evidence: "pull-unchanged" };
+			if (Array.isArray(result.items)) {
+				if (result.resultId) this.pulls.set(uri, { resultId: result.resultId, items: result.items });
+				return { items: result.items, ready: true, evidence: "pull-full" };
+			}
+			return { items: [], ready: false };
+		}
+		const deadline = settling;
+		while (Date.now() < deadline) {
 			signal.throwIfAborted();
 			const result = this.published.get(diagnosticUriKey(uri));
-			if (result && (result.version === undefined || result.version === this.versions.get(uri)?.version))
-				return { items: result.items, ready: true };
-			await new Promise((resolve) => setTimeout(resolve, 50));
+			if (
+				result &&
+				Date.now() - result.time >= 200 &&
+				!this.progress.size &&
+				Date.now() - this.progressAt >= 200 &&
+				(result.version === undefined || result.version === this.versions.get(uri)?.version)
+			) {
+				if (!(result.version === undefined && result.items.length === 0 && !this.proven.has(uri))) {
+					this.proven.add(uri);
+					return {
+						items: result.items,
+						ready: true,
+						evidence:
+							result.version === undefined ? "push-unversioned (weak freshness evidence)" : "push-versioned",
+					};
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
 		return { items: [], ready: false };
 	}
-	async formatting(path: string): Promise<TextEdit[]> {
+	async formatting(path: string, options: Config["formatting"]): Promise<TextEdit[]> {
+		if (!this.supports("format")) throw new Error("unsupported: document formatting");
 		await this.openFile(path);
 		return (
 			(await this.sendRequest<TextEdit[] | null>("textDocument/formatting", {
 				textDocument: { uri: pathToFileURL(path).href },
-				options: { tabSize: 4, insertSpaces: true },
+				options,
 			})) ?? []
 		);
 	}
@@ -160,22 +282,100 @@ export class Languages {
 			},
 		});
 	}
-	private withClient<T>(
+	private failures = new Map<string, { identity: string; at: number; reason: string }>();
+	async status(path: string): Promise<unknown> {
+		const resolved = await resolveServer(this.root, path, this.config);
+		const failure = this.failures.get(`${resolved.language}:${resolved.tool.identity}`);
+		return {
+			...resolved,
+			lint: this.config.trusted
+				? ((await select(this.root, resolve(this.root, path), false, this.config).catch((error) => ({
+						unavailable: message(error),
+					}))) ?? { unavailable: "No configured lint runner" })
+				: { unavailable: "Workspace trust required" },
+			running: [...this.clients].some(
+				(client) => client.isAlive() && JSON.stringify(client.command()) === JSON.stringify(resolved.tool.command),
+			),
+			failure:
+				failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 30000
+					? failure.reason
+					: undefined,
+			recovery:
+				"Install or repair the selected local tool, then lsp_status refresh=true; failures retry after 30 seconds",
+		};
+	}
+	async preflight(path: string, signal: AbortSignal, operation?: string): Promise<void> {
+		await this.withLspClient(
+			await workspacePath(this.root, path),
+			async (client) => {
+				if (operation && client instanceof Client && !client.supports(operation))
+					throw new Error(`unsupported: ${operation}`);
+			},
+			"preflight",
+			{
+				manager: this.manager,
+				signal,
+			},
+		);
+	}
+	private async withLspClient<T>(
 		path: string,
 		fn: (client: LspClient) => Promise<T>,
-		tool: string,
+		_tool: string,
 		options: { manager: LspManager; signal: AbortSignal },
 	): Promise<T> {
-		return withConfiguration(this.config, () => withLspClient(path, fn, tool, options));
+		const resolved = await resolveServer(this.root, path, this.config);
+		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
+		if (resolved.tool.source === "temporary" && !this.config.trusted)
+			throw new Error("Temporary tool execution requires global trustedWorkspaces");
+		const failureKey = `${resolved.language}:${resolved.tool.identity}`;
+		const failed = this.failures.get(failureKey);
+		if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 30000)
+			throw new Error(failed.reason);
+		let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
+		if (!inside(this.root, root)) root = this.root;
+		if (
+			resolved.language === "python" &&
+			resolved.tool.source === "project" &&
+			resolved.tool.command[0]?.includes(".venv")
+		)
+			root = dirname(dirname(dirname(resolved.tool.command[0])));
+		resolved.server.id += `:${hash(JSON.stringify(resolved.server)).slice(0, 16)}`;
+		let client: LspClient;
+		try {
+			client = await measured("startup/acquire", () =>
+				options.manager.getClient(root, resolved.server, options.signal),
+			);
+		} catch (error) {
+			for (const [key, failure] of this.failures) if (Date.now() - failure.at >= 30000) this.failures.delete(key);
+			this.failures.set(failureKey, {
+				identity: resolved.tool.identity,
+				at: Date.now(),
+				reason:
+					(resolved.tool.source === "temporary"
+						? "Temporary launch/download or initialization failed: "
+						: "Local initialization failed (no fallback): ") + message(error),
+			});
+			const reason = this.failures.get(failureKey)?.reason;
+			while (this.failures.size > 64) this.failures.delete(this.failures.keys().next().value ?? "");
+			throw new Error(reason);
+		}
+		this.failures.delete(failureKey);
+		try {
+			return await fn(client);
+		} finally {
+			options.manager.releaseClient(root, resolved.server.id);
+		}
 	}
 
 	async check(path: string, signal: AbortSignal): Promise<FileResult> {
 		try {
-			return await this.withClient(
+			return await this.withLspClient(
 				await workspacePath(this.root, path),
 				async (client) => {
 					if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
-					const result = await client.collect(await workspacePath(this.root, path), signal);
+					const absolute = await workspacePath(this.root, path);
+					const result = await measured("diagnostics/wait", () => client.collect(absolute, signal));
 					return {
 						path,
 						state: result.ready ? "complete" : "pending",
@@ -189,7 +389,7 @@ export class Languages {
 								source: `${item.source ?? "lsp"}${item.code === undefined ? "" : `/${item.code}`}`,
 								message: item.message,
 							})),
-						...(!result.ready ? { note: "No fresh diagnostics published yet" } : {}),
+						note: result.ready ? (result.evidence ?? "fresh diagnostics") : "No fresh diagnostics published yet",
 					};
 				},
 				"diagnostics",
@@ -197,9 +397,19 @@ export class Languages {
 			);
 		} catch (error) {
 			const note = message(error);
+			if (
+				/server cancelled|content modified/i.test(note) ||
+				(record(error) && [-32801, -32802].includes(Number(error["code"])))
+			)
+				return { path, state: "pending", findings: [], note: "Server is updating its analysis; retry" };
 			if (!/No LSP server|NOT INSTALLED/.test(note))
 				await logEvent(/timeout/i.test(note) ? "timeout" : "startup-failure");
-			return { path, state: /No LSP server|NOT INSTALLED/.test(note) ? "skipped" : "failed", findings: [], note };
+			return {
+				path,
+				state: /disabled or unsupported|Tool missing|Explicit command missing/.test(note) ? "skipped" : "failed",
+				findings: [],
+				note,
+			};
 		}
 	}
 	async navigate(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
@@ -208,11 +418,24 @@ export class Languages {
 		const line = number(args["line"], 1, 1, 10000000);
 		const column = number(args["column"], 1, 1, 1000000) - 1;
 		const before = operation === "rename" ? await inventory(this.root, 10000, signal) : undefined;
-		return this.withClient(
+		return this.withLspClient(
 			path,
 			async (client) => {
+				if (
+					client instanceof Client &&
+					["definition", "references", "symbols", "prepare_rename"].includes(operation) &&
+					!client.supports(operation === "symbols" && args["query"] ? "workspaceSymbolProvider" : operation)
+				)
+					return JSON.stringify({ status: "unsupported", operation });
 				let result: unknown;
 				switch (operation) {
+					case "hover":
+					case "typeDefinition":
+					case "implementation":
+					case "signatureHelp":
+						if (!(client instanceof Client)) throw new Error("Unexpected client");
+						result = await client.navigation(operation, path, line, column);
+						break;
 					case "definition":
 						result = await client.definition(path, line, column);
 						break;
@@ -238,7 +461,14 @@ export class Languages {
 						throw new Error("Unknown navigation operation");
 				}
 				const output = JSON.stringify(result ?? []);
-				return output.length <= 8000 ? output : `${output.slice(0, 7800)}\n(truncated; narrow query/path)`;
+				if (output.length <= 8000) return output;
+				if (!Array.isArray(result)) return JSON.stringify({ status: "too_large", note: "Narrow query/path" });
+				const items: unknown[] = [];
+				for (const item of result) {
+					if (JSON.stringify([...items, item]).length > 7600) break;
+					items.push(item);
+				}
+				return JSON.stringify({ items, omitted: result.length - items.length, note: "Narrow query/path" });
 			},
 			operation,
 			{ manager: this.manager, signal },
@@ -256,6 +486,7 @@ export class Languages {
 		const pending = [];
 		for (const [uri, edits] of changes) {
 			const path = await workspacePath(this.root, fileURLToPath(uri));
+			await this.preflight(path, signal);
 			const before = await readFile(path, "utf8");
 			pending.push({ path, before, after: applyTextChanges(before, edits) });
 		}
@@ -272,18 +503,21 @@ export class Languages {
 				modified.push(relative(this.root, item.path));
 			}
 		} catch (error) {
-			throw new Error(`${message(error)}; modified paths: ${modified.join(", ") || "none"}`);
+			throw new WriteFailure(`${message(error)}; modified paths: ${JSON.stringify(modified)}`, modified);
 		}
-		return `Renamed: ${pending.map((item) => relative(this.root, item.path)).join(", ")}`;
+		return JSON.stringify({
+			text: `Renamed: ${modified.join(", ")}`.slice(0, 8000),
+			modifiedPaths: modified,
+		});
 	}
 	async format(path: string, signal: AbortSignal): Promise<string> {
 		const absolute = await workspacePath(this.root, path);
 		const before = await readFile(absolute, "utf8");
-		const edits = await this.withClient(
+		const edits = await this.withLspClient(
 			absolute,
 			async (client) => {
 				if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
-				return client.formatting(absolute);
+				return client.formatting(absolute, this.config.formatting);
 			},
 			"format",
 			{ manager: this.manager, signal },

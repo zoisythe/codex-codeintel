@@ -23,7 +23,13 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 	);
 	const before = "export function test(){\n  var bad = 1;\n  return 0;\n}\n";
 	await writeFile(join(root, "a.js"), before);
-	vi.stubEnv("CODEX_LSP_TRUST_PROJECT", "1");
+
+	await mkdir(join(root, "home"));
+	vi.stubEnv("CODEX_HOME", join(root, "home"));
+	await writeFile(
+		join(root, "home", "lsp-client.json"),
+		JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }),
+	);
 	const result = await lint(root, "a.js", new AbortController().signal);
 	expect(result?.state).toBe("complete");
 	expect(result?.findings.some((item) => item.line === 2 && item.source.includes("noUnusedVariables"))).toBe(true);
@@ -36,7 +42,7 @@ it("does not execute repository tools unless trusted by the user", async () => {
 	roots.push(root);
 	await mkdir(join(root, "home"));
 	vi.stubEnv("CODEX_HOME", join(root, "home"));
-	vi.stubEnv("CODEX_LSP_TRUST_PROJECT", "0");
+
 	await writeFile(join(root, "biome.json"), "{}");
 	await writeFile(join(root, "a.js"), "var bad=1;");
 	expect(await lint(root, "a.js", new AbortController().signal)).toBeUndefined();

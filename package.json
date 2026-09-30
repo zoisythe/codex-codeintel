@@ -1,6 +1,6 @@
 {
 	"name": "@zoisythe/codex-lsp",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Standalone Codex plugin with bundled LSP diagnostics, navigation, formatting, and post-edit hooks.",
 	"type": "module",
 	"packageManager": "npm@11.12.1",
@@ -33,7 +33,8 @@
 		"LICENSE",
 		"NOTICE",
 		"README.md",
-		"CHANGELOG.md"
+		"CHANGELOG.md",
+		"docs"
 	],
 	"scripts": {
 		"bootstrap": "node scripts/bootstrap-submodule.mjs",
@@ -48,7 +49,8 @@
 		"lint:fix": "node ./node_modules/@biomejs/biome/bin/biome check --write src test scripts",
 		"precheck": "node scripts/bootstrap-submodule.mjs",
 		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
-		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs"
+		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs",
+		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.12",

@@ -32,7 +32,7 @@ export class Metadata {
 	constructor(private readonly root: string) {}
 	private async dir(): Promise<string> {
 		const user = process.getuid?.() ?? hash(homedir()).slice(0, 10);
-		const base = join(process.env["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`), `metadata-v4-${user}`);
+		const base = join(process.env["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`), `metadata-v5-${user}`);
 		await mkdir(base, { recursive: true, mode: 0o700 });
 		const info = await lstat(base);
 		if (

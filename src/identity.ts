@@ -1,11 +1,22 @@
 import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
-import { findServerForExtension } from "../packages/lsp-tools-mcp/dist/lsp/server-resolution.js";
-import { type Config, withConfiguration } from "./config.js";
+import type { Config } from "./config.js";
 import { hash, inside } from "./files.js";
 import { runnerIdentity } from "./runners.js";
+import { resolveServer } from "./tool-resolution.js";
 
 const CONFIGS = [
+	"ty.toml",
+	".clangd",
+	"compile_commands.json",
+	"build/compile_commands.json",
+	"compile_flags.txt",
+	".clang-format",
+	"Cargo.lock",
+	"rust-toolchain",
+	"rust-toolchain.toml",
+	"rustfmt.toml",
+	".rustfmt.toml",
 	"biome.json",
 	"biome.jsonc",
 	"eslint.config.js",
@@ -34,14 +45,14 @@ export async function analysisIdentity(
 	lsp = true,
 ): Promise<string> {
 	const dirs = new Set<string>();
-	const extensions = new Set<string>();
+
 	const runners = new Map<string, string>();
 	for (const path of paths) {
 		signal.throwIfAborted();
 		const absolute = resolve(root, path);
-		extensions.add(extname(path));
+
 		const key = `${dirname(absolute)}:${extname(path)}`;
-		if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute));
+		if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute, config));
 		let dir = dirname(absolute);
 		while (inside(root, dir)) {
 			dirs.add(dir);
@@ -61,8 +72,11 @@ export async function analysisIdentity(
 				if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
 			}
 		}
+	const representatives = [...new Map(paths.map((path) => [`${dirname(path)}:${extname(path)}`, path])).values()];
 	const servers = lsp
-		? withConfiguration(config, () => [...extensions].sort().map((extension) => findServerForExtension(extension)))
+		? await Promise.all(
+				representatives.map((path) => resolveServer(root, path, config).catch((error) => String(error))),
+			)
 		: [];
 	return hash(JSON.stringify([config.version, contents, [...runners].sort(), servers]));
 }

@@ -1,15 +1,17 @@
 import { readFile } from "node:fs/promises";
-import { configuration } from "./config.js";
+import { type Config, configuration } from "./config.js";
 import { hash, inventory, workspacePath } from "./files.js";
 import { analysisIdentity } from "./identity.js";
 import { Metadata } from "./metadata.js";
 import { type FileResult, render, text } from "./results.js";
 import { lint } from "./runners.js";
+import { codeLanguage } from "./tool-resolution.js";
 
 type Linter = (path: string, signal: AbortSignal) => Promise<FileResult>;
 export class HookEngine {
 	private readonly store: Metadata;
 	private readonly linter: Linter;
+	private config: Config | undefined;
 	constructor(
 		private readonly root: string,
 		linter?: Linter,
@@ -18,7 +20,7 @@ export class HookEngine {
 		this.linter =
 			linter ??
 			(async (path, signal) =>
-				(await lint(root, path, signal)) ?? {
+				(await lint(root, path, signal, this.config)) ?? {
 					path,
 					state: "skipped",
 					findings: [],
@@ -37,12 +39,23 @@ export class HookEngine {
 		const stopping = event === "Stop" || event === "SubagentStop";
 		if (stopping && input["stop_hook_active"] === true) return "";
 		const initial = await this.store.read(id);
+		if (event === "PreToolUse" && initial.baseline) {
+			await this.store.update(id, signal, (state) => {
+				const turn = text(input["turn_id"]);
+				if (turn && turn !== state.turn) {
+					state.turn = turn;
+					state.current = [];
+				}
+			});
+			return "";
+		}
 		const config = await configuration(this.root);
+		this.config = config;
 		const snapshot = await inventory(this.root, 10000, signal, config.exclude);
 		if (!snapshot.complete)
 			return JSON.stringify({
 				systemMessage:
-					"Codex LSP: change discovery incomplete; baseline retained; narrow scope with check_diagnostics mode=full",
+					"Codex LSP: change discovery incomplete; baseline retained; narrow scope with check_diagnostics scope=paths run=active",
 			});
 		const changed = initial.baseline
 			? [...snapshot.files].filter(([path, version]) => initial.baseline?.[path] !== version).map(([path]) => path)
@@ -129,9 +142,12 @@ export class HookEngine {
 			for (const { result, fingerprint } of completed) {
 				if (result.state === "complete" || result.state === "skipped" || result.state === "failed")
 					current.pending = current.pending.filter((path) => path !== result.path);
-				const newFeedback = current.shown[result.path] !== fingerprint;
+				const environment = !result.findings.length && (result.state === "failed" || result.state === "skipped");
+				const key = environment ? `environment:${codeLanguage(config, result.path)}:${result.note}` : result.path;
+				const signature = environment ? hash(result.note ?? "unavailable") : fingerprint;
+				const newFeedback = current.shown[key] !== signature;
 				if (newFeedback && (result.findings.length || result.state !== "complete")) changedResults.push(result);
-				current.shown[result.path] = fingerprint;
+				current.shown[key] = signature;
 				if (
 					stopping &&
 					result.state === "complete" &&
@@ -147,7 +163,7 @@ export class HookEngine {
 			return true;
 		});
 		if (!changedResults.length && !signal.aborted) return "";
-		const output = `session=${id}\nLint channel: ${render(changedResults, 10, 1800)}${signal.aborted ? "\nLint budget reached; unfinished files remain pending." : ""}\nLSP not executed; use check_diagnostics mode=full workspace=${this.root}`;
+		const output = `session=${id}\nLint channel: ${render(changedResults, 10, 1800)}${signal.aborted ? "\nLint budget reached; unfinished files remain pending." : ""}\nLSP not executed; use check_diagnostics scope=paths run=active workspace=${this.root}`;
 		return JSON.stringify(
 			stopping
 				? block

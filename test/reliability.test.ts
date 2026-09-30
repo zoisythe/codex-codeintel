@@ -25,14 +25,13 @@ async function fixture() {
 	await mkdir(root);
 	await mkdir(home);
 	await mkdir(join(root, ".codex"));
-	const user = join(home, "override.json");
+	const user = join(home, "lsp-client.json");
 	const project = join(root, ".codex", "lsp-client.json");
 	vi.stubEnv("CODEX_HOME", home);
-	vi.stubEnv("LSP_TOOLS_MCP_USER_CONFIG", user);
-	vi.stubEnv("LSP_TOOLS_MCP_PROJECT_CONFIG", project);
+
 	vi.stubEnv("CODEX_LSP_CACHE", join(dir, "cache"));
-	vi.stubEnv("CODEX_LSP_TRUST_PROJECT", "0");
-	await writeFile(user, JSON.stringify({ trustedWorkspaces: [root] }));
+
+	await writeFile(user, JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }));
 	await writeFile(join(root, "a.js"), "export const a=1;");
 	return { dir, root, user, project };
 }
@@ -40,15 +39,25 @@ it("merges lint fields and replaces exclude using the same overridden user trust
 	const { root, user, project } = await fixture();
 	await writeFile(
 		user,
-		JSON.stringify({ trustedWorkspaces: [root], lint: { javascript: "off", python: "ruff" }, exclude: ["old/**"] }),
+		JSON.stringify({
+			schemaVersion: 1,
+			trustedWorkspaces: [root],
+			lint: { javascript: "off", python: "ruff" },
+			exclude: ["old/**"],
+		}),
 	);
-	await writeFile(project, JSON.stringify({ lint: { javascript: "eslint" }, exclude: ["new/**"] }));
+	await writeFile(project, JSON.stringify({ schemaVersion: 1, lint: { javascript: "eslint" }, exclude: ["new/**"] }));
 	expect(await trusted(root)).toBe(true);
 	expect(await configuration(root)).toMatchObject({ javascript: "eslint", python: "ruff", exclude: ["new/**"] });
-	await writeFile(user, JSON.stringify({ lint: { javascript: "off" }, exclude: ["user/**"] }));
+	await writeFile(user, JSON.stringify({ schemaVersion: 1, lint: { javascript: "off" }, exclude: ["user/**"] }));
 	await writeFile(
 		project,
-		JSON.stringify({ trustedWorkspaces: [root], lint: { javascript: "biome" }, exclude: ["project/**"] }),
+		JSON.stringify({
+			schemaVersion: 1,
+			trustedWorkspaces: [root],
+			lint: { javascript: "biome" },
+			exclude: ["project/**"],
+		}),
 	);
 	expect(await trusted(root)).toBe(false);
 	expect(await configuration(root)).toMatchObject({ javascript: "off", exclude: ["user/**"] });
@@ -61,21 +70,30 @@ it("explicit Runner selection never falls back and off never runs installed Biom
 		process.platform === "win32" ? "junction" : "dir",
 	);
 	await writeFile(join(root, "biome.json"), "{}");
-	await writeFile(project, JSON.stringify({ lint: { javascript: "off" } }));
+	await writeFile(project, JSON.stringify({ schemaVersion: 1, lint: { javascript: "off" } }));
 	expect((await lint(root, "a.js", signal()))?.state).toBe("skipped");
-	await writeFile(project, JSON.stringify({ lint: { javascript: "eslint" } }));
+	await writeFile(project, JSON.stringify({ schemaVersion: 1, lint: { javascript: "eslint" } }));
 	expect((await lint(root, "a.js", signal()))?.note).toContain("eslint: matching project configuration missing");
-	await writeFile(project, JSON.stringify({ lint: { javascript: "auto" } }));
+	await writeFile(project, JSON.stringify({ schemaVersion: 1, lint: { javascript: "auto" } }));
 	expect((await lint(root, "a.js", signal()))?.state).toBe("complete");
 	const missing = await fixture();
 	await writeFile(join(missing.root, "biome.json"), "{}");
+	await writeFile(
+		missing.user,
+		JSON.stringify({
+			schemaVersion: 1,
+			trustedWorkspaces: [missing.root],
+			lsp: { typescript: { command: [process.execPath], extensions: [".js"] } },
+		}),
+	);
+	vi.stubEnv("PATH", "");
 	expect((await lint(missing.root, "a.js", signal()))?.state).toBe("failed");
 });
 it("excludes directory discovery but permits explicit files and invalidates direct excluded tool config", {
 	timeout: 15000,
 }, async () => {
 	const { root, project } = await fixture();
-	await writeFile(project, JSON.stringify({ exclude: ["a.js", "biome.json"] }));
+	await writeFile(project, JSON.stringify({ schemaVersion: 1, exclude: ["a.js", "biome.json"] }));
 	await writeFile(join(root, "biome.json"), "{}");
 	let count = 0;
 	const engine = new Engine(root, async (path) => {
@@ -83,7 +101,7 @@ it("excludes directory discovery but permits explicit files and invalidates dire
 		return { path, state: "complete", findings: [] };
 	});
 	expect((await inventory(root, 10000, signal(), (await configuration(root)).exclude)).files.has("a.js")).toBe(false);
-	const args = { path: "a.js", mode: "full", session: "s" };
+	const args = { path: "a.js", scope: "paths", session: "s" };
 	await engine.dispatch("check_diagnostics", args, signal());
 	await engine.dispatch("check_diagnostics", args, signal());
 	expect(count).toBe(1);
@@ -97,13 +115,17 @@ it("excludes directory discovery but permits explicit files and invalidates dire
 it("keeps pending on timeout and checks it on the next PostToolUse", async () => {
 	const { root } = await fixture();
 	let slow = true;
+	const cancellation = new AbortController();
 	const hook = new HookEngine(root, async (path, abort) => {
-		if (slow) await new Promise<void>((resolve) => abort.addEventListener("abort", () => resolve(), { once: true }));
+		if (slow) {
+			setTimeout(() => cancellation.abort(), 50);
+			await new Promise<void>((resolve) => abort.addEventListener("abort", () => resolve(), { once: true }));
+		}
 		return { path, state: "complete", findings: [] };
 	});
 	await hook.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal());
 	await writeFile(join(root, "a.js"), "changed");
-	await hook.hook({ session_id: "s" }, AbortSignal.timeout(150));
+	await hook.hook({ session_id: "s" }, cancellation.signal);
 	expect((await new Metadata(root).read("s")).pending).toContain("a.js");
 	slow = false;
 	await hook.hook({ session_id: "s" }, signal());
@@ -156,7 +178,7 @@ it("cancels a queued request promptly without executing it or cancelling the act
 		});
 		return { path, state: "complete", findings: [] };
 	});
-	const args = { path: "a.js", mode: "full", session: "s" };
+	const args = { path: "a.js", scope: "paths", session: "s" };
 	const first = engine.dispatch("check_diagnostics", args, signal());
 	await ready;
 	const controller = new AbortController();
@@ -210,9 +232,9 @@ it("checks a small scope in a repository over 10000 files without reusing unveri
 		calls++;
 		return { path, state: "complete", findings: [] };
 	});
-	const args = { mode: "full", path: "small", session: "s" };
+	const args = { scope: "paths", path: "small", session: "s" };
 	const result = await engine.dispatch("check_diagnostics", args, signal());
-	expect(result).toContain("complete; checked=1");
+	expect(result).toContain("partial; checked=1");
 	expect(result).toContain("dependency freshness unverified");
 	await engine.dispatch("check_diagnostics", args, signal());
 	expect(calls).toBe(2);
@@ -221,15 +243,14 @@ it("checks a small scope in a repository over 10000 files without reusing unveri
 it.each(["add", "delete", "modify", "configuration"])("rejects old revision after %s", async (change) => {
 	const { root, project } = await fixture();
 	const engine = new Engine(root, async (path) => ({ path, state: "complete", findings: [] }));
-	const args = { mode: "full", session: "s" };
+	await Promise.all(Array.from({ length: 60 }, (_, i) => writeFile(join(root, `page${i}.js`), "x")));
+	const args = { scope: "paths", session: "s" };
 	const first = await engine.dispatch("check_diagnostics", args, signal());
-	const revision = /revision=([a-f0-9]+)/.exec(first)?.[1];
+	const cursor = (JSON.parse(first) as { next: { cursor: string } }).next.cursor;
 	if (change === "add") await writeFile(join(root, "b.js"), "new");
 	else if (change === "delete") await rm(join(root, "a.js"));
 	else if (change === "modify") await writeFile(join(root, "a.js"), "modified");
-	else await writeFile(project, '{"lint":{"javascript":"off"}}');
-	await expect(engine.dispatch("check_diagnostics", { ...args, start: 1, revision }, signal())).rejects.toThrow(
-		"revision",
-	);
+	else await writeFile(project, '{"schemaVersion":1,"lint":{"javascript":"off"}}');
+	await expect(engine.dispatch("check_diagnostics", { ...args, cursor }, signal())).rejects.toThrow("Cursor");
 	await engine.close();
 });

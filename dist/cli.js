@@ -7,297 +7,14 @@ import { stdin } from "node:process";
 import { promisify as promisify2 } from "node:util";
 
 // src/hook-engine.ts
-import { readFile as readFile6 } from "node:fs/promises";
+import { readFile as readFile7 } from "node:fs/promises";
 
 // src/config.ts
 import { readFile as readFile2 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
 
-// src/files.ts
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
-var exec = promisify(execFile);
-var SKIP = /* @__PURE__ */ new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  ".next",
-  "coverage",
-  ".canon",
-  ".venv",
-  ".ruff_cache",
-  ".mypy_cache",
-  ".pytest_cache",
-  "__pycache__",
-  "vendor",
-  "target"
-]);
-var hash = (text2) => createHash("sha256").update(text2).digest("hex");
-function inside(root, path) {
-  const rel = relative(root, path);
-  return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
-}
-async function workspacePath(root, path) {
-  const absolute = resolve(root, path);
-  if (!inside(root, absolute)) throw new Error("Path is outside workspace");
-  const actual = await realpath(absolute);
-  if (!inside(root, actual)) throw new Error("Symlink is outside workspace");
-  return actual;
-}
-async function inventory(root, maxFiles = 1e4, signal, exclude = [], scope2 = root, dependencyOnly = false) {
-  signal?.throwIfAborted();
-  const included = (name) => !name.split(/[\\/]/).some((part) => SKIP.has(part)) && !exclude.some((pattern) => matchesGlob(name.split(sep).join("/"), pattern));
-  let names;
-  let complete = true;
-  try {
-    const { stdout } = await exec(
-      "git",
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
-      { cwd: scope2, timeout: 5e3, maxBuffer: 4 * 1024 * 1024, ...signal ? { signal } : {} }
-    );
-    names = [
-      ...new Set(
-        stdout.split("\0").filter(Boolean).map((name) => relative(root, join(scope2, name)))
-      )
-    ].filter(included);
-  } catch (error) {
-    signal?.throwIfAborted();
-    if (error instanceof Error && "killed" in error && error.killed)
-      throw new Error("Git discovery timed out; baseline retained");
-    names = [];
-    const walk = async (dir) => {
-      for (const entry of (await readdir(dir, { withFileTypes: true })).sort(
-        (a, b) => a.name.localeCompare(b.name)
-      )) {
-        signal?.throwIfAborted();
-        if (names.length > maxFiles) {
-          complete = false;
-          break;
-        }
-        if (SKIP.has(entry.name) || entry.isSymbolicLink()) continue;
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) await walk(path);
-        else if (entry.isFile() && included(relative(root, path))) names.push(relative(root, path));
-      }
-    };
-    await walk(scope2);
-  }
-  const files = /* @__PURE__ */ new Map();
-  names.sort();
-  if (names.length > maxFiles) complete = false;
-  if (!complete && dependencyOnly) return { files, complete: false, version: hash(JSON.stringify(names)) };
-  for (const name of names.slice(0, maxFiles)) {
-    signal?.throwIfAborted();
-    if (name.split(/[\\/]/).some((part) => SKIP.has(part))) continue;
-    try {
-      const path = await workspacePath(root, name);
-      const stat4 = await lstat(path);
-      if (!stat4.isFile()) continue;
-      if (stat4.size > 1024 * 1024) {
-        complete = false;
-        continue;
-      }
-      files.set(
-        relative(root, path),
-        hash(await readFile(path, { encoding: "utf8", ...signal ? { signal } : {} }))
-      );
-    } catch (error) {
-      signal?.throwIfAborted();
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) complete = false;
-    }
-  }
-  return { files, version: hash(JSON.stringify([...files])), complete };
-}
-function applyTextChanges(text2, edits) {
-  const lines = text2.split("\n");
-  const offset = (line, character) => {
-    if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0 || line >= lines.length || character > (lines[line]?.length ?? 0))
-      throw new Error("Invalid edit range");
-    return lines.slice(0, line).reduce((n, part) => n + part.length + 1, 0) + character;
-  };
-  const sorted = edits.map((edit) => ({
-    start: offset(edit.range.start.line, edit.range.start.character),
-    end: offset(edit.range.end.line, edit.range.end.character),
-    text: edit.newText
-  })).sort((a, b) => b.start - a.start || b.end - a.end);
-  let boundary = text2.length;
-  for (const edit of sorted) {
-    if (edit.start > edit.end || edit.end > boundary) throw new Error("Overlapping edit ranges");
-    text2 = text2.slice(0, edit.start) + edit.text + text2.slice(edit.end);
-    boundary = edit.start;
-  }
-  return text2;
-}
-
-// src/results.ts
-function message(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function record(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function text(value, fallback = "") {
-  return typeof value === "string" ? value : fallback;
-}
-function number(value, fallback, min = 0, max = 1e4) {
-  if (value === void 0) return fallback;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max)
-    throw new Error(`Expected integer ${min}..${max}`);
-  return value;
-}
-function render(results, limit = 50, byteLimit = 8192, offset = 0) {
-  const lines = [
-    ...new Set(
-      results.flatMap((result) => [
-        ...result.channels ? [
-          `${result.path} channels: lsp=${result.channels.lsp} lint=${result.channels.lint}${result.note ? `; ${result.note.replace(/\s+/g, " ").slice(0, 300)}` : ""}`
-        ] : [],
-        ...result.findings.map(
-          (finding) => `${finding.path}:${finding.line}:${finding.column} ${finding.severity} [${finding.source}] ${finding.message.replace(/\s+/g, " ")}`
-        ),
-        ...result.state === "complete" ? [] : [
-          `${result.path} ${result.state}${result.note ? `: ${result.note.replace(/\s+/g, " ").slice(0, 300)}` : ""}`
-        ]
-      ])
-    )
-  ].sort((a, b) => a.localeCompare(b));
-  const complete = results.every((result) => result.state === "complete");
-  const header = `${complete ? "complete" : "partial"}; checked=${results.filter((result) => result.state === "complete").length} pending=${results.filter((result) => result.state === "pending" || result.state === "stale").length} skipped=${results.filter((result) => result.state === "skipped").length} failed=${results.filter((result) => result.state === "failed").length}`;
-  let output = header;
-  let shown = 0;
-  for (const line of lines.slice(offset, offset + limit)) {
-    const clipped = line.slice(0, 1e3);
-    if (Buffer.byteLength(output + clipped) > byteLimit - 180) break;
-    output += `
-${clipped}`;
-    shown++;
-  }
-  if (offset + shown < lines.length)
-    output += `
-${lines.length - offset - shown} omitted; next offset=${offset + shown}`;
-  return output;
-}
-
-// src/config.ts
-function configPaths(root) {
-  const user = process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-  const project = process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-  return {
-    user: user ? isAbsolute2(user) ? user : join2(homedir(), user) : join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
-    project: project ? isAbsolute2(project) ? project : join2(root, project) : join2(root, ".codex", "lsp-client.json")
-  };
-}
-async function read(path) {
-  try {
-    const value = JSON.parse(await readFile2(path, "utf8"));
-    return record(value) ? value : {};
-  } catch (error) {
-    if (record(error) && error["code"] === "ENOENT") return {};
-    throw new Error("Cannot read valid lsp-client.json configuration");
-  }
-}
-async function trusted(root) {
-  if (process.env["CODEX_LSP_TRUST_PROJECT"] === "1") return true;
-  const user = await read(configPaths(root).user);
-  return Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
-}
-async function configuration(root) {
-  const paths = configPaths(root);
-  const user = await read(paths.user);
-  const trust = process.env["CODEX_LSP_TRUST_PROJECT"] === "1" || Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
-  const project = trust ? await read(paths.project) : {};
-  const lint2 = { ...record(user["lint"]) ? user["lint"] : {}, ...record(project["lint"]) ? project["lint"] : {} };
-  const javascript = lint2["javascript"] ?? "auto";
-  const python = lint2["python"] ?? "auto";
-  if (javascript !== "auto" && javascript !== "biome" && javascript !== "eslint" && javascript !== "off")
-    throw new Error("Invalid lint.javascript");
-  if (python !== "auto" && python !== "ruff" && python !== "off") throw new Error("Invalid lint.python");
-  const exclude = project["exclude"] ?? user["exclude"] ?? [];
-  if (!Array.isArray(exclude) || !exclude.every(
-    (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute2(item) && !item.split("/").includes("..")
-  ))
-    throw new Error("exclude requires relative forward-slash globs without negation");
-  return {
-    javascript,
-    python,
-    exclude,
-    trusted: trust,
-    ...paths,
-    version: hash(JSON.stringify([user, project, trust, paths]))
-  };
-}
-function withConfiguration(config, invoke) {
-  const user = process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-  const project = process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-  process.env["LSP_TOOLS_MCP_USER_CONFIG"] = config.user;
-  process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"] = config.trusted ? config.project : join2(config.user, "disabled-project-config");
-  try {
-    return invoke();
-  } finally {
-    if (user === void 0) delete process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-    else process.env["LSP_TOOLS_MCP_USER_CONFIG"] = user;
-    if (project === void 0) delete process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-    else process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"] = project;
-  }
-}
-
-// src/identity.ts
-import { readFile as readFile4, stat as stat2 } from "node:fs/promises";
-import { dirname as dirname2, extname as extname2, join as join8, resolve as resolve2 } from "node:path";
-
-// packages/lsp-tools-mcp/dist/lsp/config-loader.js
-import { existsSync, readFileSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { isAbsolute as isAbsolute3, join as join3 } from "node:path";
-
 // packages/lsp-tools-mcp/dist/lsp/server-definitions.js
-var LSP_INSTALL_HINTS = {
-  typescript: "npm install -g typescript-language-server typescript",
-  deno: "Install Deno from https://deno.land",
-  vue: "npm install -g @vue/language-server",
-  eslint: "npm install -g vscode-langservers-extracted",
-  oxlint: "npm install -g oxlint",
-  biome: "npm install -g @biomejs/biome",
-  gopls: "go install golang.org/x/tools/gopls@latest",
-  "ruby-lsp": "gem install ruby-lsp",
-  basedpyright: "pip install basedpyright",
-  pyright: "pip install pyright",
-  ty: "pip install ty",
-  ruff: "pip install ruff",
-  "elixir-ls": "See https://github.com/elixir-lsp/elixir-ls",
-  zls: "See https://github.com/zigtools/zls",
-  csharp: "dotnet tool install -g csharp-ls",
-  fsharp: "dotnet tool install -g fsautocomplete",
-  "sourcekit-lsp": "Included with Xcode or Swift toolchain",
-  rust: "Install rust-analyzer and ensure it is in PATH. If using rustup: rustup component add rust-analyzer. If rust-analyzer exits while loading rust-src: rustup component remove rust-src && rustup component add rust-src.",
-  clangd: "See https://clangd.llvm.org/installation",
-  svelte: "npm install -g svelte-language-server",
-  astro: "npm install -g @astrojs/language-server",
-  "bash-ls": "npm install -g bash-language-server",
-  jdtls: "See https://github.com/eclipse-jdtls/eclipse.jdt.ls",
-  "yaml-ls": "npm install -g yaml-language-server",
-  "lua-ls": "See https://github.com/LuaLS/lua-language-server",
-  php: "npm install -g intelephense",
-  dart: "Included with Dart SDK",
-  "terraform-ls": "See https://github.com/hashicorp/terraform-ls",
-  terraform: "See https://github.com/hashicorp/terraform-ls",
-  prisma: "npm install -g prisma",
-  "ocaml-lsp": "opam install ocaml-lsp-server",
-  texlab: "See https://github.com/latex-lsp/texlab",
-  dockerfile: "npm install -g dockerfile-language-server-nodejs",
-  gleam: "See https://gleam.run/getting-started/installing/",
-  "clojure-lsp": "See https://clojure-lsp.io/installation/",
-  nixd: "nix profile install nixpkgs#nixd",
-  tinymist: "See https://github.com/Myriad-Dreamin/tinymist",
-  "haskell-language-server": "ghcup install hls",
-  bash: "npm install -g bash-language-server",
-  "kotlin-ls": "See https://github.com/Kotlin/kotlin-lsp"
-};
 var BUILTIN_SERVERS = {
   typescript: {
     command: ["typescript-language-server", "--stdio"],
@@ -392,241 +109,408 @@ var BUILTIN_SERVERS = {
   "kotlin-ls": { command: ["kotlin-lsp"], extensions: [".kt", ".kts"] }
 };
 
-// packages/lsp-tools-mcp/dist/lsp/config-loader.js
-function getConfigPaths() {
-  const cwd = process.cwd();
-  const projectOverride = process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-  const userOverride = process.env["LSP_TOOLS_MCP_USER_CONFIG"];
+// src/files.ts
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
+
+// src/metrics.ts
+var samples = /* @__PURE__ */ new Map();
+async function measured(name, action) {
+  const start = performance.now();
+  try {
+    return await action();
+  } finally {
+    const values = samples.get(name) ?? [];
+    values.push(performance.now() - start);
+    if (values.length > 128) values.shift();
+    samples.set(name, values);
+  }
+}
+function timings() {
+  return Object.fromEntries(
+    [...samples].map(([name, values]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return [
+        name,
+        {
+          count: values.length,
+          medianMs: sorted[Math.floor(sorted.length / 2)],
+          p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1]
+        }
+      ];
+    })
+  );
+}
+
+// src/files.ts
+var exec = promisify(execFile);
+var SKIP = /* @__PURE__ */ new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  "coverage",
+  ".canon",
+  ".venv",
+  ".ruff_cache",
+  ".mypy_cache",
+  ".pytest_cache",
+  "__pycache__",
+  "vendor",
+  "target"
+]);
+var hash = (text2) => createHash("sha256").update(text2).digest("hex");
+function inside(root, path) {
+  const rel = relative(root, path);
+  return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
+}
+async function workspacePath(root, path) {
+  const absolute = resolve(root, path);
+  if (!inside(root, absolute)) throw new Error("Path is outside workspace");
+  const actual = await realpath(absolute);
+  if (!inside(root, actual)) throw new Error("Symlink is outside workspace");
+  return actual;
+}
+async function inventory(...args) {
+  return measured("discovery/hash", () => scanInventory(...args));
+}
+async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 = root, dependencyOnly = false) {
+  signal?.throwIfAborted();
+  const included = (name) => !name.split(/[\\/]/).some((part) => SKIP.has(part)) && !exclude.some((pattern) => matchesGlob(name.split(sep).join("/"), pattern));
+  let names;
+  let complete = true;
+  try {
+    const { stdout } = await exec(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+      { cwd: scope2, timeout: 5e3, maxBuffer: 4 * 1024 * 1024, ...signal ? { signal } : {} }
+    );
+    names = [
+      ...new Set(
+        stdout.split("\0").filter(Boolean).map((name) => relative(root, join(scope2, name)))
+      )
+    ].filter(included);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && "killed" in error && error.killed)
+      throw new Error("Git discovery timed out; baseline retained");
+    names = [];
+    const walk = async (dir) => {
+      for (const entry of (await readdir(dir, { withFileTypes: true })).sort(
+        (a, b) => a.name.localeCompare(b.name)
+      )) {
+        signal?.throwIfAborted();
+        if (names.length > maxFiles) {
+          complete = false;
+          break;
+        }
+        if (SKIP.has(entry.name) || entry.isSymbolicLink()) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) await walk(path);
+        else if (entry.isFile() && included(relative(root, path))) names.push(relative(root, path));
+      }
+    };
+    await walk(scope2);
+  }
+  const files = /* @__PURE__ */ new Map();
+  names.sort();
+  if (names.length > maxFiles) complete = false;
+  if (!complete && dependencyOnly) return { files, complete: false, version: hash(JSON.stringify(names)) };
+  for (const name of names.slice(0, maxFiles)) {
+    signal?.throwIfAborted();
+    if (name.split(/[\\/]/).some((part) => SKIP.has(part))) continue;
+    try {
+      const path = await workspacePath(root, name);
+      const stat6 = await lstat(path);
+      if (!stat6.isFile()) continue;
+      if (stat6.size > 1024 * 1024) {
+        complete = false;
+        continue;
+      }
+      files.set(
+        relative(root, path),
+        hash(await readFile(path, { encoding: "utf8", ...signal ? { signal } : {} }))
+      );
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) complete = false;
+    }
+  }
+  return { files, version: hash(JSON.stringify([...files])), complete };
+}
+function applyTextChanges(text2, edits) {
+  const lines = text2.split("\n");
+  const offset = (line, character) => {
+    if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0 || line >= lines.length || character > (lines[line]?.length ?? 0))
+      throw new Error("Invalid edit range");
+    return lines.slice(0, line).reduce((n, part) => n + part.length + 1, 0) + character;
+  };
+  const sorted = edits.map((edit) => ({
+    start: offset(edit.range.start.line, edit.range.start.character),
+    end: offset(edit.range.end.line, edit.range.end.character),
+    text: edit.newText
+  })).sort((a, b) => b.start - a.start || b.end - a.end);
+  let boundary = text2.length;
+  for (const edit of sorted) {
+    if (edit.start > edit.end || edit.end > boundary) throw new Error("Overlapping edit ranges");
+    text2 = text2.slice(0, edit.start) + edit.text + text2.slice(edit.end);
+    boundary = edit.start;
+  }
+  return text2;
+}
+
+// src/results.ts
+var WriteFailure = class extends Error {
+  constructor(reason, modifiedPaths) {
+    super(reason);
+    this.modifiedPaths = modifiedPaths;
+  }
+};
+function message(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function text(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+function number(value, fallback, min = 0, max = 1e4) {
+  if (value === void 0) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max)
+    throw new Error(`Expected integer ${min}..${max}`);
+  return value;
+}
+function render(results, limit = 50, byteLimit = 8192, offset = 0) {
+  const lines = [
+    ...new Set(
+      results.flatMap((result) => [
+        ...result.channels ? [
+          `${result.path} channels: lsp=${result.channels.lsp} lint=${result.channels.lint}${result.note ? `; ${result.note.replace(/\s+/g, " ").slice(0, 300)}` : ""}`
+        ] : [],
+        ...result.findings.map(
+          (finding) => `${finding.path}:${finding.line}:${finding.column} ${finding.severity} [${finding.source}] ${finding.message.replace(/\s+/g, " ")}`
+        ),
+        ...result.state === "complete" ? [] : [
+          `${result.path} ${result.state}${result.note ? `: ${result.note.replace(/\s+/g, " ").slice(0, 300)}` : ""}`
+        ]
+      ])
+    )
+  ].sort((a, b) => Number(!a.includes(" error [")) - Number(!b.includes(" error [")) || a.localeCompare(b));
+  const complete = results.every((result) => result.state === "complete");
+  const header = `${complete ? "complete" : "partial"}; checked=${results.filter((result) => result.state === "complete").length} pending=${results.filter((result) => result.state === "pending" || result.state === "stale").length} skipped=${results.filter((result) => result.state === "skipped").length} failed=${results.filter((result) => result.state === "failed").length}`;
+  let output = header;
+  let shown = 0;
+  for (const line of lines.slice(offset, offset + limit)) {
+    const clipped = line.slice(0, 1e3);
+    if (Buffer.byteLength(output + clipped) > byteLimit - 180) break;
+    output += `
+${clipped}`;
+    shown++;
+  }
+  if (offset + shown < lines.length)
+    output += `
+${lines.length - offset - shown} omitted; next offset=${offset + shown}`;
+  return output;
+}
+function mergeFindings(findings) {
+  const entries = /* @__PURE__ */ new Map();
+  for (const finding of findings) {
+    const key = JSON.stringify([finding.path, finding.line, finding.column, finding.severity, finding.message]);
+    const old = entries.get(key);
+    if (old) old.sources = [.../* @__PURE__ */ new Set([...old.sources ?? [old.source], finding.source])];
+    else entries.set(key, { ...finding });
+  }
+  return [...entries.values()].sort((a, b) => Number(a.severity !== "error") - Number(b.severity !== "error"));
+}
+function failureKind(reason) {
+  if (/Migration|configuration|schemaVersion|Extension conflict|Unknown built-in|Invalid (?:lsp|lint|formatting)|lsp\.\w+.*(?:must be|requires)|trustedWorkspaces requires|exclude requires/i.test(
+    reason
+  ))
+    return "configuration_error";
+  if (/disabled or unsupported|unsupported:/i.test(reason)) return "unsupported";
+  if (/timeout|time.*budget/i.test(reason)) return "timeout";
+  if (/cancel|abort/i.test(reason)) return "cancelled";
+  if (/missing|unavailable|NOT INSTALLED/i.test(reason)) return "tool_missing";
+  if (/offline|download|failed to fetch/i.test(reason)) return "temporary_launch_failed";
+  if (/initializ/i.test(reason)) return "initialization_failed";
+  return "execution_failed";
+}
+
+// src/config.ts
+function configPaths(root) {
+  for (const key of Object.keys(process.env))
+    if (key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG") || key === "CODEX_LSP_TRUST_PROJECT")
+      throw new Error(
+        `Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1), global trustedWorkspaces and <workspace>/.codex/lsp-client.json. See docs/migration-0.5.md`
+      );
   return {
-    project: projectOverride ? isAbsolute3(projectOverride) ? projectOverride : join3(cwd, projectOverride) : join3(cwd, ".codex", "lsp-client.json"),
-    user: userOverride ? isAbsolute3(userOverride) ? userOverride : join3(homedir2(), userOverride) : join3(homedir2(), ".codex", "lsp-client.json")
+    user: join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
+    project: join2(root, ".codex", "lsp-client.json")
   };
 }
-function loadJsonFile(path) {
-  if (!existsSync(path))
-    return null;
+async function read(path) {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    return isConfigJson(parsed) ? parsed : null;
-  } catch {
-    return null;
+    const value = JSON.parse(await readFile2(path, "utf8"));
+    if (!record(value) || value["schemaVersion"] !== 1)
+      throw new Error(
+        `Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`
+      );
+    for (const key of Object.keys(value))
+      if (!["schemaVersion", "trustedWorkspaces", "lsp", "lint", "exclude", "formatting"].includes(key))
+        throw new Error(`Unknown configuration field ${key} in ${path}`);
+    return value;
+  } catch (error) {
+    if (record(error) && error["code"] === "ENOENT") return {};
+    throw new Error(`Configuration error in ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
-function loadAllConfigs() {
-  const paths = getConfigPaths();
-  const configs = /* @__PURE__ */ new Map();
-  const project = loadJsonFile(paths.project);
-  if (project)
-    configs.set("project", project);
-  const user = loadJsonFile(paths.user);
-  if (user)
-    configs.set("user", user);
-  return configs;
+var defaults = {
+  python: "ty",
+  typescript: "typescript",
+  cpp: "clangd",
+  rust: "rust",
+  bash: "bash",
+  yaml: "yaml-ls",
+  svelte: "svelte",
+  astro: "astro",
+  go: "gopls",
+  lua: "lua-ls",
+  java: "jdtls",
+  html: "html",
+  css: "css",
+  json: "json"
+};
+var web = {
+  html: { command: ["vscode-html-language-server", "--stdio"], extensions: [".html", ".htm"] },
+  css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".less"] },
+  json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] }
+};
+var builtins = { ...BUILTIN_SERVERS, ...web };
+function server(value, language, source) {
+  if (value === false) return false;
+  const builtin = typeof value === "string" ? builtins[value] : void 0;
+  if (typeof value === "string" && !builtin) throw new Error(`Unknown built-in server ${value} for ${language}`);
+  const item = builtin ?? value;
+  if (!record(item)) throw new Error(`lsp.${language} must be a built-in name, custom server or false`);
+  for (const key of Object.keys(item))
+    if (!["command", "extensions", "env", "initialization"].includes(key))
+      throw new Error(`Invalid lsp.${language}.${key}; priority/disabled were removed; use false to disable`);
+  const command = item["command"];
+  const extensions = item["extensions"];
+  if (!Array.isArray(command) || !command.length || !command.every((v) => typeof v === "string" && !!v))
+    throw new Error(`lsp.${language}.command requires a nonempty string array`);
+  if (!Array.isArray(extensions) || !extensions.length || !extensions.every((v) => typeof v === "string" && /^\.[^/\\]+$/.test(v)))
+    throw new Error(`lsp.${language}.extensions requires dot-prefixed extensions`);
+  const env = item["env"];
+  const initialization = item["initialization"];
+  if (env !== void 0 && (!record(env) || !Object.values(env).every((v) => typeof v === "string")))
+    throw new Error(`Invalid lsp.${language}.env`);
+  if (initialization !== void 0 && !record(initialization))
+    throw new Error(`Invalid lsp.${language}.initialization`);
+  return {
+    id: typeof value === "string" ? value : language,
+    command,
+    extensions,
+    explicit: !builtin,
+    source,
+    ...env ? { env } : {},
+    ...initialization ? { initialization } : {}
+  };
 }
-function getMergedServers() {
-  const configs = loadAllConfigs();
-  const servers = [];
-  const disabled = /* @__PURE__ */ new Set();
-  const seen = /* @__PURE__ */ new Set();
-  const sources = ["project", "user"];
-  for (const source of sources) {
-    const config = configs.get(source);
-    if (!config?.lsp)
-      continue;
-    for (const [id, rawEntry] of Object.entries(config.lsp)) {
-      const entry = parseLspEntry(rawEntry);
-      if (!entry)
-        continue;
-      if (entry.disabled) {
-        disabled.add(id);
-        continue;
-      }
-      if (seen.has(id))
-        continue;
-      if (!entry.command || !entry.extensions)
-        continue;
-      const server = {
-        id,
-        command: entry.command,
-        extensions: entry.extensions,
-        priority: entry.priority ?? 0,
-        source
-      };
-      if (entry.env !== void 0) {
-        server.env = entry.env;
-      }
-      if (entry.initialization !== void 0) {
-        server.initialization = entry.initialization;
-      }
-      servers.push(server);
-      seen.add(id);
-    }
+function freeze(value) {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
   }
-  for (const [id, config] of Object.entries(BUILTIN_SERVERS)) {
-    if (disabled.has(id) || seen.has(id))
-      continue;
-    servers.push({
-      id,
-      command: config.command,
-      extensions: config.extensions,
-      priority: -100,
-      source: "builtin"
-    });
+  return value;
+}
+async function configuration(root) {
+  const paths = configPaths(root);
+  const user = await read(paths.user);
+  if (user["trustedWorkspaces"] !== void 0 && (!Array.isArray(user["trustedWorkspaces"]) || !user["trustedWorkspaces"].every((v) => typeof v === "string" && isAbsolute2(v))))
+    throw new Error("trustedWorkspaces requires absolute paths");
+  const trust = Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
+  const project = trust ? await read(paths.project) : {};
+  const servers = {};
+  for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
+  for (const [data, source] of [
+    [user, paths.user],
+    [project, paths.project]
+  ]) {
+    if (data["lsp"] !== void 0 && !record(data["lsp"])) throw new Error(`Invalid lsp in ${source}`);
+    if (record(data["lsp"]))
+      for (const [language, value] of Object.entries(data["lsp"]))
+        servers[language] = server(value, language, source);
+    for (const key of ["lint", "formatting"])
+      if (data[key] !== void 0 && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
   }
-  return servers.sort((a, b) => {
-    if (a.source !== b.source) {
-      const order = {
-        project: 0,
-        user: 1,
-        builtin: 2
-      };
-      return order[a.source] - order[b.source];
-    }
-    return b.priority - a.priority;
+  const extensions = {};
+  for (const [language, name] of Object.entries(defaults)) {
+    const entry = server(name, language, "builtin");
+    if (entry) extensions[language] = entry.extensions;
+  }
+  for (const [language, entry] of Object.entries(servers)) if (entry) extensions[language] = entry.extensions;
+  const used = /* @__PURE__ */ new Map();
+  for (const [language, entry] of Object.entries(servers))
+    if (entry)
+      for (const extension of entry.extensions) {
+        if (used.has(extension))
+          throw new Error(
+            `Extension conflict ${extension}: ${used.get(extension)} and ${language}; disable or replace the original language entry`
+          );
+        used.set(extension, language);
+      }
+  const lint2 = { ...record(user["lint"]) ? user["lint"] : {}, ...record(project["lint"]) ? project["lint"] : {} };
+  const javascript = lint2["javascript"] ?? "auto";
+  const python = lint2["python"] ?? "auto";
+  if (javascript !== "auto" && javascript !== "biome" && javascript !== "eslint" && javascript !== "off")
+    throw new Error("Invalid lint.javascript");
+  if (python !== "auto" && python !== "ruff" && python !== "off") throw new Error("Invalid lint.python");
+  const exclude = project["exclude"] ?? user["exclude"] ?? [];
+  if (!Array.isArray(exclude) || !exclude.every(
+    (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute2(item) && !item.split("/").includes("..")
+  ))
+    throw new Error("exclude requires relative forward-slash globs without negation");
+  const formatting = {
+    tabSize: 4,
+    insertSpaces: true,
+    ...record(user["formatting"]) ? user["formatting"] : {},
+    ...record(project["formatting"]) ? project["formatting"] : {}
+  };
+  if (!Number.isInteger(formatting.tabSize) || formatting.tabSize < 1 || formatting.tabSize > 16 || typeof formatting.insertSpaces !== "boolean")
+    throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
+  return freeze({
+    schemaVersion: 1,
+    javascript,
+    python,
+    exclude,
+    trusted: trust,
+    ...paths,
+    extensions,
+    servers,
+    formatting,
+    version: hash(JSON.stringify([user, project, trust, paths]))
   });
 }
-function isConfigJson(value) {
-  if (!isRecord(value))
-    return false;
-  const lsp = value["lsp"];
-  return lsp === void 0 || isRecord(lsp);
-}
-function parseLspEntry(value) {
-  return isLspEntry(value) ? value : null;
-}
-function isLspEntry(value) {
-  if (!isRecord(value))
-    return false;
-  const disabled = value["disabled"];
-  const command = value["command"];
-  const extensions = value["extensions"];
-  const priority = value["priority"];
-  const env = value["env"];
-  const initialization = value["initialization"];
-  return (disabled === void 0 || typeof disabled === "boolean") && (command === void 0 || isStringArray(command)) && (extensions === void 0 || isStringArray(extensions)) && (priority === void 0 || typeof priority === "number") && (env === void 0 || isStringRecord(env)) && (initialization === void 0 || isRecord(initialization));
-}
-function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-function isStringRecord(value) {
-  return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
-// packages/lsp-tools-mcp/dist/lsp/server-installation.js
-import { existsSync as existsSync2 } from "node:fs";
-import { delimiter, join as join4 } from "node:path";
-function getAdditionalPathBases(workingDirectory) {
-  return [join4(workingDirectory, "node_modules", ".bin")];
-}
-function isServerInstalled(command) {
-  if (command.length === 0)
-    return false;
-  const [cmd] = command;
-  if (!cmd)
-    return false;
-  if (cmd.includes("/") || cmd.includes("\\")) {
-    if (existsSync2(cmd))
-      return true;
-  }
-  const isWindows = process.platform === "win32";
-  let exts = [""];
-  if (isWindows) {
-    const pathExt = process.env["PATHEXT"] ?? "";
-    if (pathExt) {
-      const systemExts = pathExt.split(";").filter(Boolean);
-      exts = [.../* @__PURE__ */ new Set([...exts, ...systemExts, ".exe", ".cmd", ".bat", ".ps1"])];
-    } else {
-      exts = ["", ".exe", ".cmd", ".bat", ".ps1"];
-    }
-  }
-  let pathEnv = process.env["PATH"] ?? "";
-  if (isWindows && !pathEnv) {
-    pathEnv = process.env["Path"] ?? "";
-  }
-  const paths = pathEnv.split(delimiter);
-  for (const p of paths) {
-    for (const suffix of exts) {
-      if (existsSync2(join4(p, cmd + suffix))) {
-        return true;
-      }
-    }
-  }
-  for (const base of getAdditionalPathBases(process.cwd())) {
-    for (const suffix of exts) {
-      if (existsSync2(join4(base, cmd + suffix))) {
-        return true;
-      }
-    }
-  }
-  if (cmd === "node")
-    return true;
-  return false;
-}
-
-// packages/lsp-tools-mcp/dist/lsp/server-resolution.js
-function findServerForExtension(ext) {
-  const servers = getMergedServers();
-  for (const server of servers) {
-    if (server.extensions.includes(ext) && isServerInstalled(server.command)) {
-      const resolvedServer = {
-        id: server.id,
-        command: server.command,
-        extensions: server.extensions,
-        priority: server.priority
-      };
-      if (server.env !== void 0) {
-        return {
-          status: "found",
-          server: {
-            ...resolvedServer,
-            env: server.env,
-            ...server.initialization === void 0 ? {} : { initialization: server.initialization }
-          }
-        };
-      }
-      return {
-        status: "found",
-        server: {
-          ...resolvedServer,
-          ...server.initialization === void 0 ? {} : { initialization: server.initialization }
-        }
-      };
-    }
-  }
-  for (const server of servers) {
-    if (server.extensions.includes(ext)) {
-      const installHint = LSP_INSTALL_HINTS[server.id] ?? `Install '${server.command[0]}' and ensure it's in your PATH`;
-      return {
-        status: "not_installed",
-        server: {
-          id: server.id,
-          command: server.command,
-          extensions: server.extensions
-        },
-        installHint
-      };
-    }
-  }
-  const availableServers = [...new Set(servers.map((s) => s.id))];
-  return {
-    status: "not_configured",
-    extension: ext,
-    availableServers
-  };
-}
+// src/identity.ts
+import { readFile as readFile5, stat as stat4 } from "node:fs/promises";
+import { dirname as dirname3, extname as extname3, join as join8, resolve as resolve3 } from "node:path";
 
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access, readFile as readFile3, realpath as realpath2, writeFile } from "node:fs/promises";
-import { dirname, extname, join as join7 } from "node:path";
+import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
+import { basename, dirname as dirname2, extname as extname2, join as join7 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/process.js
 import * as childProcess from "node:child_process";
-import { existsSync as existsSync3, statSync } from "node:fs";
-import { delimiter as delimiter2, join as join5 } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { delimiter, join as join3 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/cleanup-errors.js
 function reportBestEffortCleanupError(operation, error) {
@@ -673,28 +557,12 @@ var LspInvalidPathError = class extends Error {
     this.name = "LspInvalidPathError";
   }
 };
-var LspServerLookupError = class extends Error {
-  constructor() {
-    super(...arguments);
-    this.name = "LspServerLookupError";
-  }
-};
-var LspServerInitializingError = class extends Error {
-  constructor(originalError) {
-    super(`LSP server is still initializing. Please retry in a few seconds. Original error: ${originalError.message}`);
-    this.originalError = originalError;
-    this.name = "LspServerInitializingError";
-  }
-};
 var LspProcessSpawnError = class extends Error {
   constructor() {
     super(...arguments);
     this.name = "LspProcessSpawnError";
   }
 };
-function isLspDeadConnectionError(err) {
-  return err instanceof LspConnectionClosedError || err instanceof LspProcessExitedError;
-}
 
 // packages/lsp-tools-mcp/dist/lsp/process.js
 function isMissingProcessError(error) {
@@ -709,7 +577,7 @@ function reportKillError(context, error) {
 }
 function validateCwd(cwd) {
   try {
-    if (!existsSync3(cwd)) {
+    if (!existsSync(cwd)) {
       return { valid: false, error: `Working directory does not exist: ${cwd}` };
     }
     const stats = statSync(cwd);
@@ -828,7 +696,7 @@ function isWindowsShellShim(command) {
   return lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat");
 }
 function splitPath(pathValue, platform) {
-  const separator = platform === "win32" ? ";" : delimiter2;
+  const separator = platform === "win32" ? ";" : delimiter;
   return pathValue.split(separator).filter(Boolean);
 }
 function getWindowsPathExtensions(env) {
@@ -843,8 +711,8 @@ function resolveWindowsCommand(command, env) {
   const extensions = getWindowsPathExtensions(env);
   for (const baseDirectory of baseDirectories) {
     for (const extension of extensions) {
-      const candidate = baseDirectory ? join5(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
-      if (existsSync3(candidate))
+      const candidate = baseDirectory ? join3(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
+      if (existsSync(candidate))
         return candidate;
     }
   }
@@ -935,18 +803,18 @@ function parseLint(runner, data, path, content) {
 // src/log.ts
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
-import { homedir as homedir3, tmpdir } from "node:os";
-import { join as join6 } from "node:path";
+import { homedir as homedir2, tmpdir } from "node:os";
+import { join as join4 } from "node:path";
 var instance = `${process.pid}-${randomUUID()}`;
 var queue = Promise.resolve();
 function logEvent(event) {
   queue = queue.then(async () => {
-    const dir = join6(
-      process.env["CODEX_LSP_CACHE"] ?? join6(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir3()).slice(0, 10)}`),
-      "logs-v4"
+    const dir = join4(
+      process.env["CODEX_LSP_CACHE"] ?? join4(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir2()).slice(0, 10)}`),
+      "logs-v5"
     );
     await mkdir(dir, { recursive: true, mode: 448 });
-    const path = join6(dir, `${instance}.log`);
+    const path = join4(dir, `${instance}.log`);
     if ((await stat(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
       await rm(`${path}.1`, { force: true });
       await rename(path, `${path}.1`);
@@ -957,12 +825,191 @@ function logEvent(event) {
   return queue;
 }
 
+// src/prepared-tools.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { constants } from "node:fs";
+import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile3, rename as rename2, writeFile } from "node:fs/promises";
+import { homedir as homedir3 } from "node:os";
+import { isAbsolute as isAbsolute3, join as join5 } from "node:path";
+function directory() {
+  return join5(process.env["CODEX_HOME"] ?? join5(homedir3(), ".codex"), "cache", "codex-lsp-v5", "tools");
+}
+async function preparedRuff() {
+  try {
+    const value = JSON.parse(await readFile3(join5(directory(), "ruff.json"), "utf8"));
+    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute3(value["executable"]))
+      return void 0;
+    await access(value["executable"], constants.X_OK);
+    return value["executable"];
+  } catch {
+    return void 0;
+  }
+}
+async function rememberRuff(executable3) {
+  if (!isAbsolute3(executable3)) throw new Error("Invalid prepared Ruff path");
+  await access(executable3, constants.X_OK);
+  const dir = directory();
+  await mkdir2(dir, { recursive: true, mode: 448 });
+  const info = await lstat2(dir);
+  if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
+    throw new Error("Unsafe prepared-tool directory");
+  const temporary2 = join5(dir, `${randomUUID2()}.tmp`);
+  await writeFile(temporary2, JSON.stringify({ executable: executable3 }), { mode: 384 });
+  await rename2(temporary2, join5(dir, "ruff.json"));
+}
+
+// src/tool-resolution.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { constants as constants2 } from "node:fs";
+import { access as access2, stat as stat2 } from "node:fs/promises";
+import { delimiter as delimiter2, dirname, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve2 } from "node:path";
+var temporary = {
+  ty: { ecosystem: "python", packages: ["ty"] },
+  ruff: { ecosystem: "python", packages: ["ruff"] },
+  "pyright-langserver": { ecosystem: "python", packages: ["pyright"] },
+  "basedpyright-langserver": { ecosystem: "python", packages: ["basedpyright"] },
+  "typescript-language-server": { ecosystem: "npm", packages: ["typescript-language-server", "typescript@5.9.3"] },
+  "bash-language-server": { ecosystem: "npm", packages: ["bash-language-server"] },
+  "yaml-language-server": { ecosystem: "npm", packages: ["yaml-language-server"] },
+  "vscode-html-language-server": { ecosystem: "npm", packages: ["vscode-langservers-extracted"] },
+  "vscode-css-language-server": { ecosystem: "npm", packages: ["vscode-langservers-extracted"] },
+  "vscode-json-language-server": { ecosystem: "npm", packages: ["vscode-langservers-extracted"] },
+  svelteserver: { ecosystem: "npm", packages: ["svelte-language-server"] },
+  "astro-ls": { ecosystem: "npm", packages: ["@astrojs/language-server", "typescript"] }
+};
+async function executable(path) {
+  try {
+    await access2(path, constants2.X_OK);
+    return (await stat2(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+function suffixes(name) {
+  return process.platform === "win32" && !/\.(?:exe|com|cmd|bat)$/i.test(name) ? [".exe", ".com", ".cmd", ".bat", ""] : [""];
+}
+async function pathExecutable(name) {
+  for (const dir of (process.env["PATH"] ?? "").split(delimiter2).filter(Boolean)) {
+    for (const suffix of suffixes(name)) {
+      const path = resolve2(dir, name + suffix);
+      if (await executable(path)) return path;
+    }
+  }
+  return void 0;
+}
+async function resolution(command, source, note) {
+  const info = await stat2(command[0] ?? "").catch(() => void 0);
+  return {
+    command,
+    source,
+    identity: hash(JSON.stringify([command, source, info?.size, info?.mtimeMs, process.env["PATH"]])),
+    ...note ? { note } : {}
+  };
+}
+var requestTools = new AsyncLocalStorage();
+function withToolResolution(action) {
+  return requestTools.run(/* @__PURE__ */ new Map(), action);
+}
+function resolveTool(...args) {
+  const cache = requestTools.getStore();
+  const key = JSON.stringify([args[0], dirname(resolve2(args[0], args[1])), ...args.slice(2)]);
+  const existing = cache?.get(key);
+  if (existing) return existing;
+  const task = findTool(...args);
+  cache?.set(key, task);
+  return task;
+}
+async function findTool(root, path, command, explicit = false, allowTemporary = true) {
+  const name = command[0];
+  if (!name) throw new Error("Empty command");
+  if (explicit) {
+    const entry = isAbsolute4(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
+    return resolution(
+      [entry ?? name, ...command.slice(1)],
+      entry && await executable(entry) ? "explicit" : "missing",
+      entry && await executable(entry) ? void 0 : `Explicit command missing: ${name}; no fallback`
+    );
+  }
+  let dir = dirname(resolve2(root, path));
+  while (inside(root, dir)) {
+    for (const candidate of [
+      ...suffixes(name).map(
+        (suffix) => join6(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", name + suffix)
+      ),
+      ...suffixes(name).map((suffix) => join6(dir, "node_modules", ".bin", name + suffix))
+    ])
+      if (await executable(candidate)) return resolution([candidate, ...command.slice(1)], "project");
+    if (dir === root) break;
+    dir = dirname(dir);
+  }
+  const local = await pathExecutable(name);
+  if (local) return resolution([local, ...command.slice(1)], "PATH");
+  const plan = temporary[name];
+  if (allowTemporary && plan) {
+    if (plan.ecosystem === "python") {
+      for (const [launcher, prefix] of [
+        ["uvx", ["--isolated", "--from", plan.packages[0] ?? name]],
+        ["uv", ["tool", "run", "--isolated", "--from", plan.packages[0] ?? name]],
+        ["pipx", ["run", "--spec", plan.packages[0] ?? name]]
+      ]) {
+        const found = await pathExecutable(launcher);
+        if (found)
+          return resolution(
+            [found, ...prefix, ...command],
+            "temporary",
+            "Available to attempt; initialization not verified"
+          );
+      }
+    } else {
+      const npx = await pathExecutable("npx");
+      if (npx)
+        return resolution(
+          [npx, "--yes", ...plan.packages.flatMap((pkg) => ["--package", pkg]), "--", ...command],
+          "temporary",
+          "Available to attempt; initialization not verified"
+        );
+    }
+  }
+  return resolution(
+    [...command],
+    "missing",
+    `Tool missing: ${name}; install locally and retry or use lsp_status refresh=true`
+  );
+}
+function languageFor(config, path) {
+  for (const [language, server2] of Object.entries(config.servers))
+    if (server2 !== false && server2.extensions.includes(extname(path))) return { language, server: server2 };
+  return void 0;
+}
+async function resolveServer(root, path, config) {
+  const entry = languageFor(config, path);
+  if (!entry) throw new Error(`Language disabled or unsupported: ${extname(path) || path}`);
+  const tool2 = await resolveTool(root, path, entry.server.command, entry.server.explicit);
+  return {
+    language: entry.language,
+    tool: tool2,
+    server: {
+      id: entry.server.id,
+      command: tool2.command,
+      extensions: [...entry.server.extensions],
+      priority: 0,
+      ...entry.server.env ? { env: { ...entry.server.env } } : {},
+      ...entry.server.initialization ? { initialization: { ...entry.server.initialization } } : {}
+    }
+  };
+}
+function codeLanguage(config, path) {
+  return languageFor(config, path)?.language ?? Object.entries(config.extensions).find(([, extensions]) => extensions.includes(extname(path)))?.[0];
+}
+
 // src/runners.ts
 async function run(command, args, cwd, signal, input) {
   signal.throwIfAborted();
   return new Promise((resolve7, reject) => {
-    const child = spawn2(command, args, {
+    const prepared = createSpawnCommand([command, ...args]);
+    const child = spawn2(prepared.command, prepared.args, {
       cwd,
+      shell: prepared.shell,
       detached: process.platform !== "win32",
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
@@ -1009,49 +1056,75 @@ async function run(command, args, cwd, signal, input) {
 }
 async function exists(path) {
   try {
-    await access(path);
+    await access3(path);
     return true;
   } catch {
     return false;
   }
 }
 async function configured(root, path, names) {
-  let dir = dirname(path);
+  let dir = dirname2(path);
   while (inside(root, dir)) {
     for (const name of names) if (await exists(join7(dir, name))) return true;
     if (dir === root) break;
-    dir = dirname(dir);
+    dir = dirname2(dir);
   }
   return false;
 }
-async function executable(root, packageName, entry) {
-  let dir = root;
-  while (true) {
+async function executable2(root, target, packageName, entry) {
+  let dir = dirname2(target);
+  while (inside(root, dir)) {
     const path = join7(dir, "node_modules", packageName, entry);
     if (await exists(path)) return realpath2(path);
-    const parent = dirname(dir);
-    if (parent === dir) break;
+    const parent = dirname2(dir);
+    if (dir === root) break;
     dir = parent;
   }
-  throw new Error(`${packageName}: configured tool is not installed`);
+  return void 0;
 }
-async function select(root, path, formatting = false) {
-  const config = await configuration(root);
-  const extension = extname(path);
-  const choice = formatting ? "auto" : extension === ".py" ? config.python : config.javascript;
+async function javascriptRunner(root, path, name, packageName, entry) {
+  const tool2 = await resolveTool(root, path, [name], false, false);
+  if (tool2.source === "project") return { name, command: tool2.command[0] ?? name, prefix: [], source: "project" };
+  const script = await executable2(root, path, packageName, entry);
+  if (script) return { name, command: process.execPath, prefix: [script], source: "project" };
+  if (tool2.source === "PATH") return { name, command: tool2.command[0] ?? name, prefix: [], source: "PATH" };
+  throw new Error(`${name}: configured tool is not installed`);
+}
+async function select(root, path, formatting = false, provided, active = false, signal = new AbortController().signal) {
+  const config = provided ?? await configuration(root);
+  const extension = extname2(path);
+  const choice = formatting ? "auto" : /\.pyi?$/.test(extension) ? config.python : config.javascript;
   if (choice === "off") return void 0;
-  if (extension === ".py" && await configured(root, path, ["pyproject.toml", "ruff.toml", ".ruff.toml"])) {
-    const local = join7(root, ".venv", process.platform === "win32" ? "Scripts/ruff.exe" : "bin/ruff");
-    return { name: "ruff", command: await exists(local) ? local : "ruff", prefix: [] };
+  if (/\.pyi?$/.test(extension)) {
+    let tool2 = await resolveTool(root, path, ["ruff"], false, false);
+    if (tool2.source === "missing") {
+      const prepared = await preparedRuff();
+      if (prepared) return { name: "ruff", command: prepared, prefix: [], source: "prepared" };
+      if (!active || !config.trusted)
+        throw new Error(
+          "Ruff unavailable: no local or prepared executable; run trusted active MCP diagnostics to prepare it. Hook never downloads tools"
+        );
+      tool2 = await resolveTool(root, path, ["ruff"]);
+      if (tool2.source === "missing") throw new Error(tool2.note);
+      const launcher = tool2.command[0] ?? "";
+      if (/^uvx?(?:\.exe)?$/.test(basename(launcher))) {
+        const prepared2 = await run(
+          launcher,
+          [...tool2.command.slice(1, -1), "python", "-c", "import shutil; print(shutil.which('ruff') or '')"],
+          root,
+          signal
+        );
+        if (prepared2.code !== 0 || !prepared2.stdout.trim())
+          throw new Error(`Ruff preparation failed: ${prepared2.stderr}`);
+        await rememberRuff(prepared2.stdout.trim());
+        return { name: "ruff", command: prepared2.stdout.trim(), prefix: [], source: "prepared" };
+      }
+    }
+    return { name: "ruff", command: tool2.command[0] ?? "ruff", prefix: tool2.command.slice(1), source: tool2.source };
   }
-  if (extension === ".py" && choice === "ruff") throw new Error("ruff: matching project configuration missing");
   if (!/\.(?:[cm]?[jt]sx?|jsonc?|css)$/.test(path)) return void 0;
   if ((choice === "auto" || choice === "biome") && await configured(root, path, ["biome.json", "biome.jsonc"]))
-    return {
-      name: "biome",
-      command: process.execPath,
-      prefix: [await executable(root, "@biomejs/biome", "bin/biome")]
-    };
+    return javascriptRunner(root, path, "biome", "@biomejs/biome", "bin/biome");
   if ((choice === "auto" || choice === "eslint") && await configured(root, path, [
     "eslint.config.js",
     "eslint.config.mjs",
@@ -1060,57 +1133,94 @@ async function select(root, path, formatting = false) {
     ".eslintrc.json",
     ".eslintrc.cjs"
   ]))
-    return {
-      name: "eslint",
-      command: process.execPath,
-      prefix: [await executable(root, "eslint", "bin/eslint.js")]
-    };
+    return javascriptRunner(root, path, "eslint", "eslint", "bin/eslint.js");
   if (choice !== "auto") throw new Error(`${choice}: matching project configuration missing`);
   return void 0;
 }
-async function runnerIdentity(root, path) {
-  if (!await trusted(root)) return "untrusted";
+async function runnerIdentity(root, path, provided) {
+  const config = provided ?? await configuration(root);
+  if (!config.trusted) return "untrusted";
   try {
-    return JSON.stringify(await select(root, path)) ?? "none";
+    const runner = await select(root, path, false, config);
+    if (!runner) return "none";
+    const identities = await Promise.all(
+      [runner.command, ...runner.prefix.filter((value) => value.includes("/"))].map(async (command) => {
+        const info = await stat3(command).catch(() => void 0);
+        return [command, info?.size, info?.mtimeMs, info?.ino];
+      })
+    );
+    return JSON.stringify([runner, identities]);
   } catch {
     return "unavailable";
   }
 }
-async function lint(root, path, signal) {
-  if (!await trusted(root)) return void 0;
+async function lint(root, path, signal, provided, active = false) {
+  const config = provided ?? await configuration(root);
+  if (!config.trusted) return void 0;
   try {
     const absolute = await workspacePath(root, path);
-    const runner = await select(root, absolute);
+    if (!languageFor(config, path))
+      return { path, state: "skipped", findings: [], note: "Language disabled or unsupported" };
+    const server2 = await resolveServer(root, absolute, config);
+    if (server2.tool.source === "missing")
+      return { path, state: "skipped", findings: [], note: server2.tool.note ?? "LSP unavailable" };
+    const runner = await select(root, absolute, false, config, active, signal);
     if (!runner)
       return { path, state: "skipped", findings: [], note: "lint off or no matching Runner configuration" };
     const args = runner.name === "biome" ? ["lint", "--reporter=json", "--max-diagnostics=1000", absolute] : runner.name === "eslint" ? ["--format", "json", absolute] : ["check", "--no-cache", "--output-format", "json", "--", absolute];
-    const result = await run(runner.command, [...runner.prefix, ...args], root, signal);
+    const result = await measured(
+      "lint",
+      () => run(runner.command, [...runner.prefix, ...args], dirname2(absolute), signal)
+    );
     if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr || `Runner exit ${result.code}`);
     const data = JSON.parse(result.stdout);
-    const findings = parseLint(runner.name, data, path, await readFile3(absolute, "utf8"));
+    const findings = parseLint(runner.name, data, path, await readFile4(absolute, "utf8"));
     return { path, state: "complete", findings };
   } catch (error) {
     return { path, state: signal.aborted ? "pending" : "failed", findings: [], note: `lint: ${message(error)}` };
   }
 }
-async function formatWithRunner(root, path, signal) {
-  if (!await trusted(root)) return void 0;
+async function formatWithRunner(root, path, signal, provided) {
+  const config = provided ?? await configuration(root);
+  if (!config.trusted) return void 0;
   const absolute = await workspacePath(root, path);
-  const runner = await select(root, absolute, true);
+  const runner = await select(root, absolute, true, config, true, signal);
   if (!runner || runner.name === "eslint") return void 0;
-  const before = await readFile3(absolute, "utf8");
+  const before = await readFile4(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
-  const result = await run(runner.command, [...runner.prefix, ...args], root, signal, before);
+  const result = await run(runner.command, [...runner.prefix, ...args], dirname2(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
-  if (await readFile3(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
+  if (await readFile4(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   if (before === result.stdout) return `Unchanged: ${path}`;
   signal.throwIfAborted();
-  await writeFile(absolute, result.stdout);
+  await writeFile2(absolute, result.stdout);
   return `Formatted: ${path}`;
+}
+async function preflightRunner(root, path, config, signal) {
+  if (!config.trusted) {
+    if (/\.pyi?$/.test(path)) throw new Error("Python formatting with Ruff requires workspace trust");
+    return false;
+  }
+  const runner = await select(root, await workspacePath(root, path), true, config, true, signal);
+  if (!runner || runner.name === "eslint") return false;
+  const result = await run(runner.command, [...runner.prefix, "--version"], root, signal);
+  if (result.code !== 0) throw new Error(`${runner.name} preflight failed: ${result.stderr}`);
+  return true;
 }
 
 // src/identity.ts
 var CONFIGS = [
+  "ty.toml",
+  ".clangd",
+  "compile_commands.json",
+  "build/compile_commands.json",
+  "compile_flags.txt",
+  ".clang-format",
+  "Cargo.lock",
+  "rust-toolchain",
+  "rust-toolchain.toml",
+  "rustfmt.toml",
+  ".rustfmt.toml",
   "biome.json",
   "biome.jsonc",
   "eslint.config.js",
@@ -1131,19 +1241,17 @@ var CONFIGS = [
 ];
 async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const dirs = /* @__PURE__ */ new Set();
-  const extensions = /* @__PURE__ */ new Set();
   const runners = /* @__PURE__ */ new Map();
   for (const path of paths) {
     signal.throwIfAborted();
-    const absolute = resolve2(root, path);
-    extensions.add(extname2(path));
-    const key = `${dirname2(absolute)}:${extname2(path)}`;
-    if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute));
-    let dir = dirname2(absolute);
+    const absolute = resolve3(root, path);
+    const key = `${dirname3(absolute)}:${extname3(path)}`;
+    if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute, config));
+    let dir = dirname3(absolute);
     while (inside(root, dir)) {
       dirs.add(dir);
       if (dir === root) break;
-      dir = dirname2(dir);
+      dir = dirname3(dir);
     }
   }
   const contents = [];
@@ -1152,19 +1260,22 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
       signal.throwIfAborted();
       const path = join8(dir, name);
       try {
-        if ((await stat2(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
-        contents.push(path, hash(await readFile4(path, { encoding: "utf8", signal })));
+        if ((await stat4(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
+        contents.push(path, hash(await readFile5(path, { encoding: "utf8", signal })));
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
     }
-  const servers = lsp ? withConfiguration(config, () => [...extensions].sort().map((extension) => findServerForExtension(extension))) : [];
+  const representatives = [...new Map(paths.map((path) => [`${dirname3(path)}:${extname3(path)}`, path])).values()];
+  const servers = lsp ? await Promise.all(
+    representatives.map((path) => resolveServer(root, path, config).catch((error) => String(error)))
+  ) : [];
   return hash(JSON.stringify([config.version, contents, [...runners].sort(), servers]));
 }
 
 // src/metadata.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { lstat as lstat2, mkdir as mkdir2, readdir as readdir2, readFile as readFile5, realpath as realpath3, rename as rename2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { lstat as lstat3, mkdir as mkdir3, readdir as readdir2, readFile as readFile6, realpath as realpath3, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { join as join9 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1185,19 +1296,19 @@ var Metadata = class {
   }
   async dir() {
     const user = process.getuid?.() ?? hash(homedir4()).slice(0, 10);
-    const base = join9(process.env["CODEX_LSP_CACHE"] ?? join9(tmpdir2(), `codex-lsp-${user}`), `metadata-v4-${user}`);
-    await mkdir2(base, { recursive: true, mode: 448 });
-    const info = await lstat2(base);
+    const base = join9(process.env["CODEX_LSP_CACHE"] ?? join9(tmpdir2(), `codex-lsp-${user}`), `metadata-v5-${user}`);
+    await mkdir3(base, { recursive: true, mode: 448 });
+    const info = await lstat3(base);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
       throw new Error("Unsafe metadata permissions");
     const dir = join9(base, hash(await realpath3(this.root)));
-    await mkdir2(dir, { recursive: true, mode: 448 });
-    if ((await lstat2(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
+    await mkdir3(dir, { recursive: true, mode: 448 });
+    if ((await lstat3(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
     return dir;
   }
   async load(path, id) {
     try {
-      const data = JSON.parse(await readFile5(path, "utf8"));
+      const data = JSON.parse(await readFile6(path, "utf8"));
       if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string")
         throw new Error("Invalid metadata");
       for (const key of ["touched", "current", "pending", "blocked"])
@@ -1221,7 +1332,7 @@ var Metadata = class {
     for (const file of await readdir2(dir))
       if (file.endsWith(".json")) {
         try {
-          const value = JSON.parse(await readFile5(join9(dir, file), "utf8"));
+          const value = JSON.parse(await readFile6(join9(dir, file), "utf8"));
           if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
             ids.push(value["id"]);
         } catch {
@@ -1232,7 +1343,7 @@ var Metadata = class {
   async reclaim(lock) {
     let owner;
     try {
-      owner = JSON.parse(await readFile5(join9(lock, "owner"), "utf8"));
+      owner = JSON.parse(await readFile6(join9(lock, "owner"), "utf8"));
     } catch {
       return;
     }
@@ -1244,12 +1355,12 @@ var Metadata = class {
       if (!record(error) || error["code"] !== "ESRCH") return;
     }
     try {
-      const current = JSON.parse(await readFile5(join9(lock, "owner"), "utf8"));
+      const current = JSON.parse(await readFile6(join9(lock, "owner"), "utf8"));
       if (!record(current) || current["nonce"] !== owner["nonce"]) return;
     } catch {
       return;
     }
-    await rename2(lock, `${lock}.abandoned-${hash(owner["nonce"])}`).catch((error) => {
+    await rename3(lock, `${lock}.abandoned-${hash(owner["nonce"])}`).catch((error) => {
       if (!record(error) || !["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
     });
   }
@@ -1258,19 +1369,19 @@ var Metadata = class {
     const dir = await this.dir();
     const path = join9(dir, `${hash(id)}.json`);
     const lock = `${path}.lock`;
-    const nonce = randomUUID2();
+    const nonce = randomUUID3();
     const candidate = `${lock}.claim-${nonce}`;
     const released = `${lock}.released-${nonce}`;
     const temp = `${path}.${nonce}.tmp`;
     const deadline = Date.now() + 1e3;
     let acquired = false;
     try {
-      await mkdir2(candidate, { mode: 448 });
-      await writeFile2(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
+      await mkdir3(candidate, { mode: 448 });
+      await writeFile3(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
       while (!acquired) {
         signal.throwIfAborted();
         try {
-          await rename2(candidate, lock);
+          await rename3(candidate, lock);
           acquired = true;
         } catch (error) {
           if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
@@ -1284,14 +1395,14 @@ var Metadata = class {
       if (change(state) === false) return state;
       state.version++;
       for (const key of ["touched", "current", "pending", "blocked"]) state[key] = [...new Set(state[key])];
-      await writeFile2(temp, JSON.stringify(state), { mode: 384 });
-      await rename2(temp, path);
+      await writeFile3(temp, JSON.stringify(state), { mode: 384 });
+      await rename3(temp, path);
       return state;
     } finally {
       await rm2(temp, { force: true });
       await rm2(candidate, { recursive: true, force: true });
       if (acquired) {
-        await rename2(lock, released);
+        await rename3(lock, released);
         await rm2(released, { recursive: true, force: true });
       }
     }
@@ -1309,7 +1420,7 @@ var HookEngine = class {
   constructor(root, linter) {
     this.root = root;
     this.store = new Metadata(root);
-    this.linter = linter ?? (async (path, signal) => await lint(root, path, signal) ?? {
+    this.linter = linter ?? (async (path, signal) => await lint(root, path, signal, this.config) ?? {
       path,
       state: "skipped",
       findings: [],
@@ -1328,11 +1439,22 @@ var HookEngine = class {
     const stopping = event === "Stop" || event === "SubagentStop";
     if (stopping && input["stop_hook_active"] === true) return "";
     const initial = await this.store.read(id);
+    if (event === "PreToolUse" && initial.baseline) {
+      await this.store.update(id, signal, (state2) => {
+        const turn = text(input["turn_id"]);
+        if (turn && turn !== state2.turn) {
+          state2.turn = turn;
+          state2.current = [];
+        }
+      });
+      return "";
+    }
     const config = await configuration(this.root);
+    this.config = config;
     const snapshot = await inventory(this.root, 1e4, signal, config.exclude);
     if (!snapshot.complete)
       return JSON.stringify({
-        systemMessage: "Codex LSP: change discovery incomplete; baseline retained; narrow scope with check_diagnostics mode=full"
+        systemMessage: "Codex LSP: change discovery incomplete; baseline retained; narrow scope with check_diagnostics scope=paths run=active"
       });
     const changed = initial.baseline ? [...snapshot.files].filter(([path, version]) => initial.baseline?.[path] !== version).map(([path]) => path) : [];
     const deleted = /* @__PURE__ */ new Set();
@@ -1380,7 +1502,7 @@ var HookEngine = class {
       const result = await this.linter(path, signal);
       if (signal.aborted) break;
       try {
-        if (hash(await readFile6(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content)
+        if (hash(await readFile7(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content)
           continue;
       } catch {
         continue;
@@ -1395,7 +1517,7 @@ var HookEngine = class {
       if (!entry) continue;
       try {
         if (hash(
-          await readFile6(await workspacePath(this.root, entry.result.path), {
+          await readFile7(await workspacePath(this.root, entry.result.path), {
             encoding: "utf8",
             signal: commitSignal
           })
@@ -1412,9 +1534,12 @@ var HookEngine = class {
       for (const { result, fingerprint } of completed) {
         if (result.state === "complete" || result.state === "skipped" || result.state === "failed")
           current.pending = current.pending.filter((path) => path !== result.path);
-        const newFeedback = current.shown[result.path] !== fingerprint;
+        const environment = !result.findings.length && (result.state === "failed" || result.state === "skipped");
+        const key = environment ? `environment:${codeLanguage(config, result.path)}:${result.note}` : result.path;
+        const signature = environment ? hash(result.note ?? "unavailable") : fingerprint;
+        const newFeedback = current.shown[key] !== signature;
         if (newFeedback && (result.findings.length || result.state !== "complete")) changedResults.push(result);
-        current.shown[result.path] = fingerprint;
+        current.shown[key] = signature;
         if (stopping && result.state === "complete" && result.findings.some((finding) => finding.severity === "error") && !current.blocked.includes(fingerprint)) {
           block = true;
           current.blocked.push(fingerprint);
@@ -1427,7 +1552,7 @@ var HookEngine = class {
     if (!changedResults.length && !signal.aborted) return "";
     const output = `session=${id}
 Lint channel: ${render(changedResults, 10, 1800)}${signal.aborted ? "\nLint budget reached; unfinished files remain pending." : ""}
-LSP not executed; use check_diagnostics mode=full workspace=${this.root}`;
+LSP not executed; use check_diagnostics scope=paths run=active workspace=${this.root}`;
     return JSON.stringify(
       stopping ? block ? { decision: "block", reason: output } : { systemMessage: output } : { hookSpecificOutput: { hookEventName: event, additionalContext: output } }
     );
@@ -1476,14 +1601,14 @@ async function runHookCli() {
 }
 
 // src/environment.ts
-import { basename, dirname as dirname3 } from "node:path";
+import { basename as basename2, dirname as dirname4 } from "node:path";
 import { fileURLToPath } from "node:url";
 function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
   if (process.env["CODEX_HOME"]) return;
-  let child = dirname3(script);
-  for (let parent = dirname3(child); parent !== child; parent = dirname3(child)) {
-    if (basename(parent) === "plugins" && basename(child) === "cache") {
-      process.env["CODEX_HOME"] = dirname3(parent);
+  let child = dirname4(script);
+  for (let parent = dirname4(child); parent !== child; parent = dirname4(child)) {
+    if (basename2(parent) === "plugins" && basename2(child) === "cache") {
+      process.env["CODEX_HOME"] = dirname4(parent);
       return;
     }
     child = parent;
@@ -1495,27 +1620,28 @@ import { createInterface } from "node:readline";
 
 // src/runtime.ts
 import { realpath as realpath5 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5 } from "node:path";
+import { isAbsolute as isAbsolute6 } from "node:path";
 
 // src/engine.ts
-import { readFile as readFile9, stat as stat3 } from "node:fs/promises";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { readFile as readFile10, stat as stat5 } from "node:fs/promises";
 import { relative as relative4 } from "node:path";
 
 // src/language.ts
-import { readFile as readFile8, writeFile as writeFile3 } from "node:fs/promises";
-import { extname as extname5, relative as relative3, resolve as resolve6 } from "node:path";
+import { readFile as readFile9, writeFile as writeFile4 } from "node:fs/promises";
+import { dirname as dirname8, extname as extname5, relative as relative3, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
 
 // packages/lsp-tools-mcp/dist/lsp/client.js
-import { readFileSync as readFileSync2 } from "node:fs";
-import { extname as extname3, resolve as resolve3 } from "node:path";
+import { readFileSync } from "node:fs";
+import { extname as extname4, resolve as resolve4 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 
 // packages/lsp-tools-mcp/dist/lsp/connection.js
 import { pathToFileURL } from "node:url";
 
 // packages/lsp-tools-mcp/dist/lsp/transport.js
-import { delimiter as delimiter3 } from "node:path";
+import { delimiter as delimiter4 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/constants.js
 var REQUEST_TIMEOUT_MS = 15e3;
@@ -1770,16 +1896,22 @@ function toError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+// packages/lsp-tools-mcp/dist/lsp/server-installation.js
+import { delimiter as delimiter3, join as join10 } from "node:path";
+function getAdditionalPathBases(workingDirectory) {
+  return [join10(workingDirectory, "node_modules", ".bin")];
+}
+
 // packages/lsp-tools-mcp/dist/lsp/transport.js
-function isRecord2(value) {
+function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseConfigurationItems(params) {
-  if (!isRecord2(params) || !Array.isArray(params["items"]))
+  if (!isRecord(params) || !Array.isArray(params["items"]))
     return [];
   const items2 = [];
   for (const item of params["items"]) {
-    if (!isRecord2(item))
+    if (!isRecord(item))
       continue;
     const section = item["section"];
     items2.push(section === void 0 || typeof section !== "string" ? {} : { section });
@@ -1787,15 +1919,15 @@ function parseConfigurationItems(params) {
   return items2;
 }
 function parseDiagnosticsParams(params) {
-  if (!isRecord2(params) || typeof params["uri"] !== "string")
+  if (!isRecord(params) || typeof params["uri"] !== "string")
     return null;
   const diagnostics = Array.isArray(params["diagnostics"]) ? params["diagnostics"].filter(isDiagnostic) : [];
   return { uri: params["uri"], diagnostics };
 }
 var LspClientTransport = class {
-  constructor(root, server) {
+  constructor(root, server2) {
     this.root = root;
-    this.server = server;
+    this.server = server2;
     this.proc = null;
     this.connection = null;
     this.stderrBuffer = [];
@@ -1814,7 +1946,7 @@ var LspClientTransport = class {
       ...this.server.env
     };
     const pathValue = process.platform === "win32" ? env["PATH"] ?? env["Path"] ?? "" : env["PATH"] ?? "";
-    const spawnPath = [pathValue, ...getAdditionalPathBases(this.root)].filter(Boolean).join(delimiter3);
+    const spawnPath = [pathValue, ...getAdditionalPathBases(this.root)].filter(Boolean).join(delimiter4);
     if (process.platform === "win32" && env["Path"] !== void 0) {
       env["Path"] = spawnPath;
     }
@@ -1986,13 +2118,13 @@ var LspClientTransport = class {
   }
 };
 function isDiagnostic(value) {
-  return isRecord2(value) && isRange(value["range"]) && typeof value["message"] === "string";
+  return isRecord(value) && isRange(value["range"]) && typeof value["message"] === "string";
 }
 function isRange(value) {
-  return isRecord2(value) && isPosition(value["start"]) && isPosition(value["end"]);
+  return isRecord(value) && isPosition(value["start"]) && isPosition(value["end"]);
 }
 function isPosition(value) {
-  return isRecord2(value) && typeof value["line"] === "number" && typeof value["character"] === "number";
+  return isRecord(value) && typeof value["line"] === "number" && typeof value["character"] === "number";
 }
 
 // packages/lsp-tools-mcp/dist/lsp/connection.js
@@ -2212,11 +2344,11 @@ var LspClient = class extends LspClientConnection {
     return this.diagnosticPullErrors;
   }
   async openFile(filePath) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     const uri = pathToFileURL2(absPath).href;
-    const text2 = readFileSync2(absPath, "utf-8");
+    const text2 = readFileSync(absPath, "utf-8");
     if (!this.openedFiles.has(absPath)) {
-      const ext = extname3(absPath);
+      const ext = extname4(absPath);
       const languageId = getLanguageId(ext);
       const version = 1;
       await this.sendNotification("textDocument/didOpen", {
@@ -2250,7 +2382,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async definition(filePath, line, character) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/definition", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -2258,7 +2390,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async references(filePath, line, character, includeDeclaration = true) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/references", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -2267,7 +2399,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async documentSymbols(filePath) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/documentSymbol", {
       textDocument: { uri: pathToFileURL2(absPath).href }
@@ -2285,7 +2417,7 @@ var LspClient = class extends LspClientConnection {
     return /unsupported|not supported|method not found|unknown request/i.test(error.message);
   }
   async diagnostics(filePath) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     const uri = pathToFileURL2(absPath).href;
     await this.openFile(absPath);
     await new Promise((r) => setTimeout(r, POST_DIAGNOSTICS_WAIT_MS));
@@ -2304,7 +2436,7 @@ var LspClient = class extends LspClientConnection {
     return { items: this.getStoredDiagnostics(uri) };
   }
   async prepareRename(filePath, line, character) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/prepareRename", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -2312,7 +2444,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async rename(filePath, line, character, newName) {
-    const absPath = resolve3(filePath);
+    const absPath = resolve4(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/rename", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -2322,12 +2454,8 @@ var LspClient = class extends LspClientConnection {
   }
 };
 
-// packages/lsp-tools-mcp/dist/lsp/client-wrapper.js
-import { statSync as statSync4 } from "node:fs";
-import { extname as extname4, resolve as resolve5 } from "node:path";
-
 // packages/lsp-tools-mcp/dist/lsp/process-signal-cleanup.js
-import { constants } from "node:os";
+import { constants as constants3 } from "node:os";
 var PROCESS_SIGNALS = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM"];
 var registrations = /* @__PURE__ */ new Set();
 var signalHandlers = /* @__PURE__ */ new Map();
@@ -2342,7 +2470,7 @@ function removeSignalHandlers() {
   handlersInstalled = false;
 }
 function signalExitCode(signal) {
-  return 128 + (constants.signals[signal] ?? 1);
+  return 128 + (constants3.signals[signal] ?? 1);
 }
 function terminateParent(signal) {
   if (process.platform === "win32" && signal === "SIGBREAK") {
@@ -2451,7 +2579,7 @@ var LspManager = class {
     this.idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
     this.initTimeoutMs = options.initTimeoutMs ?? INIT_TIMEOUT_MS;
     this.reaperIntervalMs = options.reaperIntervalMs ?? REAPER_INTERVAL_MS;
-    this.clientFactory = options.clientFactory ?? ((root, server) => new LspClient(root, server));
+    this.clientFactory = options.clientFactory ?? ((root, server2) => new LspClient(root, server2));
     this.now = options.now ?? (() => Date.now());
     this.startReaper();
     this.signalDisposer = installProcessSignalCleanup(() => this.stopAll());
@@ -2489,12 +2617,12 @@ var LspManager = class {
       await stopClientBestEffort(managed.client);
     }
   }
-  async getClient(root, server, signal) {
+  async getClient(root, server2, signal) {
     if (this.disposed) {
       throw new Error("LspManager has been disposed");
     }
     signal?.throwIfAborted();
-    const key = this.getKey(root, server.id);
+    const key = this.getKey(root, server2.id);
     let managed = this.clients.get(key);
     if (managed) {
       const t = this.now();
@@ -2523,13 +2651,13 @@ var LspManager = class {
       if (!managed.client.isAlive()) {
         await stopClientBestEffort(managed.client);
         this.clients.delete(key);
-        return this.getClient(root, server, signal);
+        return this.getClient(root, server2, signal);
       }
       managed.refCount++;
       managed.lastUsedAt = this.now();
       return managed.client;
     }
-    const client = this.clientFactory(root, server);
+    const client = this.clientFactory(root, server2);
     const initStartedAt = this.now();
     const initPromise = (async () => {
       await client.start();
@@ -2585,13 +2713,13 @@ var LspManager = class {
     this.clients.delete(key);
     void stopClientBestEffort(managed.client);
   }
-  warmupClient(root, server) {
+  warmupClient(root, server2) {
     if (this.disposed)
       return;
-    const key = this.getKey(root, server.id);
+    const key = this.getKey(root, server2.id);
     if (this.clients.has(key))
       return;
-    const client = this.clientFactory(root, server);
+    const client = this.clientFactory(root, server2);
     const initStartedAt = this.now();
     const initPromise = (async () => {
       await client.start();
@@ -2664,21 +2792,14 @@ var LspManager = class {
     await Promise.allSettled(stopPromises);
   }
 };
-var _defaultInstance = null;
-function getLspManager() {
-  if (!_defaultInstance) {
-    _defaultInstance = new LspManager();
-  }
-  return _defaultInstance;
-}
 
 // packages/lsp-tools-mcp/dist/lsp/workspace-root.js
-import { existsSync as existsSync5, statSync as statSync3 } from "node:fs";
-import { dirname as dirname6, join as join13, resolve as resolve4 } from "node:path";
+import { existsSync as existsSync3, statSync as statSync3 } from "node:fs";
+import { dirname as dirname7, join as join14, resolve as resolve5 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-workspace-root.js
-import { existsSync as existsSync4, realpathSync as realpathSync2 } from "node:fs";
-import { dirname as dirname5, join as join12 } from "node:path";
+import { existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
+import { dirname as dirname6, join as join13 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/abortable-shared-operation.js
 function abortReason(signal) {
@@ -2742,8 +2863,8 @@ function awaitSharedAbortableOperation(operation, signal) {
 }
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-manifest-snapshot.js
-import { readFileSync as readFileSync3 } from "node:fs";
-import { dirname as dirname4, join as join10 } from "node:path";
+import { readFileSync as readFileSync2 } from "node:fs";
+import { dirname as dirname5, join as join11 } from "node:path";
 function isMissingManifestError(error) {
   if (!(error instanceof Error))
     return false;
@@ -2752,7 +2873,7 @@ function isMissingManifestError(error) {
 }
 function readManifestSnapshot(path, allowMissing = false) {
   try {
-    return { path, exists: true, content: readFileSync3(path, "utf8") };
+    return { path, exists: true, content: readFileSync2(path, "utf8") };
   } catch (error) {
     if (allowMissing && isMissingManifestError(error)) {
       return { path, exists: false, content: void 0 };
@@ -2780,13 +2901,13 @@ function ancestorManifestPaths(manifestDir) {
   let dir = manifestDir;
   let prev = "";
   while (dir !== prev) {
-    const manifestPath = join10(dir, "Cargo.toml");
+    const manifestPath = join11(dir, "Cargo.toml");
     if (!seen.has(manifestPath)) {
       seen.add(manifestPath);
       paths.push(manifestPath);
     }
     prev = dir;
-    dir = dirname4(dir);
+    dir = dirname5(dir);
   }
   return paths;
 }
@@ -2805,8 +2926,8 @@ function readAncestorManifestSnapshots(manifestDir) {
 }
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-metadata-parser.js
-import { readFileSync as readFileSync4, realpathSync, statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute4, join as join11, relative as relative2, sep as sep2 } from "node:path";
+import { readFileSync as readFileSync3, realpathSync, statSync as statSync2 } from "node:fs";
+import { isAbsolute as isAbsolute5, join as join12, relative as relative2, sep as sep2 } from "node:path";
 
 // node_modules/smol-toml/dist/date.js
 /*!
@@ -3736,7 +3857,7 @@ function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
  */
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-metadata-parser.js
-function isRecord3(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function canonicalDirectory(path) {
@@ -3755,15 +3876,15 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile7(path) {
+function readFile8(path) {
   try {
-    return readFileSync4(path, "utf8");
+    return readFileSync3(path, "utf8");
   } catch {
     return void 0;
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile7(path);
+  const content = readFile8(path);
   if (content === void 0)
     return void 0;
   try {
@@ -3774,7 +3895,7 @@ function readCargoManifestKind(path) {
 }
 function isContainedPath(root, path) {
   const relativePath = relative2(root, path);
-  return relativePath === "" || !isAbsolute4(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
+  return relativePath === "" || !isAbsolute5(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
 }
 function parseCargoMetadata(output) {
   let parsed;
@@ -3783,7 +3904,7 @@ function parseCargoMetadata(output) {
   } catch {
     return void 0;
   }
-  if (!isRecord3(parsed))
+  if (!isRecord2(parsed))
     return void 0;
   const workspaceRoot = parsed["workspace_root"];
   const workspaceMembers = parsed["workspace_members"];
@@ -3800,7 +3921,7 @@ function parseCargoMetadata(output) {
   }
   const memberManifestPaths = [];
   for (const pkg of packages) {
-    if (!isRecord3(pkg))
+    if (!isRecord2(pkg))
       return void 0;
     const id = pkg["id"];
     const manifestPath = pkg["manifest_path"];
@@ -3817,7 +3938,7 @@ function validateCargoMetadata(requestedManifestPath, metadata) {
   const workspaceRoot = canonicalDirectory(metadata.workspaceRoot);
   if (workspaceRoot === void 0)
     return void 0;
-  const rootManifestPath = canonicalManifest(join11(workspaceRoot, "Cargo.toml"));
+  const rootManifestPath = canonicalManifest(join12(workspaceRoot, "Cargo.toml"));
   const requestedManifest = canonicalManifest(requestedManifestPath);
   if (rootManifestPath === void 0 || requestedManifest === void 0)
     return void 0;
@@ -4056,10 +4177,10 @@ function nearestCargoManifestDir(startDir) {
   let dir = startDir;
   let prev = "";
   while (dir !== prev) {
-    if (existsSync4(join12(dir, "Cargo.toml")))
+    if (existsSync2(join13(dir, "Cargo.toml")))
       return dir;
     prev = dir;
-    dir = dirname5(dir);
+    dir = dirname6(dir);
   }
   return void 0;
 }
@@ -4070,16 +4191,16 @@ function cacheEntryFor(root, memberManifestDir) {
 function prepareCargoWorkspaceCache(manifestDir, metadata) {
   const entries = /* @__PURE__ */ new Map();
   for (const manifestPath of metadata.memberManifestPaths) {
-    const manifestDir2 = dirname5(manifestPath);
+    const manifestDir2 = dirname6(manifestPath);
     const entry = cacheEntryFor(metadata.workspaceRoot, manifestDir2);
     if (entry === void 0)
       return void 0;
     entries.set(manifestDir2, entry);
   }
-  const requestedManifestPath = canonicalManifest(join12(manifestDir, "Cargo.toml"));
+  const requestedManifestPath = canonicalManifest(join13(manifestDir, "Cargo.toml"));
   if (requestedManifestPath === void 0)
     return void 0;
-  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname5(requestedManifestPath));
+  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname6(requestedManifestPath));
   if (requestedEntry === void 0)
     return void 0;
   entries.set(manifestDir, requestedEntry);
@@ -4149,7 +4270,7 @@ function createInFlightCargoWorkspaceRoot(request) {
 async function loadCargoWorkspaceRoot(request) {
   try {
     request.signal?.throwIfAborted();
-    const manifestPath = join12(request.manifestDir, "Cargo.toml");
+    const manifestPath = join13(request.manifestDir, "Cargo.toml");
     const output = await request.loader(manifestPath, request.signal);
     request.signal?.throwIfAborted();
     if (!snapshotsAreFresh(request.generation.snapshots)) {
@@ -4228,13 +4349,13 @@ function isDirectoryPath(filePath) {
     return false;
   }
 }
-async function findWorkspaceRoot(filePath, server, options = {}) {
-  const abs = resolve4(filePath);
+async function findWorkspaceRoot(filePath, server2, options = {}) {
+  const abs = resolve5(filePath);
   let dir = abs;
   if (!isDirectoryPath(dir)) {
-    dir = dirname6(dir);
+    dir = dirname7(dir);
   }
-  if (server?.id === "rust") {
+  if (server2?.id === "rust") {
     const cargoRoot = await resolveCargoWorkspaceRoot(dir, options);
     if (cargoRoot !== void 0)
       return cargoRoot;
@@ -4242,98 +4363,14 @@ async function findWorkspaceRoot(filePath, server, options = {}) {
   let prevDir = "";
   while (dir !== prevDir) {
     for (const marker of WORKSPACE_MARKERS) {
-      if (existsSync5(join13(dir, marker))) {
+      if (existsSync3(join14(dir, marker))) {
         return dir;
       }
     }
     prevDir = dir;
-    dir = dirname6(dir);
+    dir = dirname7(dir);
   }
-  return dirname6(abs);
-}
-
-// packages/lsp-tools-mcp/dist/lsp/client-wrapper.js
-function isDirectoryPath2(filePath) {
-  try {
-    return statSync4(filePath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-function formatServerLookupError(result) {
-  if (result.status === "not_installed") {
-    const { server, installHint } = result;
-    return [
-      `LSP server '${server.id}' is configured but NOT INSTALLED.`,
-      "",
-      `Command not found: ${server.command[0]}`,
-      "",
-      "To install:",
-      `  ${installHint}`,
-      "",
-      `Supported extensions: ${server.extensions.join(", ")}`,
-      "",
-      "After installation, the server will be available automatically."
-    ].join("\n");
-  }
-  return [
-    `No LSP server configured for extension: ${result.extension}`,
-    "",
-    `Available servers: ${result.availableServers.slice(0, 10).join(", ")}${result.availableServers.length > 10 ? "..." : ""}`,
-    "",
-    "Configure a custom server in '.codex/lsp-client.json':",
-    "  {",
-    '    "lsp": {',
-    '      "my-server": {',
-    '        "command": ["my-lsp", "--stdio"],',
-    `        "extensions": ["${result.extension}"]`,
-    "      }",
-    "    }",
-    "  }"
-  ].join("\n");
-}
-var READ_ONLY_RETRY_TOOLS = /* @__PURE__ */ new Set([
-  "diagnostics",
-  "definition",
-  "references",
-  "documentSymbols",
-  "workspaceSymbols",
-  "prepareRename"
-]);
-async function withLspClient(filePath, fn, toolName, options = {}) {
-  const absPath = resolve5(filePath);
-  if (isDirectoryPath2(absPath)) {
-    throw new LspInvalidPathError("Directory paths are not supported by this LSP tool. Use lsp.diagnostics with a directory path for directory diagnostics.");
-  }
-  const ext = extname4(absPath);
-  const result = findServerForExtension(ext);
-  if (result.status !== "found") {
-    throw new LspServerLookupError(formatServerLookupError(result));
-  }
-  const server = result.server;
-  const { manager: optionManager, ...workspaceRootOptions } = options;
-  const root = await findWorkspaceRoot(absPath, server, workspaceRootOptions);
-  const manager = optionManager ?? getLspManager();
-  const acquireAndCall = async (allowRetry) => {
-    const client = await manager.getClient(root, server, options.signal);
-    try {
-      return await fn(client);
-    } catch (err) {
-      if (allowRetry && READ_ONLY_RETRY_TOOLS.has(toolName) && isLspDeadConnectionError(err)) {
-        manager.invalidateClient(root, server.id, client);
-        return acquireAndCall(false);
-      }
-      if (err instanceof LspRequestTimeoutError) {
-        if (manager.isServerInitializing(root, server.id)) {
-          throw new LspServerInitializingError(err);
-        }
-      }
-      throw err;
-    } finally {
-      manager.releaseClient(root, server.id);
-    }
-  };
-  return acquireAndCall(true);
+  return dirname7(abs);
 }
 
 // src/language.ts
@@ -4352,6 +4389,11 @@ var Client = class extends LspClient {
     super(...arguments);
     this.stopping = false;
     this.published = /* @__PURE__ */ new Map();
+    this.capabilities = {};
+    this.progress = /* @__PURE__ */ new Set();
+    this.progressAt = 0;
+    this.pulls = /* @__PURE__ */ new Map();
+    this.proven = /* @__PURE__ */ new Set();
     this.versions = /* @__PURE__ */ new Map();
   }
   stop() {
@@ -4365,6 +4407,67 @@ var Client = class extends LspClient {
     this.stopTask = super.stop().finally(() => clearTimeout(timer));
     return this.stopTask;
   }
+  supports(operation) {
+    if (operation === "prepare_rename") {
+      const provider = this.capabilities["renameProvider"];
+      return record(provider) && provider["prepareProvider"] === true;
+    }
+    const names = {
+      definition: "definitionProvider",
+      references: "referencesProvider",
+      symbols: "documentSymbolProvider",
+      prepare_rename: "renameProvider",
+      rename: "renameProvider",
+      format: "documentFormattingProvider"
+    };
+    return Boolean(this.capabilities[names[operation] ?? operation]);
+  }
+  async sendRequest(method, params) {
+    if (method === "initialize" && record(params) && record(params["capabilities"])) {
+      const capabilities = params["capabilities"];
+      capabilities["window"] = { workDoneProgress: true };
+      if (record(capabilities["textDocument"])) {
+        capabilities["textDocument"]["publishDiagnostics"] = { versionSupport: true };
+        capabilities["textDocument"]["diagnostic"] = { dynamicRegistration: false };
+      }
+    }
+    let result;
+    if (method === "initialize" && this.connection) {
+      let timer;
+      try {
+        result = await Promise.race([
+          this.connection.sendRequest(method, params),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(
+                new Error(`LSP initialization/download timeout: ${this.stderrBuffer.slice(-5).join("\n")}`)
+              ),
+              35e3
+            );
+          })
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } else result = await super.sendRequest(method, params);
+    if (method === "initialize" && record(result) && record(result["capabilities"]))
+      this.capabilities = result["capabilities"];
+    return result;
+  }
+  async navigation(method, path, line, character) {
+    const capability = {
+      hover: "hoverProvider",
+      typeDefinition: "typeDefinitionProvider",
+      implementation: "implementationProvider",
+      signatureHelp: "signatureHelpProvider"
+    };
+    if (!this.capabilities[capability[method] ?? ""]) return { status: "unsupported", operation: method };
+    await this.openFile(path);
+    return this.sendRequest(`textDocument/${method}`, {
+      textDocument: { uri: pathToFileURL3(path).href },
+      position: { line: line - 1, character }
+    });
+  }
   async start() {
     try {
       await super.start();
@@ -4376,19 +4479,26 @@ var Client = class extends LspClient {
       if (!this.stopping) return logEvent("abnormal-exit");
       return void 0;
     });
+    this.connection?.onNotification("$/progress", (value) => {
+      if (!record(value) || !record(value["value"])) return;
+      const token = String(value["token"]);
+      if (value["value"]["kind"] === "end") this.progress.delete(token);
+      else this.progress.add(token);
+      this.progressAt = Date.now();
+    });
     this.connection?.onNotification("textDocument/publishDiagnostics", (value) => {
       if (!record(value) || typeof value["uri"] !== "string" || !Array.isArray(value["diagnostics"])) return;
       const items2 = value["diagnostics"];
       const version = value["version"];
       this.published.set(
         diagnosticUriKey(value["uri"]),
-        typeof version === "number" ? { version, items: items2 } : { items: items2 }
+        typeof version === "number" ? { version, items: items2, time: Date.now() } : { items: items2, time: Date.now() }
       );
     });
   }
   async openFile(path) {
     const uri = pathToFileURL3(path).href;
-    const content = await readFile8(path, "utf8");
+    const content = await readFile9(path, "utf8");
     const previous = this.versions.get(uri);
     if (previous?.content === content) return;
     this.published.delete(diagnosticUriKey(uri));
@@ -4416,31 +4526,67 @@ var Client = class extends LspClient {
   }
   async collect(path, signal) {
     const uri = pathToFileURL3(path).href;
+    const cold = !this.versions.has(uri);
     await this.openFile(path);
     await this.sendNotification("textDocument/didSave", { textDocument: { uri } });
-    try {
-      const result = await this.sendRequest("textDocument/diagnostic", {
-        textDocument: { uri }
-      });
-      if (Array.isArray(result.items)) return { items: result.items, ready: true };
-    } catch (error) {
-      if (!(record(error) && error["code"] === -32601) && !/method not found|unsupported|not supported|unknown request|unhandled method/i.test(message(error)))
-        throw error;
+    const settling = Date.now() + (cold ? 5e3 : 2e3);
+    while ((this.progress.size || Date.now() - this.progressAt < 200) && Date.now() < settling) {
+      signal.throwIfAborted();
+      await new Promise((resolve7) => setTimeout(resolve7, 25));
     }
-    for (let i = 0; i < 40; i++) {
+    if (this.progress.size) return { items: [], ready: false };
+    if (this.capabilities["diagnosticProvider"]) {
+      const previous = this.pulls.get(uri);
+      const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, settling - Date.now()))]);
+      const result = await new Promise(
+        (resolve7, reject) => {
+          const abort = () => {
+            void this.stop();
+            reject(new Error(signal.aborted ? "Diagnostics cancelled" : "Diagnostic request timeout"));
+          };
+          requestSignal.addEventListener("abort", abort, { once: true });
+          if (requestSignal.aborted) {
+            abort();
+            return;
+          }
+          void this.sendRequest(
+            "textDocument/diagnostic",
+            { textDocument: { uri }, ...previous ? { previousResultId: previous.resultId } : {} }
+          ).then(resolve7, reject).finally(() => requestSignal.removeEventListener("abort", abort));
+        }
+      );
+      if (result.kind === "unchanged" && previous)
+        return { items: previous.items, ready: true, evidence: "pull-unchanged" };
+      if (Array.isArray(result.items)) {
+        if (result.resultId) this.pulls.set(uri, { resultId: result.resultId, items: result.items });
+        return { items: result.items, ready: true, evidence: "pull-full" };
+      }
+      return { items: [], ready: false };
+    }
+    const deadline = settling;
+    while (Date.now() < deadline) {
       signal.throwIfAborted();
       const result = this.published.get(diagnosticUriKey(uri));
-      if (result && (result.version === void 0 || result.version === this.versions.get(uri)?.version))
-        return { items: result.items, ready: true };
-      await new Promise((resolve7) => setTimeout(resolve7, 50));
+      if (result && Date.now() - result.time >= 200 && !this.progress.size && Date.now() - this.progressAt >= 200 && (result.version === void 0 || result.version === this.versions.get(uri)?.version)) {
+        if (!(result.version === void 0 && result.items.length === 0 && !this.proven.has(uri))) {
+          this.proven.add(uri);
+          return {
+            items: result.items,
+            ready: true,
+            evidence: result.version === void 0 ? "push-unversioned (weak freshness evidence)" : "push-versioned"
+          };
+        }
+      }
+      await new Promise((resolve7) => setTimeout(resolve7, 25));
     }
     return { items: [], ready: false };
   }
-  async formatting(path) {
+  async formatting(path, options) {
+    if (!this.supports("format")) throw new Error("unsupported: document formatting");
     await this.openFile(path);
     return await this.sendRequest("textDocument/formatting", {
       textDocument: { uri: pathToFileURL3(path).href },
-      options: { tabSize: 4, insertSpaces: true }
+      options
     }) ?? [];
   }
 };
@@ -4450,12 +4596,13 @@ var Languages = class {
     this.config = config;
     this.clients = /* @__PURE__ */ new Set();
     this.snapshot = /* @__PURE__ */ new Map();
+    this.failures = /* @__PURE__ */ new Map();
     this.manager = new LspManager({
       idleTimeoutMs: 12e4,
-      clientFactory: (root2, server) => {
+      clientFactory: (root2, server2) => {
         if (!inside(this.root, root2))
           throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
-        const client = new Client(root2, server);
+        const client = new Client(root2, server2);
         this.clients.add(client);
         return client;
       }
@@ -4474,16 +4621,81 @@ var Languages = class {
       await client.refresh(changed.map((path) => resolve6(this.root, path)));
     }
   }
-  withClient(path, fn, tool2, options) {
-    return withConfiguration(this.config, () => withLspClient(path, fn, tool2, options));
+  async status(path) {
+    const resolved = await resolveServer(this.root, path, this.config);
+    const failure = this.failures.get(`${resolved.language}:${resolved.tool.identity}`);
+    return {
+      ...resolved,
+      lint: this.config.trusted ? await select(this.root, resolve6(this.root, path), false, this.config).catch((error) => ({
+        unavailable: message(error)
+      })) ?? { unavailable: "No configured lint runner" } : { unavailable: "Workspace trust required" },
+      running: [...this.clients].some(
+        (client) => client.isAlive() && JSON.stringify(client.command()) === JSON.stringify(resolved.tool.command)
+      ),
+      failure: failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 3e4 ? failure.reason : void 0,
+      recovery: "Install or repair the selected local tool, then lsp_status refresh=true; failures retry after 30 seconds"
+    };
+  }
+  async preflight(path, signal, operation) {
+    await this.withLspClient(
+      await workspacePath(this.root, path),
+      async (client) => {
+        if (operation && client instanceof Client && !client.supports(operation))
+          throw new Error(`unsupported: ${operation}`);
+      },
+      "preflight",
+      {
+        manager: this.manager,
+        signal
+      }
+    );
+  }
+  async withLspClient(path, fn, _tool, options) {
+    const resolved = await resolveServer(this.root, path, this.config);
+    if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
+    if (resolved.tool.source === "temporary" && !this.config.trusted)
+      throw new Error("Temporary tool execution requires global trustedWorkspaces");
+    const failureKey = `${resolved.language}:${resolved.tool.identity}`;
+    const failed = this.failures.get(failureKey);
+    if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 3e4)
+      throw new Error(failed.reason);
+    let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
+    if (!inside(this.root, root)) root = this.root;
+    if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
+      root = dirname8(dirname8(dirname8(resolved.tool.command[0])));
+    resolved.server.id += `:${hash(JSON.stringify(resolved.server)).slice(0, 16)}`;
+    let client;
+    try {
+      client = await measured(
+        "startup/acquire",
+        () => options.manager.getClient(root, resolved.server, options.signal)
+      );
+    } catch (error) {
+      for (const [key, failure] of this.failures) if (Date.now() - failure.at >= 3e4) this.failures.delete(key);
+      this.failures.set(failureKey, {
+        identity: resolved.tool.identity,
+        at: Date.now(),
+        reason: (resolved.tool.source === "temporary" ? "Temporary launch/download or initialization failed: " : "Local initialization failed (no fallback): ") + message(error)
+      });
+      const reason = this.failures.get(failureKey)?.reason;
+      while (this.failures.size > 64) this.failures.delete(this.failures.keys().next().value ?? "");
+      throw new Error(reason);
+    }
+    this.failures.delete(failureKey);
+    try {
+      return await fn(client);
+    } finally {
+      options.manager.releaseClient(root, resolved.server.id);
+    }
   }
   async check(path, signal) {
     try {
-      return await this.withClient(
+      return await this.withLspClient(
         await workspacePath(this.root, path),
         async (client) => {
           if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
-          const result = await client.collect(await workspacePath(this.root, path), signal);
+          const absolute = await workspacePath(this.root, path);
+          const result = await measured("diagnostics/wait", () => client.collect(absolute, signal));
           return {
             path,
             state: result.ready ? "complete" : "pending",
@@ -4495,7 +4707,7 @@ var Languages = class {
               source: `${item.source ?? "lsp"}${item.code === void 0 ? "" : `/${item.code}`}`,
               message: item.message
             })),
-            ...!result.ready ? { note: "No fresh diagnostics published yet" } : {}
+            note: result.ready ? result.evidence ?? "fresh diagnostics" : "No fresh diagnostics published yet"
           };
         },
         "diagnostics",
@@ -4503,9 +4715,16 @@ var Languages = class {
       );
     } catch (error) {
       const note = message(error);
+      if (/server cancelled|content modified/i.test(note) || record(error) && [-32801, -32802].includes(Number(error["code"])))
+        return { path, state: "pending", findings: [], note: "Server is updating its analysis; retry" };
       if (!/No LSP server|NOT INSTALLED/.test(note))
         await logEvent(/timeout/i.test(note) ? "timeout" : "startup-failure");
-      return { path, state: /No LSP server|NOT INSTALLED/.test(note) ? "skipped" : "failed", findings: [], note };
+      return {
+        path,
+        state: /disabled or unsupported|Tool missing|Explicit command missing/.test(note) ? "skipped" : "failed",
+        findings: [],
+        note
+      };
     }
   }
   async navigate(args, signal) {
@@ -4514,11 +4733,20 @@ var Languages = class {
     const line = number(args["line"], 1, 1, 1e7);
     const column = number(args["column"], 1, 1, 1e6) - 1;
     const before = operation === "rename" ? await inventory(this.root, 1e4, signal) : void 0;
-    return this.withClient(
+    return this.withLspClient(
       path,
       async (client) => {
+        if (client instanceof Client && ["definition", "references", "symbols", "prepare_rename"].includes(operation) && !client.supports(operation === "symbols" && args["query"] ? "workspaceSymbolProvider" : operation))
+          return JSON.stringify({ status: "unsupported", operation });
         let result;
         switch (operation) {
+          case "hover":
+          case "typeDefinition":
+          case "implementation":
+          case "signatureHelp":
+            if (!(client instanceof Client)) throw new Error("Unexpected client");
+            result = await client.navigation(operation, path, line, column);
+            break;
           case "definition":
             result = await client.definition(path, line, column);
             break;
@@ -4542,8 +4770,14 @@ var Languages = class {
             throw new Error("Unknown navigation operation");
         }
         const output = JSON.stringify(result ?? []);
-        return output.length <= 8e3 ? output : `${output.slice(0, 7800)}
-(truncated; narrow query/path)`;
+        if (output.length <= 8e3) return output;
+        if (!Array.isArray(result)) return JSON.stringify({ status: "too_large", note: "Narrow query/path" });
+        const items2 = [];
+        for (const item of result) {
+          if (JSON.stringify([...items2, item]).length > 7600) break;
+          items2.push(item);
+        }
+        return JSON.stringify({ items: items2, omitted: result.length - items2.length, note: "Narrow query/path" });
       },
       operation,
       { manager: this.manager, signal }
@@ -4561,43 +4795,47 @@ var Languages = class {
     const pending = [];
     for (const [uri, edits] of changes) {
       const path = await workspacePath(this.root, fileURLToPath2(uri));
-      const before = await readFile8(path, "utf8");
+      await this.preflight(path, signal);
+      const before = await readFile9(path, "utf8");
       pending.push({ path, before, after: applyTextChanges(before, edits) });
     }
     if ((await inventory(this.root, 1e4, signal)).version !== version)
       throw new Error("Workspace changed during rename; retry");
     for (const item of pending)
-      if (await readFile8(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
+      if (await readFile9(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
     signal.throwIfAborted();
     const modified = [];
     try {
       for (const item of pending) {
         signal.throwIfAborted();
-        await writeFile3(item.path, item.after);
+        await writeFile4(item.path, item.after);
         modified.push(relative3(this.root, item.path));
       }
     } catch (error) {
-      throw new Error(`${message(error)}; modified paths: ${modified.join(", ") || "none"}`);
+      throw new WriteFailure(`${message(error)}; modified paths: ${JSON.stringify(modified)}`, modified);
     }
-    return `Renamed: ${pending.map((item) => relative3(this.root, item.path)).join(", ")}`;
+    return JSON.stringify({
+      text: `Renamed: ${modified.join(", ")}`.slice(0, 8e3),
+      modifiedPaths: modified
+    });
   }
   async format(path, signal) {
     const absolute = await workspacePath(this.root, path);
-    const before = await readFile8(absolute, "utf8");
-    const edits = await this.withClient(
+    const before = await readFile9(absolute, "utf8");
+    const edits = await this.withLspClient(
       absolute,
       async (client) => {
         if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
-        return client.formatting(absolute);
+        return client.formatting(absolute, this.config.formatting);
       },
       "format",
       { manager: this.manager, signal }
     );
     const after = applyTextChanges(before, edits);
-    if (await readFile8(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
+    if (await readFile9(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
     if (after === before) return `Unchanged: ${path}`;
     signal.throwIfAborted();
-    await writeFile3(absolute, after);
+    await writeFile4(absolute, after);
     return `Formatted: ${path}`;
   }
   async close() {
@@ -4614,11 +4852,20 @@ var Engine = class {
     this.sessions = /* @__PURE__ */ new Map();
     this.configVersion = "";
     this.queue = Promise.resolve();
+    this.source = "both";
+    this.lastResults = [];
+    this.generation = 0;
+    this.pages = /* @__PURE__ */ new Map();
     this.checker = checker ?? (async (path, signal, lspOnly) => {
-      this.language ??= new Languages(root, await configuration(root));
-      const lsp = await this.language.check(path, signal);
+      this.language ??= new Languages(root, this.requestConfig ?? await configuration(root));
+      const lsp = this.source === "lint" ? { path, state: "skipped", findings: [] } : await this.language.check(path, signal);
       if (lspOnly) return lsp;
-      const runner = await lint(root, path, signal);
+      if (lsp.state === "skipped" || lsp.state === "failed") {
+        if (this.source !== "lint") return lsp;
+      }
+      const runner = await lint(root, path, signal, this.requestConfig, true);
+      if (this.source === "lint")
+        return runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" };
       if (!runner)
         return {
           ...lsp,
@@ -4629,7 +4876,7 @@ var Engine = class {
         path,
         state: lsp.state === "complete" ? runner.state === "skipped" ? "complete" : runner.state : lsp.state,
         channels: { lsp: lsp.state, lint: runner.state },
-        findings: [...lsp.findings, ...runner.findings],
+        findings: mergeFindings([...lsp.findings, ...runner.findings]),
         ...lsp.note || runner.note ? { note: [lsp.note, runner.note].filter(Boolean).join("; ") } : {}
       };
     });
@@ -4640,8 +4887,7 @@ var Engine = class {
       session = {
         turn: turn ?? "",
         touched: /* @__PURE__ */ new Set(),
-        current: /* @__PURE__ */ new Set(),
-        shown: /* @__PURE__ */ new Map()
+        current: /* @__PURE__ */ new Set()
       };
       this.sessions.set(id, session);
     }
@@ -4665,7 +4911,9 @@ var Engine = class {
     const previous = this.previousSnapshot;
     if (previous?.version !== snapshot.version && this.language) {
       const configChanged = [.../* @__PURE__ */ new Set([...snapshot.files.keys(), ...previous?.files.keys() ?? []])].some(
-        (path) => /(?:config|lock|manifest|Cargo\.toml|package\.json|go\.mod|pyproject)/i.test(path) && previous?.files.get(path) !== snapshot.files.get(path)
+        (path) => /(?:config|lock|manifest|Cargo\.toml|package\.json|go\.mod|pyproject|ty\.toml|ruff\.toml|\.clangd|compile_commands\.json|compile_flags\.txt|\.clang-format|rust-toolchain|rustfmt)/i.test(
+          path
+        ) && previous?.files.get(path) !== snapshot.files.get(path)
       );
       if (configChanged) {
         await this.language.close();
@@ -4674,10 +4922,10 @@ var Engine = class {
     }
     this.previousSnapshot = snapshot;
   }
-  async check(paths, id, turn, lspOnly = false, signal = new AbortController().signal, offset = 0) {
-    const config = await configuration(this.root);
-    const snapshot = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
-    snapshot.version = hash(snapshot.version + config.version);
+  async check(paths, id, turn, lspOnly = false, signal = new AbortController().signal, offset = 0, baseline) {
+    const config = this.requestConfig ?? await configuration(this.root);
+    const snapshot = baseline ?? await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
+    if (!baseline) snapshot.version = hash(snapshot.version + config.version);
     await this.synchronize(snapshot);
     const session = this.session(id, turn);
     const results = [];
@@ -4701,7 +4949,7 @@ var Engine = class {
         results.push({ path, state: "pending", findings: [], note: "Scan time budget reached" });
         continue;
       }
-      const key = `${lspOnly ? "lsp:" : ""}${path}`;
+      const key = `${lspOnly ? "lsp:" : this.source === "lint" ? "lint:" : ""}${path}`;
       const cached = this.cache.get(key);
       const identity = await analysisIdentity(this.root, [path], config, signal);
       if (this.identities.has(path) && this.identities.get(path) !== identity) {
@@ -4710,21 +4958,22 @@ var Engine = class {
       }
       this.identities.set(path, identity);
       const absolute = await workspacePath(this.root, path);
-      if ((await stat3(absolute)).size > 1024 * 1024) {
+      if ((await stat5(absolute)).size > 1024 * 1024) {
         results.push({ path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
         continue;
       }
-      const content = hash(await readFile9(absolute, { encoding: "utf8", signal }));
+      const content = hash(await readFile10(absolute, { encoding: "utf8", signal }));
       if (snapshot.complete && cached?.version === snapshot.version && cached.identity === identity && cached.content === content && cached.result.state === "complete") {
         results.push(cached.result);
         continue;
       }
       const result = await this.checker(path, signal, lspOnly);
       signal.throwIfAborted();
-      if (hash(await readFile9(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content || await analysisIdentity(this.root, [path], await configuration(this.root), signal) !== identity) {
+      if (hash(await readFile10(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content || await analysisIdentity(this.root, [path], await configuration(this.root), signal) !== identity) {
         result.state = "stale";
         result.note = "File changed during diagnostics; retry";
       }
+      if (JSON.stringify(this.cache.get(key)?.result) !== JSON.stringify(result)) this.generation++;
       this.cache.set(key, { version: snapshot.version, identity, content, result });
       results.push(result);
     }
@@ -4743,61 +4992,16 @@ var Engine = class {
         findings: [],
         note: "File/snapshot budget exceeded; narrow paths"
       });
+    this.lastResults = results;
     return render(results, 50, 8192, offset) + (!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "");
   }
-  async entries(mode, id, signal = new AbortController().signal) {
-    const config = await configuration(this.root);
-    const snapshot = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
-    snapshot.version = hash(snapshot.version + config.version);
-    const session = this.session(id);
-    const files = mode === "delta" ? session.current : session.touched;
-    const results = [];
-    for (const path of [...files].sort()) {
-      signal.throwIfAborted();
-      const entry = this.cache.get(path) ?? this.cache.get(`lsp:${path}`);
-      if (!entry) {
-        results.push({ path, state: "pending", findings: [] });
-        continue;
-      }
-      let content;
-      try {
-        content = hash(await readFile9(await workspacePath(this.root, path), "utf8"));
-      } catch {
-      }
-      results.push(
-        entry.version === snapshot.version && entry.content === content && snapshot.complete && entry.identity === await analysisIdentity(this.root, [path], config, signal) ? entry.result : { ...entry.result, state: "stale", note: "Workspace changed; run active diagnostics" }
-      );
-    }
-    return results;
-  }
-  async cached(mode, id, offset = 0) {
-    return render(await this.entries(mode, id), 50, 8192, offset);
-  }
-  async feedback(id) {
-    const session = this.session(id);
-    const changed = [];
-    for (const result of await this.entries("all", id)) {
-      if (result.state === "complete" && result.findings.length === 0) {
-        session.shown.delete(result.path);
-        continue;
-      }
-      if (result.state === "skipped" && result.note?.startsWith("No LSP server configured")) continue;
-      const fingerprint = hash(JSON.stringify(result));
-      if (session.shown.get(result.path) === fingerprint) continue;
-      changed.push(result);
-      session.shown.set(result.path, fingerprint);
-    }
-    return changed.length ? `session=${id}
-${render(changed, 10, 1800)}
-Details: check_diagnostics mode=all workspace=${this.root}` : "";
-  }
   dispatch(operation, args, signal) {
-    const writes = operation === "lsp_format" || operation === "lsp_navigation" && args["operation"] === "rename";
+    const writes = operation === "lsp_format" || operation === "lsp_rename";
     let started = false;
     const task = this.queue.then(() => {
       started = true;
       signal.throwIfAborted();
-      return this.execute(operation, args, signal);
+      return withToolResolution(() => this.execute(operation, args, signal));
     });
     this.queue = task.catch(() => void 0);
     return new Promise((resolve7, reject) => {
@@ -4821,7 +5025,7 @@ Details: check_diagnostics mode=all workspace=${this.root}` : "";
       if (typeof value !== "string") continue;
       signal.throwIfAborted();
       const absolute = await workspacePath(this.root, value);
-      if ((await stat3(absolute)).isFile()) paths.add(relative4(this.root, absolute));
+      if ((await stat5(absolute)).isFile()) paths.add(relative4(this.root, absolute));
       else {
         const scoped = await inventory(this.root, 1e4, signal, config.exclude, absolute);
         complete &&= scoped.complete;
@@ -4837,28 +5041,6 @@ Details: check_diagnostics mode=all workspace=${this.root}` : "";
     }
     return { paths: [...paths].sort().slice(0, 1e4), complete };
   }
-  revision(args, version) {
-    if ((number(args["start"], 0) || number(args["offset"], 0)) && args["revision"] !== version)
-      throw new Error("Invalid or missing revision; restart from start=0 offset=0");
-  }
-  async fingerprints(paths, signal) {
-    const contents = [];
-    for (const path of paths) {
-      signal.throwIfAborted();
-      try {
-        const absolute = await workspacePath(this.root, path);
-        const info = await stat3(absolute);
-        contents.push(
-          path,
-          info.size > 1024 * 1024 ? `oversized:${info.size}:${info.mtimeMs}` : hash(await readFile9(absolute, { encoding: "utf8", signal }))
-        );
-      } catch (error) {
-        signal.throwIfAborted();
-        contents.push(path, `unavailable:${message(error)}`);
-      }
-    }
-    return contents;
-  }
   async execute(operation, args, signal) {
     if (operation === "release") {
       await this.close();
@@ -4869,6 +5051,7 @@ Details: check_diagnostics mode=all workspace=${this.root}` : "";
     if (this.configVersion !== config.version || args["refresh"] === true) {
       await this.close();
       this.cache.clear();
+      this.pages.clear();
       this.configVersion = config.version;
     }
     const store = new Metadata(this.root);
@@ -4885,38 +5068,26 @@ Details: check_diagnostics mode=all workspace=${this.root}` : "";
       session.touched = new Set(state.touched);
       session.current = new Set(state.current);
     }
-    const mode = text(args["mode"], "delta");
-    if (operation === "check_diagnostics" && mode === "status")
-      return `workspace=${this.root}
-sessions=${[...this.sessions.keys()].join(",") || "none"}
-cache=${this.cache.size}`;
-    const id = this.id(args["session"]);
-    if (operation === "check_diagnostics" && (mode === "all" || mode === "delta")) {
-      let entries = await this.entries(mode, id, signal);
-      if (args["path"] || args["paths"]) {
-        const scope3 = await this.paths(args, signal);
-        entries = entries.filter((entry) => scope3.paths.includes(entry.path));
-      }
-      const revision2 = hash(
-        JSON.stringify([
-          operation,
-          mode,
-          args["path"],
-          args["paths"],
-          config.version,
-          (await inventory(this.root, 1e4, signal, config.exclude, this.root, true)).version,
-          await this.fingerprints(
-            entries.map((entry) => entry.path),
-            signal
-          ),
-          entries
-        ])
-      );
-      this.revision(args, revision2);
-      return `${render(entries, 50, 8192, number(args["offset"], 0))}
-revision=${revision2}`;
+    this.requestConfig = config;
+    if (operation === "lsp_status") {
+      this.language ??= new Languages(this.root, config);
+      const targets = args["path"] ? [text(args["path"])] : Object.values(config.servers).filter((server2) => !!server2).map((server2) => server2 ? `status${server2.extensions[0]}` : "");
+      return JSON.stringify({
+        workspace: this.root,
+        trusted: config.trusted,
+        configuration: config,
+        tools: await Promise.all(
+          targets.map((path) => this.language?.status(path).catch((error) => ({ path, reason: message(error) })))
+        ),
+        timings: timings(),
+        cache: this.cache.size,
+        sessions: [...this.sessions.keys()]
+      });
     }
-    if (operation === "lsp_navigation") {
+    const id = args["scope"] === "paths" || args["scope"] === void 0 ? text(args["session"], "manual") : this.id(args["session"]);
+    if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
+    if (operation === "lsp_rename") args = { ...args, operation: "rename" };
+    if (operation === "lsp_navigation" || operation === "lsp_rename") {
       const path = relative4(this.root, await workspacePath(this.root, text(args["path"])));
       const identity = await analysisIdentity(this.root, [path], config, signal);
       if (this.identities.has(path) && this.identities.get(path) !== identity) {
@@ -4924,21 +5095,28 @@ revision=${revision2}`;
         this.cache.clear();
       }
       this.identities.set(path, identity);
-      const snapshot2 = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
-      snapshot2.version = hash(snapshot2.version + config.version);
-      await this.synchronize(snapshot2);
-      this.language ??= new Languages(this.root, await configuration(this.root));
+      const snapshot = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
+      snapshot.version = hash(snapshot.version + config.version);
+      await this.synchronize(snapshot);
+      this.language ??= new Languages(this.root, config);
       const before = args["operation"] === "rename" ? await inventory(this.root, 1e4, signal) : void 0;
-      let output2;
+      let output;
       try {
-        output2 = await this.language.navigate(args, signal);
+        output = await this.language.navigate(args, signal);
       } finally {
         if (before) this.cache.clear();
       }
       if (before) {
+        let modifiedPaths = [];
+        try {
+          const result = JSON.parse(output);
+          if (record(result) && Array.isArray(result["modifiedPaths"]))
+            modifiedPaths = result["modifiedPaths"].filter((path2) => typeof path2 === "string");
+        } catch {
+        }
         this.cache.clear();
         const after = await inventory(this.root, 1e4, signal).catch((error) => {
-          throw new Error(`${message(error)}; ${output2}`);
+          throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
         });
         const changed = [...after.files].filter(([path2, version]) => before.files.get(path2) !== version).map(([path2]) => path2);
         try {
@@ -4950,67 +5128,209 @@ revision=${revision2}`;
             signal
           );
         } catch (error) {
-          throw new Error(`${message(error)}; ${output2}`);
+          throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
         }
       }
-      return output2;
+      return output;
     }
     const scope2 = await this.paths(args, signal);
     const paths = scope2.paths;
     if (operation === "lsp_format") {
       if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
       if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
-      this.language ??= new Languages(this.root, await configuration(this.root));
+      this.language ??= new Languages(this.root, config);
+      for (const path of paths) {
+        const runner = await preflightRunner(this.root, path, config, signal);
+        await this.language.preflight(path, signal, runner ? void 0 : "format");
+      }
       const lines = [];
+      const modifiedPaths = [];
       try {
         for (const path of paths) {
           signal.throwIfAborted();
           lines.push(
-            await formatWithRunner(this.root, path, signal) ?? await this.language.format(path, signal)
+            await formatWithRunner(this.root, path, signal, config) ?? await this.language.format(path, signal)
           );
+          if (lines.at(-1)?.startsWith("Formatted:")) modifiedPaths.push(path);
         }
         await this.check(paths, id, "manual", false, signal);
       } catch (error) {
-        throw new Error(`${message(error)}; completed writes: ${lines.join("; ") || "none"}`);
+        throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(lines)}`, modifiedPaths);
       } finally {
         this.cache.clear();
       }
-      return lines.join("\n").slice(0, 8e3) || "No files";
+      return JSON.stringify({ text: lines.join("\n").slice(0, 8e3) || "No files", modifiedPaths, results: lines });
     }
-    if (operation !== "lsp_diagnostics" && !(operation === "check_diagnostics" && mode === "full"))
-      throw new Error("Unknown tool or mode");
+    throw new Error("Unknown tool");
+  }
+  async diagnostics(args, id, signal, config, store) {
+    for (const key of ["mode", "start", "offset", "revision"])
+      if (args[key] !== void 0)
+        throw new Error("Migration required: use scope/source/run/cursor; see docs/migration-0.5.md");
+    const scope2 = text(args["scope"], "paths");
+    const source = text(args["source"], "both");
+    const run2 = text(args["run"], "active");
+    if (!["paths", "turn", "session"].includes(scope2) || !["both", "lsp", "lint"].includes(source) || !["active", "cached"].includes(run2))
+      throw new Error("Invalid scope/source/run");
+    this.source = source;
     const snapshot = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
-    const contents = await this.fingerprints(paths, signal);
-    const revision = hash(
-      JSON.stringify([
-        operation,
-        mode,
-        args["path"],
-        args["paths"],
-        contents,
-        snapshot.version,
-        await analysisIdentity(this.root, paths, config, signal)
-      ])
-    );
-    this.revision(args, revision);
-    const start = number(args["start"], 0);
-    const selected = paths.slice(start, start + 200);
-    await store.update(id, signal, (state) => {
-      state.touched.push(...selected);
-      state.current.push(...selected);
+    snapshot.version = hash(snapshot.version + config.version);
+    const token = text(args["cursor"]);
+    let results;
+    let index = 0;
+    let identity;
+    if (token) {
+      const page = this.pages.get(token);
+      if (!page || page.generation !== this.generation || page.version !== snapshot.version || hash(
+        JSON.stringify(
+          Object.entries(args).filter(([key]) => key !== "cursor" && key !== "workspace" && key !== "refresh").sort()
+        )
+      ) !== hash(
+        JSON.stringify(
+          Object.entries(page.args).filter(([key]) => key !== "cursor" && key !== "workspace" && key !== "refresh").sort()
+        )
+      ))
+        throw new Error("Cursor invalid or stale; restart without cursor");
+      identity = await this.pageIdentity(
+        page.results.map((result) => result.path),
+        config,
+        snapshot,
+        signal
+      );
+      if (identity !== page.identity) throw new Error("Cursor invalid: tool/configuration changed");
+      results = [...page.results];
+      index = page.index;
+      if (run2 === "active") {
+        const pending = results.slice(index, index + 50);
+        if (pending.some((result) => result.note === "Continue cursor for active analysis")) {
+          await this.check(
+            pending.map((result) => result.path),
+            id,
+            this.session(id).turn,
+            source === "lsp",
+            signal,
+            0,
+            snapshot
+          );
+          results.splice(index, pending.length, ...this.lastResults);
+        }
+      }
+    } else {
+      let paths;
+      if (scope2 === "paths") {
+        const values = Array.isArray(args["paths"]) ? args["paths"] : [text(args["path"], ".")];
+        const selected2 = /* @__PURE__ */ new Set();
+        for (const value of values) {
+          if (typeof value !== "string") throw new Error("paths requires strings");
+          const absolute = await workspacePath(this.root, value);
+          const path = relative4(this.root, absolute);
+          if ((await stat5(absolute)).isFile()) {
+            if (!languageFor(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
+            selected2.add(path);
+          } else
+            for (const candidate of (snapshot.complete ? snapshot : await inventory(this.root, 1e4, signal, config.exclude, absolute)).files.keys())
+              if ((!path || candidate.startsWith(`${path}/`)) && codeLanguage(config, candidate))
+                selected2.add(candidate);
+        }
+        paths = [...selected2].sort();
+      } else paths = [...scope2 === "turn" ? this.session(id).current : this.session(id).touched].sort();
+      identity = await this.pageIdentity(paths, config, snapshot, signal);
+      if (run2 === "cached") {
+        results = [];
+        for (const path of paths) {
+          const entry = this.cache.get((source === "lsp" ? "lsp:" : source === "lint" ? "lint:" : "") + path);
+          results.push(
+            !entry ? { path, state: "pending", findings: [] } : entry.version === snapshot.version && entry.content === await this.contentIdentity(path, snapshot, signal) && snapshot.complete && entry.identity === await analysisIdentity(this.root, [path], config, signal) ? entry.result : { ...entry.result, state: "stale", note: "Run active diagnostics" }
+          );
+        }
+      } else {
+        await store.update(id, signal, (state) => {
+          state.touched.push(...paths);
+          state.current.push(...paths);
+        });
+        await this.check(paths.slice(0, 50), id, this.session(id).turn, source === "lsp", signal, 0, snapshot);
+        results = [
+          ...this.lastResults,
+          ...paths.slice(50).map((path) => ({
+            path,
+            state: "pending",
+            findings: [],
+            note: "Continue cursor for active analysis"
+          }))
+        ];
+      }
+    }
+    const selected = [];
+    let size = 0;
+    for (const result of results.slice(index)) {
+      const bytes = JSON.stringify(result).length;
+      if (selected.length && (size + bytes > 24e3 || selected.length >= 50)) break;
+      selected.push(result);
+      size += bytes;
+    }
+    let next;
+    if (index + selected.length < results.length) {
+      const cursor = randomUUID4();
+      this.pages.set(cursor, {
+        version: snapshot.version,
+        results,
+        index: index + selected.length,
+        args,
+        identity,
+        generation: this.generation
+      });
+      while (this.pages.size > 32) this.pages.delete(this.pages.keys().next().value ?? "");
+      next = { ...args, refresh: void 0, workspace: this.root, cursor };
+    }
+    const partial = !snapshot.complete || results.some((result) => result.state !== "complete");
+    return JSON.stringify({
+      text: ((partial ? render(selected).replace(/^complete;/, "partial;") : render(selected)) + (next ? "\nMore results: follow the structured next arguments." : "") + (!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "")).replace(/\n.*omitted; next offset=.*$/, ""),
+      scope: scope2,
+      source,
+      run: run2,
+      partial,
+      errors: results.flatMap((result) => result.findings).filter((item) => item.severity === "error").length,
+      warnings: results.flatMap((result) => result.findings).filter((item) => item.severity === "warning").length,
+      results: selected,
+      unavailable: Object.fromEntries(
+        [
+          ...new Set(
+            results.filter((result) => result.state === "failed" || result.state === "skipped").map((result) => codeLanguage(config, result.path) ?? "unsupported")
+          )
+        ].map((language) => [
+          language,
+          [
+            ...new Set(
+              results.filter(
+                (result) => (codeLanguage(config, result.path) ?? "unsupported") === language && result.note && (result.state === "failed" || result.state === "skipped")
+              ).map((result) => result.note)
+            )
+          ]
+        ])
+      ),
+      ...next ? { next } : {},
+      isError: run2 === "active" && results.length > 0 && results.every(
+        (result) => (result.state === "failed" || result.state === "skipped") && result.channels?.lsp !== "complete" && result.channels?.lint !== "complete"
+      )
     });
-    let output = await this.check(
-      selected,
-      id,
-      this.session(id).turn,
-      operation === "lsp_diagnostics",
-      signal,
-      number(args["offset"], 0)
-    );
-    if (start + 200 < paths.length || !scope2.complete) output = output.replace(/^complete;/, "partial;");
-    return `${output}${start + 200 < paths.length ? `
-partial; next start=${start + 200}; remaining files=${paths.length - start - 200}` : ""}${!scope2.complete ? "\npartial; scope inventory exceeded budget" : ""}
-revision=${revision}`;
+  }
+  async contentIdentity(path, snapshot, signal) {
+    const existing = snapshot.files.get(path);
+    if (existing) return existing;
+    try {
+      const absolute = await workspacePath(this.root, path);
+      const info = await stat5(absolute);
+      if (info.size > 1024 * 1024) return "oversized";
+      return hash(await readFile10(absolute, { encoding: "utf8", signal }));
+    } catch {
+      signal.throwIfAborted();
+      return "unavailable";
+    }
+  }
+  async pageIdentity(paths, config, snapshot, signal) {
+    const contents = [];
+    for (const path of paths) contents.push([path, await this.contentIdentity(path, snapshot, signal)]);
+    return hash(JSON.stringify([await analysisIdentity(this.root, paths, config, signal), contents]));
   }
   async dispose() {
     await this.close();
@@ -5032,7 +5352,7 @@ var Runtime = class {
     this.timers = /* @__PURE__ */ new Map();
   }
   async request(root, operation, args, signal) {
-    if (!isAbsolute5(root)) throw new Error("workspace must be an absolute project directory");
+    if (!isAbsolute6(root)) throw new Error("workspace must be an absolute project directory");
     root = await realpath5(root);
     signal = AbortSignal.any([signal, AbortSignal.timeout(45e3)]);
     signal.throwIfAborted();
@@ -5044,7 +5364,8 @@ var Runtime = class {
     clearTimeout(this.timers.get(root));
     this.active.set(root, (this.active.get(root) ?? 0) + 1);
     try {
-      return await engine.dispatch(operation, args, signal);
+      const target = engine;
+      return await target.dispatch(operation, args, signal);
     } finally {
       const active = (this.active.get(root) ?? 1) - 1;
       this.active.set(root, active);
@@ -5071,23 +5392,12 @@ var scope = {
   workspace: { type: "string", description: "Absolute user repository path, never the plugin directory." },
   session: {
     type: "string",
-    description: "Codex session id for cached/delta results; required when multiple sessions share this workspace."
+    description: "Codex session id for turn/session scopes; required when multiple sessions share this workspace."
   },
   path: string,
   paths: { type: "array", items: string, maxItems: 200 }
 };
-var paging = {
-  revision: {
-    type: "string",
-    description: "Version returned by the first page; required for nonzero start/offset. Restart from zero if changed."
-  },
-  refresh: {
-    type: "boolean",
-    description: "Active diagnostics only: bypass results and rebuild LSP clients. Use after external config or tool installation changes."
-  },
-  offset: { type: "integer", minimum: 0, maximum: 1e4 },
-  start: { type: "integer", minimum: 0, maximum: 1e4 }
-};
+var paging = { cursor: string, refresh: { type: "boolean", description: "Force tool and client revalidation" } };
 function tool(name, description, properties, required, readOnly) {
   return {
     name,
@@ -5099,49 +5409,76 @@ function tool(name, description, properties, required, readOnly) {
 var TOOLS = [
   tool(
     "check_diagnostics",
-    "Process-local LSP/lint results: delta=current turn, all=session touched, full=active scoped scan, status=runtime. Hook-only files are pending. complete covers this scope and executed channels, not build/tests. Continuations require revision.",
-    { ...scope, ...paging, mode: { type: "string", enum: ["delta", "all", "full", "status"] } },
+    "Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and Hook-only files remain pending. Continue with complete next arguments.",
+    {
+      ...scope,
+      ...paging,
+      scope: { type: "string", enum: ["paths", "turn", "session"] },
+      source: { type: "string", enum: ["lsp", "lint", "both"] },
+      run: { type: "string", enum: ["active", "cached"] }
+    },
     [],
     true
   ),
   tool(
-    "lsp_diagnostics",
-    "Actively check files/directories with LSP only. Defaults to workspace. Bounded multi-language scan; continue using returned start/offset.",
-    { ...scope, ...paging },
+    "lsp_status",
+    "Explain configuration, trust, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
+    { workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
     [],
     true
   ),
   tool(
     "lsp_navigation",
-    "LSP definition/references/symbols/prepare_rename/rename. Positions are 1-based. Rename writes workspace files sequentially; prepare first.",
+    "Read-only LSP navigation. Positions are 1-based; unsupported capabilities are reported explicitly.",
     {
       ...scope,
-      operation: { type: "string", enum: ["definition", "references", "symbols", "prepare_rename", "rename"] },
+      operation: {
+        type: "string",
+        enum: [
+          "definition",
+          "references",
+          "symbols",
+          "prepare_rename",
+          "hover",
+          "typeDefinition",
+          "implementation",
+          "signatureHelp"
+        ]
+      },
       line: { type: "integer", minimum: 1 },
       column: { type: "integer", minimum: 1 },
-      query: string,
-      newName: string
+      query: string
     },
     ["path", "operation"],
+    true
+  ),
+  tool(
+    "lsp_rename",
+    "Rename across workspace files. Preflight all targets, detect conflicts, write sequentially; never replay partial writes.",
+    { ...scope, line: { type: "integer", minimum: 1 }, column: { type: "integer", minimum: 1 }, newName: string },
+    ["path", "newName"],
     false
   ),
   tool(
     "lsp_format",
-    "Explicitly format scoped files with the configured project formatter or LSP. Writes files, checks conflicts, then rechecks diagnostics. Never runs lint fix.",
+    "Format explicit paths using Ruff for Python or project formatter/LSP. Preflight before writes.",
     scope,
     [],
     false
   )
 ];
 function validateArguments(name, args) {
-  if (args["refresh"] !== void 0 && !(name === "lsp_diagnostics" || name === "check_diagnostics" && args["mode"] === "full"))
-    throw new Error("refresh requires active diagnostics");
+  if (args["refresh"] !== void 0 && !(name === "lsp_status" || name === "check_diagnostics" && args["run"] !== "cached"))
+    throw new Error("refresh requires active diagnostics or lsp_status");
   const definition = TOOLS.find((entry) => entry.name === name);
   if (!definition) throw new Error("Unknown tool");
   for (const key of definition.inputSchema.required) if (args[key] === void 0) throw new Error(`${key} required`);
   for (const [key, value] of Object.entries(args)) {
     const schema = definition.inputSchema.properties[key];
-    if (!record(schema)) throw new Error(`Unknown argument: ${key}`);
+    if (!record(schema))
+      throw new Error(
+        ["mode", "start", "offset", "revision"].includes(key) ? "Migration required: use scope/source/run/cursor; see docs/migration-0.5.md" : `Unknown argument: ${key}`
+      );
     if (schema["type"] === "boolean" && typeof value !== "boolean") throw new Error(`${key} must be a boolean`);
     if (schema["type"] === "string" && typeof value !== "string") throw new Error(`${key} must be a string`);
     if (schema["type"] === "integer") {
@@ -5181,7 +5518,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-lsp", version: "0.4.0" },
+        serverInfo: { name: "codex-lsp", version: "0.5.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -5215,14 +5552,39 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     controllers.set(id, controller);
     try {
       const name = text(params["name"]);
+      if (name === "lsp_diagnostics")
+        throw new Error("Migration required: use check_diagnostics source=lsp; see docs/migration-0.5.md");
       if (!TOOLS.some((entry) => entry.name === name)) throw new Error("Unknown tool");
       if (!record(params["arguments"])) throw new Error("Tool arguments required");
       const args = params["arguments"];
       validateArguments(name, args);
       const result = await runtime.request(text(args["workspace"]), name, args, controller.signal);
-      ok({ content: [{ type: "text", text: result }] });
+      let structured;
+      try {
+        structured = JSON.parse(result);
+      } catch {
+        structured = { summary: result, operation: name, workspace: args["workspace"] };
+      }
+      if (Array.isArray(structured)) structured = { items: structured };
+      ok({
+        ...record(structured) ? { structuredContent: structured, ...structured["isError"] === true ? { isError: true } : {} } : {},
+        content: [
+          {
+            type: "text",
+            text: record(structured) && typeof structured["text"] === "string" ? structured["text"] : result
+          }
+        ]
+      });
     } catch (error) {
-      ok({ isError: true, content: [{ type: "text", text: message(error).slice(0, 2e3) }] });
+      ok({
+        isError: true,
+        structuredContent: {
+          status: failureKind(message(error)),
+          reason: message(error),
+          ...error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {}
+        },
+        content: [{ type: "text", text: message(error).slice(0, 2e3) }]
+      });
     } finally {
       controllers.delete(id);
     }

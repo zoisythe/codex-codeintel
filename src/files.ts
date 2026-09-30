@@ -5,6 +5,8 @@ import { isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path
 import { promisify } from "node:util";
 import type { TextEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
 
+import { measured } from "./metrics.js";
+
 const exec = promisify(execFile);
 const SKIP = new Set([
 	".git",
@@ -39,7 +41,10 @@ export interface Inventory {
 	version: string;
 	complete: boolean;
 }
-export async function inventory(
+export async function inventory(...args: Parameters<typeof scanInventory>): Promise<Inventory> {
+	return measured("discovery/hash", () => scanInventory(...args));
+}
+async function scanInventory(
 	root: string,
 	maxFiles = 10000,
 	signal?: AbortSignal,

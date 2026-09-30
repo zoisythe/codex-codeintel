@@ -52,10 +52,11 @@ test(
 		assert.equal(pkg.optionalDependencies, undefined);
 		assert((await readFile(join(root, "skills/lsp/SKILL.md"), "utf8")).startsWith("---\n"));
 
-		const missing = join(workspace, "missing-config.json");
+		const missing = join(temp, "lsp-client.json");
 		await writeFile(
 			missing,
 			JSON.stringify({
+				schemaVersion: 1,
 				lsp: {
 					missing: { command: ["codex-lsp-deliberately-absent"], extensions: [".phaseone"] },
 				},
@@ -80,8 +81,8 @@ test(
 						NODE_PATH: "",
 						NODE_OPTIONS: "",
 						CODEX_LSP_CACHE: join(temp, "cache"),
-						LSP_TOOLS_MCP_PROJECT_CONFIG: missing,
-						LSP_TOOLS_MCP_USER_CONFIG: join(temp, "no-user-config"),
+						CODEX_HOME: temp,
+
 					},
 					stdio: ["pipe", "pipe", "pipe"],
 				},
@@ -122,7 +123,7 @@ test(
 			send({ method: "notifications/initialized" });
 			send({ id: 2, method: "tools/list" });
 			const tools = (await response(2)).result.tools.map((tool) => tool.name);
-			assert.deepEqual(tools, ["check_diagnostics", "lsp_diagnostics", "lsp_navigation", "lsp_format"]);
+			assert.deepEqual(tools, ["check_diagnostics", "lsp_status", "lsp_navigation", "lsp_rename", "lsp_format"]);
 			await delay(100);
 			send({ id: 3, method: "ping" });
 			assert.deepEqual((await response(3)).result, {});
@@ -131,11 +132,11 @@ test(
 				id: 4,
 				method: "tools/call",
 				params: {
-					name: "lsp_diagnostics",
+					name: "check_diagnostics",
 					arguments: { workspace, path: "example.phaseone" },
 				},
 			});
-			assert.match(JSON.stringify(await response(4)), /NOT INSTALLED|No LSP server|skipped/i);
+			assert.match(JSON.stringify(await response(4)), /missing|unsupported|skipped/i);
 			send({ id: 5, method: "ping" });
 			await response(5);
 			assert.deepEqual(

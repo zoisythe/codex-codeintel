@@ -19,9 +19,9 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 	await cp(resolve("dist/cli.js"), cli);
 	const log = join(dir, "spawns");
 	const config = join(home, "lsp-client.json");
-	await writeFile(config, JSON.stringify({ trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
+	await writeFile(config, JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
-	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), LSP_TOOLS_MCP_USER_CONFIG: config };
+	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") };
 	const children = [];
 	t.after(async () => { for (const child of children) if (child.exitCode === null) child.kill(); await delay(200); await rm(dir, { recursive: true, force: true }); });
 	const client = async () => {
@@ -44,7 +44,7 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 			assert.fail(`MCP request timed out: ${method} ${params?.name ?? ""}`);
 		};
 		const init = await request("initialize", {});
-		assert.equal(init.serverInfo.version, "0.4.0");
+		assert.equal(init.serverInfo.version, "0.5.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
@@ -58,28 +58,28 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 	await writeFile(join(root, "main.fake"), "broken again\n");
 	assert.match(hook("PostToolUse"), /LSP not executed/);
 	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "Hook cannot launch LSP");
-	assert.match(await first.call("check_diagnostics", {mode: "all"}), /pending/);
-	assert.match(await first.call("lsp_diagnostics", {path: "main.fake"}), /fake\/E1/);
-	assert.match(await first.call("lsp_diagnostics", {path: "main.fake"}), /fake\/E1/);
+	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /pending/);
+	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
+	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
 	const second = await client();
-	assert.match(await second.call("check_diagnostics", {mode: "all"}), /pending/);
-	await second.call("lsp_diagnostics", {path: "main.fake"});
+	assert.match(await second.call("check_diagnostics", {scope: "session", run: "cached"}), /pending/);
+	await second.call("check_diagnostics", {path: "main.fake"});
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
 	await second.close();
 	assert.match(await first.call("lsp_format", {path: "main.fake"}), /Formatted/);
 	assert.equal(await readFile(join(root, "main.fake"), "utf8"), "fixed! again\n");
-	assert.match(await first.call("lsp_navigation", {path: "main.fake", operation: "rename", newName: "renamed"}), /Renamed/);
+	assert.match(await first.call("lsp_rename", {path: "main.fake", newName: "renamed"}), /Renamed/);
 	assert.equal(await readFile(join(root, "main.fake"), "utf8"), "renamed again\n");
 	const count = (await readFile(log, "utf8")).trim().split("\n").length;
-	await first.call("lsp_diagnostics", {path: "main.fake", refresh: true});
+	await first.call("check_diagnostics", {path: "main.fake", refresh: true});
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, count + 1);
 	await Promise.all(Array.from({length: 201}, (_,i) => writeFile(join(root, `page-${i}.fake`), "x")));
-	const page = await first.call("lsp_diagnostics", {path: "."});
-	assert.match(page, /^partial;/);
-	assert.match(page, /next start=200/);
-	const revision = /revision=([a-f0-9]+)/.exec(page)[1];
-	assert.match(await first.call("lsp_diagnostics", {path: ".", start: 200, revision}), /revision=/);
+	const page = await first.call("check_diagnostics", {path: "."});
+	assert.match(page, /checked=/);
+	const paged = await first.request("tools/call", {name: "check_diagnostics", arguments: {workspace: root, session: "test", path: "."}});
+	assert(paged.structuredContent.next?.cursor);
+	assert(!(await first.request("tools/call", {name: "check_diagnostics", arguments: paged.structuredContent.next})).isError);
 	await first.close();
 	for (const pid of (await readFile(log, "utf8")).trim().split("\n").map(Number)) assert.throws(() => process.kill(pid, 0));
 });
@@ -89,14 +89,14 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const root = join(dir, "project"); await mkdir(root);
 	const cli = join(dir, "cli.mjs"); await cp(resolve("dist/cli.js"), cli);
 	const log = join(dir, "spawns");
-	const config = join(dir, "user.json");
-	const configure = (mode) => writeFile(config, JSON.stringify({trustedWorkspaces: [root], lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
+	const config = join(dir, "lsp-client.json");
+	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,trustedWorkspaces: [root], lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
 	await configure("slow");
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(root, "b.fake"), "broken\n");
 	const preload = join(dir, "delay-write.mjs");
 	await writeFile(preload, 'import fs from "node:fs/promises";import {syncBuiltinESMExports} from "node:module";const original=fs.writeFile;fs.writeFile=async (...args)=>{await original(...args);if(String(args[0]).endsWith("a.fake")) await new Promise(r=>setTimeout(r,400));};syncBuiltinESMExports();');
-	const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, cli, "mcp"], {cwd: root, env: {...process.env, LSP_TOOLS_MCP_USER_CONFIG: config, CODEX_LSP_CACHE: join(dir, "cache")}, stdio: ["pipe", "pipe", "pipe"]});
+	const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, cli, "mcp"], {cwd: root, env: {...process.env, CODEX_HOME: dir, CODEX_LSP_CACHE: join(dir, "cache")}, stdio: ["pipe", "pipe", "pipe"]});
 	const exited = once(child, "exit");
 	t.after(async () => {if(child.exitCode === null) {child.kill(); await exited;} await rm(dir, {recursive: true, force: true});});
 	const results = new Map();
@@ -113,9 +113,9 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	for (const args of [{mode:"all",refresh:true},{mode:"status",refresh:false},{mode:"full",refresh:"yes"}]) {
 		assert.equal((await result(begin("check_diagnostics", args))).isError,true);
 	}
-	const first = begin("lsp_diagnostics", {path:"a.fake"});
+	const first = begin("check_diagnostics", {path:"a.fake"});
 	await until(async ()=>(await pids()).length===1);
-	const queued = begin("lsp_diagnostics", {path:"b.fake"});
+	const queued = begin("check_diagnostics", {path:"b.fake"});
 	cancel(queued);
 	assert.match((await result(queued)).content[0].text,/cancelled|aborted/i);
 	assert(alive((await pids())[0]),"queued cancellation cannot kill the active LSP");
@@ -131,20 +131,21 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const partial=await result(formatting);
 	assert.equal(partial.isError,true);
 	assert.match(partial.content[0].text,/Formatted: a.fake/);
+	assert.deepEqual(partial.structuredContent.modifiedPaths, ["a.fake"]);
 	assert.equal(await readFile(join(root,"b.fake"),"utf8"),"broken\n");
 
 	await writeFile(join(root,"a.fake"),"broken\n");
 	await configure("two-files");
-	const rename=begin("lsp_navigation",{path:"a.fake",operation:"rename",newName:"renamed"});
+	const rename=begin("lsp_rename",{path:"a.fake",newName:"renamed"});
 	await until(async ()=>(await readFile(join(root,"a.fake"),"utf8")).startsWith("renamed"));
 	cancel(rename);
 	const partialRename=await result(rename);
 	assert.equal(partialRename.isError,true);
-	assert.match(partialRename.content[0].text,/modified paths: a.fake/);
+	assert.deepEqual(partialRename.structuredContent.modifiedPaths, ["a.fake"]);
 	assert.equal(await readFile(join(root,"b.fake"),"utf8"),"broken\n");
 
 	await configure("");
-	const checked=await result(begin("lsp_diagnostics",{path:"b.fake",refresh:true}));
+	const checked=await result(begin("check_diagnostics",{path:"b.fake",refresh:true}));
 	assert(!checked.isError,JSON.stringify(checked));
 	assert.match(checked.content[0].text,/fake\/E1/);
 	child.stdin.end();
@@ -157,15 +158,15 @@ test("short Hook budget, pending recovery, Stop deduplication and concurrent met
 	t.after(()=>rm(dir,{recursive:true,force:true}));
 	const root=join(dir,"project");await mkdir(root);
 	const cli=join(dir,"cli.mjs");await cp(resolve("dist/cli.js"),cli);
-	const config=join(dir,"user.json");
-	await writeFile(config,JSON.stringify({trustedWorkspaces:[root],lint:{javascript:"biome"}}));
+	const config=join(dir,"lsp-client.json");
+	await writeFile(config,JSON.stringify({schemaVersion:1,trustedWorkspaces:[root],lint:{javascript:"biome"}}));
 	await writeFile(join(root,"biome.json"),"{}");
 	const bin=join(root,"node_modules/@biomejs/biome/bin");await mkdir(bin,{recursive:true});
 	const log=join(dir,"runners");
 	await writeFile(join(bin,"biome"),`const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(log)},process.pid+"\\n");const content=fs.readFileSync(process.argv.at(-1),"utf8");if(content==="slow")setInterval(()=>{},1000);else console.log(JSON.stringify({diagnostics:[{severity:content==="error"?"error":"warning",description:"fixture finding",category:"fixture"}]}));`);
 	await writeFile(join(root,"main.js"),"baseline");
 	const cache=join(dir,"cache");
-	const env={...process.env,LSP_TOOLS_MCP_USER_CONFIG:config,CODEX_LSP_CACHE:cache,CODEX_LSP_TRUST_PROJECT:"0"};
+	const env={...process.env,CODEX_HOME:dir,CODEX_LSP_CACHE:cache};
 	const hook=(event,extra={},imports=[])=>new Promise((resolve,reject)=>{
 		const child=spawn(process.execPath,[...imports,cli,"hook"],{cwd:root,env,stdio:["pipe","pipe","pipe"]});
 		let output="";let error="";

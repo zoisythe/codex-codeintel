@@ -19,7 +19,8 @@ export class Runtime {
 		clearTimeout(this.timers.get(root));
 		this.active.set(root, (this.active.get(root) ?? 0) + 1);
 		try {
-			return await engine.dispatch(operation, args, signal);
+			const target = engine;
+			return await target.dispatch(operation, args, signal);
 		} finally {
 			const active = (this.active.get(root) ?? 1) - 1;
 			this.active.set(root, active);

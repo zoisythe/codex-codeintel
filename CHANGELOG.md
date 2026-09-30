@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0
+
+- Breaking: schemaVersion 1, fixed global/project paths, global-only workspace trust and language-keyed server replacement; removed environment overrides and priority competition.
+- Local project/PATH tools precede registered ecosystem launchers; Python defaults to ty plus Ruff CLI, including .pyi and no-config Ruff. No clangd/Rust toolchain auto-installation.
+- Five MCP tools: unified scope/source/run diagnostics, lazy status, read-only expanded navigation, independent rename and explicit formatting. Opaque cursors replace legacy modes and offsets.
+- Capability-aware pull/push diagnostics, quiet windows, pending analysis updates, initialization failure recovery, write preflight and conflict reporting.
+- Two active content inventories, one cached inventory, no redundant PreToolUse baseline scan; bounded local timing statistics.
+- Updated bundle, Skill, migration guide, real Python/C/C++/Rust subprocess acceptance and performance measurements.
+
+See [migration](docs/migration-0.5.md) and [validation](docs/validation-0.5.md).
+
 ## 0.4.0
 
 - Normalize Windows diagnostic URI drive letters and escaping so TypeScript push diagnostics are not left permanently pending; cover canonicalized server URIs in native subprocess tests.

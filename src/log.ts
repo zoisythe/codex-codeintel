@@ -15,7 +15,7 @@ export function logEvent(
 			const dir = join(
 				process.env["CODEX_LSP_CACHE"] ??
 					join(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir()).slice(0, 10)}`),
-				"logs-v4",
+				"logs-v5",
 			);
 			await mkdir(dir, { recursive: true, mode: 0o700 });
 			const path = join(dir, `${instance}.log`);

@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { message, record, text } from "./results.js";
+import { failureKind, message, record, text, WriteFailure } from "./results.js";
 import { Runtime } from "./runtime.js";
 
 const string = { type: "string" };
@@ -7,25 +7,13 @@ const scope = {
 	workspace: { type: "string", description: "Absolute user repository path, never the plugin directory." },
 	session: {
 		type: "string",
-		description: "Codex session id for cached/delta results; required when multiple sessions share this workspace.",
+		description: "Codex session id for turn/session scopes; required when multiple sessions share this workspace.",
 	},
 	path: string,
 	paths: { type: "array", items: string, maxItems: 200 },
 };
-const paging = {
-	revision: {
-		type: "string",
-		description:
-			"Version returned by the first page; required for nonzero start/offset. Restart from zero if changed.",
-	},
-	refresh: {
-		type: "boolean",
-		description:
-			"Active diagnostics only: bypass results and rebuild LSP clients. Use after external config or tool installation changes.",
-	},
-	offset: { type: "integer", minimum: 0, maximum: 10000 },
-	start: { type: "integer", minimum: 0, maximum: 10000 },
-};
+const paging = { cursor: string, refresh: { type: "boolean", description: "Force tool and client revalidation" } };
+
 function tool(
 	name: string,
 	description: string,
@@ -43,52 +31,82 @@ function tool(
 export const TOOLS = [
 	tool(
 		"check_diagnostics",
-		"Process-local LSP/lint results: delta=current turn, all=session touched, full=active scoped scan, status=runtime. Hook-only files are pending. complete covers this scope and executed channels, not build/tests. Continuations require revision.",
-		{ ...scope, ...paging, mode: { type: "string", enum: ["delta", "all", "full", "status"] } },
+		"Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and Hook-only files remain pending. Continue with complete next arguments.",
+		{
+			...scope,
+			...paging,
+			scope: { type: "string", enum: ["paths", "turn", "session"] },
+			source: { type: "string", enum: ["lsp", "lint", "both"] },
+			run: { type: "string", enum: ["active", "cached"] },
+		},
 		[],
 		true,
 	),
 	tool(
-		"lsp_diagnostics",
-		"Actively check files/directories with LSP only. Defaults to workspace. Bounded multi-language scan; continue using returned start/offset.",
-		{ ...scope, ...paging },
+		"lsp_status",
+		"Explain configuration, trust, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
+		{ workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
 		[],
 		true,
 	),
 	tool(
 		"lsp_navigation",
-		"LSP definition/references/symbols/prepare_rename/rename. Positions are 1-based. Rename writes workspace files sequentially; prepare first.",
+		"Read-only LSP navigation. Positions are 1-based; unsupported capabilities are reported explicitly.",
 		{
 			...scope,
-			operation: { type: "string", enum: ["definition", "references", "symbols", "prepare_rename", "rename"] },
+			operation: {
+				type: "string",
+				enum: [
+					"definition",
+					"references",
+					"symbols",
+					"prepare_rename",
+					"hover",
+					"typeDefinition",
+					"implementation",
+					"signatureHelp",
+				],
+			},
 			line: { type: "integer", minimum: 1 },
 			column: { type: "integer", minimum: 1 },
 			query: string,
-			newName: string,
 		},
 		["path", "operation"],
+		true,
+	),
+	tool(
+		"lsp_rename",
+		"Rename across workspace files. Preflight all targets, detect conflicts, write sequentially; never replay partial writes.",
+		{ ...scope, line: { type: "integer", minimum: 1 }, column: { type: "integer", minimum: 1 }, newName: string },
+		["path", "newName"],
 		false,
 	),
 	tool(
 		"lsp_format",
-		"Explicitly format scoped files with the configured project formatter or LSP. Writes files, checks conflicts, then rechecks diagnostics. Never runs lint fix.",
+		"Format explicit paths using Ruff for Python or project formatter/LSP. Preflight before writes.",
 		scope,
 		[],
 		false,
 	),
 ];
+
 function validateArguments(name: string, args: Record<string, unknown>): void {
 	if (
 		args["refresh"] !== undefined &&
-		!(name === "lsp_diagnostics" || (name === "check_diagnostics" && args["mode"] === "full"))
+		!(name === "lsp_status" || (name === "check_diagnostics" && args["run"] !== "cached"))
 	)
-		throw new Error("refresh requires active diagnostics");
+		throw new Error("refresh requires active diagnostics or lsp_status");
 	const definition = TOOLS.find((entry) => entry.name === name);
 	if (!definition) throw new Error("Unknown tool");
 	for (const key of definition.inputSchema.required) if (args[key] === undefined) throw new Error(`${key} required`);
 	for (const [key, value] of Object.entries(args)) {
 		const schema = definition.inputSchema.properties[key];
-		if (!record(schema)) throw new Error(`Unknown argument: ${key}`);
+		if (!record(schema))
+			throw new Error(
+				["mode", "start", "offset", "revision"].includes(key)
+					? "Migration required: use scope/source/run/cursor; see docs/migration-0.5.md"
+					: `Unknown argument: ${key}`,
+			);
 		if (schema["type"] === "boolean" && typeof value !== "boolean") throw new Error(`${key} must be a boolean`);
 		if (schema["type"] === "string" && typeof value !== "string") throw new Error(`${key} must be a string`);
 		if (schema["type"] === "integer") {
@@ -138,7 +156,7 @@ export async function runMcp(
 		if (method === "initialize") {
 			ok({
 				protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-				serverInfo: { name: "codex-lsp", version: "0.4.0" }, // keep in sync with package.json
+				serverInfo: { name: "codex-lsp", version: "0.5.0" }, // keep in sync with package.json
 				capabilities: { tools: { listChanged: false } },
 			});
 			return;
@@ -171,14 +189,41 @@ export async function runMcp(
 		controllers.set(id, controller);
 		try {
 			const name = text(params["name"]);
+			if (name === "lsp_diagnostics")
+				throw new Error("Migration required: use check_diagnostics source=lsp; see docs/migration-0.5.md");
 			if (!TOOLS.some((entry) => entry.name === name)) throw new Error("Unknown tool");
 			if (!record(params["arguments"])) throw new Error("Tool arguments required");
 			const args = params["arguments"];
 			validateArguments(name, args);
 			const result = await runtime.request(text(args["workspace"]), name, args, controller.signal);
-			ok({ content: [{ type: "text", text: result }] });
+			let structured: unknown;
+			try {
+				structured = JSON.parse(result);
+			} catch {
+				structured = { summary: result, operation: name, workspace: args["workspace"] };
+			}
+			if (Array.isArray(structured)) structured = { items: structured };
+			ok({
+				...(record(structured)
+					? { structuredContent: structured, ...(structured["isError"] === true ? { isError: true } : {}) }
+					: {}),
+				content: [
+					{
+						type: "text",
+						text: record(structured) && typeof structured["text"] === "string" ? structured["text"] : result,
+					},
+				],
+			});
 		} catch (error) {
-			ok({ isError: true, content: [{ type: "text", text: message(error).slice(0, 2000) }] });
+			ok({
+				isError: true,
+				structuredContent: {
+					status: failureKind(message(error)),
+					reason: message(error),
+					...(error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {}),
+				},
+				content: [{ type: "text", text: message(error).slice(0, 2000) }],
+			});
 		} finally {
 			controllers.delete(id);
 		}

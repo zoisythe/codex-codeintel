@@ -77,7 +77,7 @@ describe("plugin package metadata", () => {
 		const sessionStart = hooksJson.hooks["SessionStart"]?.[0]?.hooks[0]?.command;
 
 		expect(pluginJson.version).toBe(packageJson.version);
-		expect(packageJson.version).toBe("0.4.0");
+		expect(packageJson.version).toBe("0.5.0");
 		expect(packageJson.type).toBe("module");
 		expect(packageJson.packageManager).toBe("npm@11.12.1");
 		expect(packageJson.dependencies).toBeUndefined();
@@ -92,6 +92,7 @@ describe("plugin package metadata", () => {
 			"NOTICE",
 			"README.md",
 			"CHANGELOG.md",
+			"docs",
 		]);
 		expect(packageJson.files).toContain("skills");
 		expect(packageJson.bin["codex-lsp"]).toBe("./dist/cli.js");

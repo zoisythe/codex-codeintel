@@ -1,55 +1,166 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { BUILTIN_SERVERS } from "../packages/lsp-tools-mcp/dist/lsp/server-definitions.js";
 import { hash } from "./files.js";
 import { record } from "./results.js";
 
+export interface Server {
+	readonly id: string;
+	readonly command: readonly string[];
+	readonly extensions: readonly string[];
+	readonly explicit: boolean;
+	readonly source: string;
+	readonly env?: Readonly<Record<string, string>>;
+	readonly initialization?: Readonly<Record<string, unknown>>;
+}
+export interface Config {
+	readonly schemaVersion: 1;
+	readonly javascript: "auto" | "biome" | "eslint" | "off";
+	readonly python: "auto" | "ruff" | "off";
+	readonly exclude: string[];
+	readonly version: string;
+	readonly user: string;
+	readonly project: string;
+	readonly trusted: boolean;
+	readonly extensions: Readonly<Record<string, readonly string[]>>;
+	readonly servers: Readonly<Record<string, Server | false>>;
+	readonly formatting: Readonly<{ tabSize: number; insertSpaces: boolean }>;
+}
 export function configPaths(root: string): { user: string; project: string } {
-	const user = process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-	const project = process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
+	for (const key of Object.keys(process.env))
+		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
+			throw new Error(
+				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1), global trustedWorkspaces and <workspace>/.codex/lsp-client.json. See docs/migration-0.5.md`,
+			);
 	return {
-		user: user
-			? isAbsolute(user)
-				? user
-				: join(homedir(), user)
-			: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
-		project: project
-			? isAbsolute(project)
-				? project
-				: join(root, project)
-			: join(root, ".codex", "lsp-client.json"),
+		user: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
+		project: join(root, ".codex", "lsp-client.json"),
 	};
 }
 async function read(path: string): Promise<Record<string, unknown>> {
 	try {
 		const value: unknown = JSON.parse(await readFile(path, "utf8"));
-		return record(value) ? value : {};
+		if (!record(value) || value["schemaVersion"] !== 1)
+			throw new Error(
+				`Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`,
+			);
+		for (const key of Object.keys(value))
+			if (!["schemaVersion", "trustedWorkspaces", "lsp", "lint", "exclude", "formatting"].includes(key))
+				throw new Error(`Unknown configuration field ${key} in ${path}`);
+		return value;
 	} catch (error) {
 		if (record(error) && error["code"] === "ENOENT") return {};
-		throw new Error("Cannot read valid lsp-client.json configuration");
+		throw new Error(`Configuration error in ${path}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
-export async function trusted(root: string): Promise<boolean> {
-	if (process.env["CODEX_LSP_TRUST_PROJECT"] === "1") return true;
-	const user = await read(configPaths(root).user);
-	return Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
+const defaults: Record<string, string> = {
+	python: "ty",
+	typescript: "typescript",
+	cpp: "clangd",
+	rust: "rust",
+	bash: "bash",
+	yaml: "yaml-ls",
+	svelte: "svelte",
+	astro: "astro",
+	go: "gopls",
+	lua: "lua-ls",
+	java: "jdtls",
+	html: "html",
+	css: "css",
+	json: "json",
+};
+const web = {
+	html: { command: ["vscode-html-language-server", "--stdio"], extensions: [".html", ".htm"] },
+	css: { command: ["vscode-css-language-server", "--stdio"], extensions: [".css", ".scss", ".less"] },
+	json: { command: ["vscode-json-language-server", "--stdio"], extensions: [".json", ".jsonc"] },
+};
+const builtins: Record<string, unknown> = { ...BUILTIN_SERVERS, ...web };
+function server(value: unknown, language: string, source: string): Server | false {
+	if (value === false) return false;
+	const builtin = typeof value === "string" ? builtins[value] : undefined;
+	if (typeof value === "string" && !builtin) throw new Error(`Unknown built-in server ${value} for ${language}`);
+	const item = builtin ?? value;
+	if (!record(item)) throw new Error(`lsp.${language} must be a built-in name, custom server or false`);
+	for (const key of Object.keys(item))
+		if (!["command", "extensions", "env", "initialization"].includes(key))
+			throw new Error(`Invalid lsp.${language}.${key}; priority/disabled were removed; use false to disable`);
+	const command = item["command"];
+	const extensions = item["extensions"];
+	if (!Array.isArray(command) || !command.length || !command.every((v): v is string => typeof v === "string" && !!v))
+		throw new Error(`lsp.${language}.command requires a nonempty string array`);
+	if (
+		!Array.isArray(extensions) ||
+		!extensions.length ||
+		!extensions.every((v): v is string => typeof v === "string" && /^\.[^/\\]+$/.test(v))
+	)
+		throw new Error(`lsp.${language}.extensions requires dot-prefixed extensions`);
+	const env = item["env"];
+	const initialization = item["initialization"];
+	if (env !== undefined && (!record(env) || !Object.values(env).every((v) => typeof v === "string")))
+		throw new Error(`Invalid lsp.${language}.env`);
+	if (initialization !== undefined && !record(initialization))
+		throw new Error(`Invalid lsp.${language}.initialization`);
+	return {
+		id: typeof value === "string" ? value : language,
+		command,
+		extensions,
+		explicit: !builtin,
+		source,
+		...(env ? { env: env as Record<string, string> } : {}),
+		...(initialization ? { initialization: initialization as Record<string, unknown> } : {}),
+	};
 }
-export interface Config {
-	javascript: "auto" | "biome" | "eslint" | "off";
-	python: "auto" | "ruff" | "off";
-	exclude: string[];
-	version: string;
-	user: string;
-	project: string;
-	trusted: boolean;
+function freeze<T>(value: T): T {
+	if (value && typeof value === "object") {
+		for (const child of Object.values(value)) freeze(child);
+		Object.freeze(value);
+	}
+	return value;
+}
+export async function trusted(root: string): Promise<boolean> {
+	return (await configuration(root)).trusted;
 }
 export async function configuration(root: string): Promise<Config> {
 	const paths = configPaths(root);
 	const user = await read(paths.user);
-	const trust =
-		process.env["CODEX_LSP_TRUST_PROJECT"] === "1" ||
-		(Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root));
+	if (
+		user["trustedWorkspaces"] !== undefined &&
+		(!Array.isArray(user["trustedWorkspaces"]) ||
+			!user["trustedWorkspaces"].every((v) => typeof v === "string" && isAbsolute(v)))
+	)
+		throw new Error("trustedWorkspaces requires absolute paths");
+	const trust = Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
 	const project = trust ? await read(paths.project) : {};
+	const servers: Record<string, Server | false> = {};
+	for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
+	for (const [data, source] of [
+		[user, paths.user],
+		[project, paths.project],
+	] as const) {
+		if (data["lsp"] !== undefined && !record(data["lsp"])) throw new Error(`Invalid lsp in ${source}`);
+		if (record(data["lsp"]))
+			for (const [language, value] of Object.entries(data["lsp"]))
+				servers[language] = server(value, language, source);
+		for (const key of ["lint", "formatting"])
+			if (data[key] !== undefined && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
+	}
+	const extensions: Record<string, readonly string[]> = {};
+	for (const [language, name] of Object.entries(defaults)) {
+		const entry = server(name, language, "builtin");
+		if (entry) extensions[language] = entry.extensions;
+	}
+	for (const [language, entry] of Object.entries(servers)) if (entry) extensions[language] = entry.extensions;
+	const used = new Map<string, string>();
+	for (const [language, entry] of Object.entries(servers))
+		if (entry)
+			for (const extension of entry.extensions) {
+				if (used.has(extension))
+					throw new Error(
+						`Extension conflict ${extension}: ${used.get(extension)} and ${language}; disable or replace the original language entry`,
+					);
+				used.set(extension, language);
+			}
 	const lint = { ...(record(user["lint"]) ? user["lint"] : {}), ...(record(project["lint"]) ? project["lint"] : {}) };
 	const javascript = lint["javascript"] ?? "auto";
 	const python = lint["python"] ?? "auto";
@@ -69,30 +180,29 @@ export async function configuration(root: string): Promise<Config> {
 		)
 	)
 		throw new Error("exclude requires relative forward-slash globs without negation");
-	return {
+	const formatting = {
+		tabSize: 4,
+		insertSpaces: true,
+		...(record(user["formatting"]) ? user["formatting"] : {}),
+		...(record(project["formatting"]) ? project["formatting"] : {}),
+	};
+	if (
+		!Number.isInteger(formatting.tabSize) ||
+		formatting.tabSize < 1 ||
+		formatting.tabSize > 16 ||
+		typeof formatting.insertSpaces !== "boolean"
+	)
+		throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
+	return freeze({
+		schemaVersion: 1,
 		javascript,
 		python,
 		exclude,
 		trusted: trust,
 		...paths,
+		extensions,
+		servers,
+		formatting,
 		version: hash(JSON.stringify([user, project, trust, paths])),
-	};
-}
-// The upstream resolver reads its configuration synchronously before its first await.
-// Restore overrides immediately; never leave process-global workspace configuration across awaits.
-export function withConfiguration<T>(config: Config, invoke: () => T): T {
-	const user = process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-	const project = process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-	process.env["LSP_TOOLS_MCP_USER_CONFIG"] = config.user;
-	process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"] = config.trusted
-		? config.project
-		: join(config.user, "disabled-project-config");
-	try {
-		return invoke();
-	} finally {
-		if (user === undefined) delete process.env["LSP_TOOLS_MCP_USER_CONFIG"];
-		else process.env["LSP_TOOLS_MCP_USER_CONFIG"] = user;
-		if (project === undefined) delete process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"];
-		else process.env["LSP_TOOLS_MCP_PROJECT_CONFIG"] = project;
-	}
+	});
 }
