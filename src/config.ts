@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { BUILTIN_SERVERS } from "../packages/lsp-tools-mcp/dist/lsp/server-definitions.js";
 import { hash } from "./files.js";
 import { record } from "./results.js";
+import { type Trust, workspaceTrust } from "./trust.js";
 
 export interface Server {
 	readonly id: string;
@@ -23,19 +24,21 @@ export interface Config {
 	readonly user: string;
 	readonly project: string;
 	readonly trusted: boolean;
+	readonly trust: Trust;
 	readonly extensions: Readonly<Record<string, readonly string[]>>;
 	readonly servers: Readonly<Record<string, Server | false>>;
 	readonly formatting: Readonly<{ tabSize: number; insertSpaces: boolean }>;
 }
-export function configPaths(root: string): { user: string; project: string } {
+export function configPaths(root: string): { user: string; project: string; codex: string } {
 	for (const key of Object.keys(process.env))
 		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
 			throw new Error(
-				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1), global trustedWorkspaces and <workspace>/.codex/lsp-client.json. See docs/migration-0.5.md`,
+				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/migration-0.5.md`,
 			);
 	return {
 		user: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
 		project: join(root, ".codex", "lsp-client.json"),
+		codex: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "config.toml"),
 	};
 }
 async function read(path: string): Promise<Record<string, unknown>> {
@@ -45,6 +48,7 @@ async function read(path: string): Promise<Record<string, unknown>> {
 			throw new Error(
 				`Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`,
 			);
+		// Legacy trustedWorkspaces is accepted but grants no trust.
 		for (const key of Object.keys(value))
 			if (!["schemaVersion", "trustedWorkspaces", "lsp", "lint", "exclude", "formatting"].includes(key))
 				throw new Error(`Unknown configuration field ${key} in ${path}`);
@@ -129,14 +133,8 @@ export async function trusted(root: string): Promise<boolean> {
 export async function configuration(root: string): Promise<Config> {
 	const paths = configPaths(root);
 	const user = await read(paths.user);
-	if (
-		user["trustedWorkspaces"] !== undefined &&
-		(!Array.isArray(user["trustedWorkspaces"]) ||
-			!user["trustedWorkspaces"].every((v) => typeof v === "string" && isAbsolute(v)))
-	)
-		throw new Error("trustedWorkspaces requires absolute paths");
-	const trust = Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
-	const project = trust ? await read(paths.project) : {};
+	const trust = await workspaceTrust(root, paths.codex);
+	const project = trust.level === "trusted" ? await read(paths.project) : {};
 	const servers: Record<string, Server | false> = {};
 	for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
 	for (const [data, source] of [
@@ -203,7 +201,8 @@ export async function configuration(root: string): Promise<Config> {
 		javascript,
 		python,
 		exclude,
-		trusted: trust,
+		trusted: trust.level === "trusted",
+		trust,
 		...paths,
 		extensions,
 		servers,

@@ -1,18 +1,16 @@
 #!/usr/bin/env node
 
 // src/codex-hook.ts
-import { execFile as execFile2 } from "node:child_process";
-import { realpath as realpath4 } from "node:fs/promises";
+import { realpath as realpath5 } from "node:fs/promises";
 import { stdin } from "node:process";
-import { promisify as promisify2 } from "node:util";
 
 // src/hook-engine.ts
-import { readFile as readFile7 } from "node:fs/promises";
+import { readFile as readFile8 } from "node:fs/promises";
 
 // src/config.ts
-import { readFile as readFile2 } from "node:fs/promises";
+import { readFile as readFile3 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join2 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/server-definitions.js
 var BUILTIN_SERVERS = {
@@ -341,21 +339,983 @@ function failureKind(reason) {
   return "execution_failed";
 }
 
+// src/trust.ts
+import { readFile as readFile2, realpath as realpath2 } from "node:fs/promises";
+import { isAbsolute as isAbsolute2 } from "node:path";
+
+// node_modules/smol-toml/dist/date.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+var DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
+var TomlDate = class _TomlDate extends Date {
+  #hasDate = false;
+  #hasTime = false;
+  #offset = null;
+  constructor(date) {
+    let hasDate = true;
+    let hasTime = true;
+    let offset = "Z";
+    if (typeof date === "string") {
+      let match = date.match(DATE_TIME_RE);
+      if (match) {
+        if (!match[1]) {
+          hasDate = false;
+          date = `0000-01-01T${date}`;
+        }
+        hasTime = !!match[2];
+        hasTime && date[10] === " " && (date = date.replace(" ", "T"));
+        if (match[2] && +match[2] > 23) {
+          date = "";
+        } else {
+          offset = match[3] || null;
+          date = date.toUpperCase();
+          if (!offset && hasTime)
+            date += "Z";
+        }
+      } else {
+        date = "";
+      }
+    }
+    super(date);
+    if (!isNaN(this.getTime())) {
+      this.#hasDate = hasDate;
+      this.#hasTime = hasTime;
+      this.#offset = offset;
+    }
+  }
+  isDateTime() {
+    return this.#hasDate && this.#hasTime;
+  }
+  isLocal() {
+    return !this.#hasDate || !this.#hasTime || !this.#offset;
+  }
+  isDate() {
+    return this.#hasDate && !this.#hasTime;
+  }
+  isTime() {
+    return this.#hasTime && !this.#hasDate;
+  }
+  isValid() {
+    return this.#hasDate || this.#hasTime;
+  }
+  toISOString() {
+    let iso = super.toISOString();
+    if (this.isDate())
+      return iso.slice(0, 10);
+    if (this.isTime())
+      return iso.slice(11, 23);
+    if (this.#offset === null)
+      return iso.slice(0, -1);
+    if (this.#offset === "Z")
+      return iso;
+    let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
+    offset = this.#offset[0] === "-" ? offset : -offset;
+    let offsetDate = new Date(this.getTime() - offset * 6e4);
+    return offsetDate.toISOString().slice(0, -1) + this.#offset;
+  }
+  static wrapAsOffsetDateTime(jsDate, offset = "Z") {
+    let date = new _TomlDate(jsDate);
+    date.#offset = offset;
+    return date;
+  }
+  static wrapAsLocalDateTime(jsDate) {
+    let date = new _TomlDate(jsDate);
+    date.#offset = null;
+    return date;
+  }
+  static wrapAsLocalDate(jsDate) {
+    let date = new _TomlDate(jsDate);
+    date.#hasTime = false;
+    date.#offset = null;
+    return date;
+  }
+  static wrapAsLocalTime(jsDate) {
+    let date = new _TomlDate(jsDate);
+    date.#hasDate = false;
+    date.#offset = null;
+    return date;
+  }
+};
+
+// node_modules/smol-toml/dist/error.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+function getLineColFromPtr(string2, ptr) {
+  let lines = string2.slice(0, ptr).split(/\r\n|\n|\r/g);
+  return [lines.length, lines.pop().length + 1];
+}
+function makeCodeBlock(string2, line, column) {
+  let lines = string2.split(/\r\n|\n|\r/g);
+  let codeblock = "";
+  let numberLen = (Math.log10(line + 1) | 0) + 1;
+  for (let i = line - 1; i <= line + 1; i++) {
+    let l = lines[i - 1];
+    if (!l)
+      continue;
+    codeblock += i.toString().padEnd(numberLen, " ");
+    codeblock += ":  ";
+    codeblock += l;
+    codeblock += "\n";
+    if (i === line) {
+      codeblock += " ".repeat(numberLen + column + 2);
+      codeblock += "^\n";
+    }
+  }
+  return codeblock;
+}
+var TomlError = class extends Error {
+  line;
+  column;
+  codeblock;
+  constructor(message2, options) {
+    const [line, column] = getLineColFromPtr(options.toml, options.ptr);
+    const codeblock = makeCodeBlock(options.toml, line, column);
+    super(`Invalid TOML document: ${message2}
+
+${codeblock}`, options);
+    this.line = line;
+    this.column = column;
+    this.codeblock = codeblock;
+  }
+};
+
+// node_modules/smol-toml/dist/primitive.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+var INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
+var FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
+var LEADING_ZERO = /^[+-]?0[0-9_]/;
+function parseString(str, ptr) {
+  let c = str[ptr++];
+  let first = c;
+  let isLiteral = c === "'";
+  let isMultiline = c === str[ptr] && c === str[ptr + 1];
+  if (isMultiline) {
+    if (str[ptr += 2] === "\n")
+      ptr++;
+    else if (str[ptr] === "\r" && str[ptr + 1] === "\n")
+      ptr += 2;
+  }
+  let parsed = "";
+  let sliceStart = ptr;
+  let state = 0;
+  for (let i = ptr; i < str.length; i++) {
+    c = str[i];
+    if (isMultiline && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
+      state = state && 3;
+    } else if (c < " " && c !== "	" || c === "\x7F") {
+      throw new TomlError("control characters are not allowed in strings", {
+        toml: str,
+        ptr: i
+      });
+    } else if ((!state || state === 3) && c === first && (!isMultiline || str[i + 1] === first && str[i + 2] === first)) {
+      if (isMultiline) {
+        if (str[i + 3] === first)
+          i++;
+        if (str[i + 3] === first)
+          i++;
+      }
+      return [
+        // If we're in a newline escape still, then there's nothing to add.
+        // Also try to avoid concat if there's nothing to add to parsed, or nothing has been added to parsed.
+        state ? parsed : parsed + str.slice(sliceStart, i),
+        i + (isMultiline ? 3 : 1)
+      ];
+    } else if (!state) {
+      if (!isLiteral && c === "\\") {
+        parsed += str.slice(sliceStart, sliceStart = i);
+        state = 1;
+      }
+    } else if (state === 1) {
+      if (c === "x" || c === "u" || c === "U") {
+        let value = 0;
+        let len = c === "x" ? 2 : c === "u" ? 4 : 8;
+        for (let j = 0; j < len; j++, i++) {
+          let hex = str.charCodeAt(i + 1);
+          let digit = (
+            /* 0-9 */
+            hex >= 48 && hex <= 57 ? hex - 48 : (
+              /* A-F */
+              hex >= 65 && hex <= 70 ? hex - 65 + 10 : (
+                /* a-f */
+                hex >= 97 && hex <= 102 ? hex - 97 + 10 : -1
+              )
+            )
+          );
+          if (digit < 0)
+            throw new TomlError("invalid non-hex character in unicode escape", { toml: str, ptr: i + 1 });
+          value = value << 4 | digit;
+        }
+        if (value < 0 || value > 1114111 || value >= 55296 && value <= 57343) {
+          throw new TomlError("invalid unicode escape", { toml: str, ptr: i });
+        }
+        parsed += String.fromCodePoint(value);
+        sliceStart = i + 1;
+        state = 0;
+      } else if (c === " " || c === "	") {
+        state = 2;
+      } else {
+        if (c === "b")
+          parsed += "\b";
+        else if (c === "t")
+          parsed += "	";
+        else if (c === "n")
+          parsed += "\n";
+        else if (c === "f")
+          parsed += "\f";
+        else if (c === "r")
+          parsed += "\r";
+        else if (c === "e")
+          parsed += "\x1B";
+        else if (c === '"')
+          parsed += '"';
+        else if (c === "\\")
+          parsed += "\\";
+        else
+          throw new TomlError("unrecognized escape sequence", { toml: str, ptr: i });
+        sliceStart = i + 1;
+        state = 0;
+      }
+    } else if (c !== " " && c !== "	") {
+      if (state === 2) {
+        throw new TomlError("invalid escape: only line-ending whitespace may be escaped", {
+          toml: str,
+          ptr: sliceStart
+        });
+      }
+      state = !isLiteral && c === "\\" ? 1 : 0;
+      sliceStart = i;
+    }
+  }
+  throw new TomlError("unfinished string", { toml: str, ptr });
+}
+function parseValue(value, toml, ptr, integersAsBigInt) {
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  if (value === "-inf")
+    return -Infinity;
+  if (value === "inf" || value === "+inf")
+    return Infinity;
+  if (value === "nan" || value === "+nan" || value === "-nan")
+    return NaN;
+  if (value === "-0")
+    return integersAsBigInt ? 0n : 0;
+  let isInt = INT_REGEX.test(value);
+  if (isInt || FLOAT_REGEX.test(value)) {
+    if (LEADING_ZERO.test(value)) {
+      throw new TomlError("leading zeroes are not allowed", {
+        toml,
+        ptr
+      });
+    }
+    value = value.replace(/_/g, "");
+    let numeric = +value;
+    if (isNaN(numeric)) {
+      throw new TomlError("invalid number", {
+        toml,
+        ptr
+      });
+    }
+    if (isInt) {
+      if ((isInt = !Number.isSafeInteger(numeric)) && !integersAsBigInt) {
+        throw new TomlError("integer value cannot be represented losslessly", {
+          toml,
+          ptr
+        });
+      }
+      if (isInt || integersAsBigInt === true)
+        numeric = BigInt(value);
+    }
+    return numeric;
+  }
+  const date = new TomlDate(value);
+  if (!date.isValid()) {
+    throw new TomlError("invalid value", {
+      toml,
+      ptr
+    });
+  }
+  return date;
+}
+
+// node_modules/smol-toml/dist/util.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+function indexOfNewline(str, start = 0, end = str.length) {
+  let idx = str.indexOf("\n", start);
+  if (str[idx - 1] === "\r")
+    idx--;
+  return idx <= end ? idx : -1;
+}
+function skipComment(str, ptr) {
+  for (let i = ptr; i < str.length; i++) {
+    let c = str[i];
+    if (c === "\n")
+      return i;
+    if (c === "\r" && str[i + 1] === "\n")
+      return i + 1;
+    if (c < " " && c !== "	" || c === "\x7F") {
+      throw new TomlError("control characters are not allowed in comments", {
+        toml: str,
+        ptr
+      });
+    }
+  }
+  return str.length;
+}
+function skipVoid(str, ptr, banNewLines, banComments) {
+  let c;
+  while (1) {
+    while ((c = str[ptr]) === " " || c === "	" || !banNewLines && (c === "\n" || c === "\r" && str[ptr + 1] === "\n"))
+      ptr++;
+    if (banComments || c !== "#")
+      break;
+    ptr = skipComment(str, ptr);
+  }
+  return ptr;
+}
+function skipUntil(str, ptr, sep3, end, banNewLines = false) {
+  if (!end) {
+    ptr = indexOfNewline(str, ptr);
+    return ptr < 0 ? str.length : ptr;
+  }
+  for (let i = ptr; i < str.length; i++) {
+    let c = str[i];
+    if (c === "#") {
+      i = indexOfNewline(str, i);
+    } else if (c === sep3) {
+      return i + 1;
+    } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
+      return i;
+    }
+  }
+  throw new TomlError("cannot find end of structure", {
+    toml: str,
+    ptr
+  });
+}
+
+// node_modules/smol-toml/dist/extract.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+function sliceAndTrimEndOf(str, startPtr, endPtr) {
+  let value = str.slice(startPtr, endPtr);
+  let commentIdx = value.indexOf("#");
+  if (commentIdx > -1) {
+    skipComment(str, commentIdx);
+    value = value.slice(0, commentIdx);
+  }
+  return [value.trimEnd(), commentIdx];
+}
+function extractValue(str, ptr, end, depth, integersAsBigInt) {
+  if (depth === 0) {
+    throw new TomlError("document contains excessively nested structures. aborting.", {
+      toml: str,
+      ptr
+    });
+  }
+  let c = str[ptr];
+  if (c === "[" || c === "{") {
+    let [value, endPtr2] = c === "[" ? parseArray(str, ptr, depth, integersAsBigInt) : parseInlineTable(str, ptr, depth, integersAsBigInt);
+    if (end) {
+      endPtr2 = skipVoid(str, endPtr2);
+      if (str[endPtr2] === ",")
+        endPtr2++;
+      else if (str[endPtr2] !== end) {
+        throw new TomlError("expected comma or end of structure", {
+          toml: str,
+          ptr: endPtr2
+        });
+      }
+    }
+    return [value, endPtr2];
+  }
+  if (c === '"' || c === "'") {
+    let [parsed, endPtr2] = parseString(str, ptr);
+    if (end) {
+      endPtr2 = skipVoid(str, endPtr2);
+      if (str[endPtr2] && str[endPtr2] !== "," && str[endPtr2] !== end && str[endPtr2] !== "\n" && str[endPtr2] !== "\r") {
+        throw new TomlError("unexpected character encountered", {
+          toml: str,
+          ptr: endPtr2
+        });
+      }
+      if (str[endPtr2] === ",")
+        endPtr2++;
+    }
+    return [parsed, endPtr2];
+  }
+  let endPtr = skipUntil(str, ptr, ",", end);
+  let slice = sliceAndTrimEndOf(str, ptr, endPtr - (str[endPtr - 1] === "," ? 1 : 0));
+  if (!slice[0]) {
+    throw new TomlError("incomplete key-value declaration: no value specified", {
+      toml: str,
+      ptr
+    });
+  }
+  if (end && slice[1] > -1) {
+    endPtr = skipVoid(str, ptr + slice[1]);
+    if (str[endPtr] === ",")
+      endPtr++;
+  }
+  return [
+    parseValue(slice[0], str, ptr, integersAsBigInt),
+    endPtr
+  ];
+}
+
+// node_modules/smol-toml/dist/struct.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+var KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
+function parseKey(str, ptr, end = "=") {
+  let dot = ptr - 1;
+  let parsed = [];
+  let endPtr = str.indexOf(end, ptr);
+  if (endPtr < 0) {
+    throw new TomlError("incomplete key-value: cannot find end of key", {
+      toml: str,
+      ptr
+    });
+  }
+  do {
+    let c = str[ptr = ++dot];
+    if (c !== " " && c !== "	") {
+      if (c === '"' || c === "'") {
+        if (c === str[ptr + 1] && c === str[ptr + 2]) {
+          throw new TomlError("multiline strings are not allowed in keys", {
+            toml: str,
+            ptr
+          });
+        }
+        let [part, eos] = parseString(str, ptr);
+        dot = str.indexOf(".", eos);
+        let strEnd = str.slice(eos, dot < 0 || dot > endPtr ? endPtr : dot);
+        let newLine = indexOfNewline(strEnd);
+        if (newLine > -1) {
+          throw new TomlError("newlines are not allowed in keys", {
+            toml: str,
+            ptr: ptr + dot + newLine
+          });
+        }
+        if (strEnd.trimStart()) {
+          throw new TomlError("found extra tokens after the string part", {
+            toml: str,
+            ptr: eos
+          });
+        }
+        if (endPtr < eos) {
+          endPtr = str.indexOf(end, eos);
+          if (endPtr < 0) {
+            throw new TomlError("incomplete key-value: cannot find end of key", {
+              toml: str,
+              ptr
+            });
+          }
+        }
+        parsed.push(part);
+      } else {
+        dot = str.indexOf(".", ptr);
+        let part = str.slice(ptr, dot < 0 || dot > endPtr ? endPtr : dot);
+        if (!KEY_PART_RE.test(part)) {
+          throw new TomlError("only letter, numbers, dashes and underscores are allowed in keys", {
+            toml: str,
+            ptr
+          });
+        }
+        parsed.push(part.trimEnd());
+      }
+    }
+  } while (dot + 1 && dot < endPtr);
+  return [parsed, skipVoid(str, endPtr + 1, true, true)];
+}
+function parseInlineTable(str, ptr, depth, integersAsBigInt) {
+  let res = {};
+  let seen = /* @__PURE__ */ new Set();
+  let c;
+  ptr++;
+  while ((c = str[ptr++]) !== "}" && c) {
+    if (c === ",") {
+      throw new TomlError("expected value, found comma", {
+        toml: str,
+        ptr: ptr - 1
+      });
+    } else if (c === "#")
+      ptr = skipComment(str, ptr);
+    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
+      let k;
+      let t = res;
+      let hasOwn = false;
+      let [key, keyEndPtr] = parseKey(str, ptr - 1);
+      for (let i = 0; i < key.length; i++) {
+        if (i)
+          t = hasOwn ? t[k] : t[k] = {};
+        k = key[i];
+        if ((hasOwn = Object.hasOwn(t, k)) && (typeof t[k] !== "object" || seen.has(t[k]))) {
+          throw new TomlError("trying to redefine an already defined value", {
+            toml: str,
+            ptr
+          });
+        }
+        if (!hasOwn && k === "__proto__") {
+          Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
+        }
+      }
+      if (hasOwn) {
+        throw new TomlError("trying to redefine an already defined value", {
+          toml: str,
+          ptr
+        });
+      }
+      let [value, valueEndPtr] = extractValue(str, keyEndPtr, "}", depth - 1, integersAsBigInt);
+      seen.add(value);
+      t[k] = value;
+      ptr = valueEndPtr;
+    }
+  }
+  if (!c) {
+    throw new TomlError("unfinished table encountered", {
+      toml: str,
+      ptr
+    });
+  }
+  return [res, ptr];
+}
+function parseArray(str, ptr, depth, integersAsBigInt) {
+  let res = [];
+  let c;
+  ptr++;
+  while ((c = str[ptr++]) !== "]" && c) {
+    if (c === ",") {
+      throw new TomlError("expected value, found comma", {
+        toml: str,
+        ptr: ptr - 1
+      });
+    } else if (c === "#")
+      ptr = skipComment(str, ptr);
+    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
+      let e = extractValue(str, ptr - 1, "]", depth - 1, integersAsBigInt);
+      res.push(e[0]);
+      ptr = e[1];
+    }
+  }
+  if (!c) {
+    throw new TomlError("unfinished array encountered", {
+      toml: str,
+      ptr
+    });
+  }
+  return [res, ptr];
+}
+
+// node_modules/smol-toml/dist/parse.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+function peekTable(key, table, meta, type) {
+  let t = table;
+  let m = meta;
+  let k;
+  let hasOwn = false;
+  let state;
+  for (let i = 0; i < key.length; i++) {
+    if (i) {
+      t = hasOwn ? t[k] : t[k] = {};
+      m = (state = m[k]).c;
+      if (type === 0 && (state.t === 1 || state.t === 2)) {
+        return null;
+      }
+      if (state.t === 2) {
+        let l = t.length - 1;
+        t = t[l];
+        m = m[l].c;
+      }
+    }
+    k = key[i];
+    if ((hasOwn = Object.hasOwn(t, k)) && m[k]?.t === 0 && m[k]?.d) {
+      return null;
+    }
+    if (!hasOwn) {
+      if (k === "__proto__") {
+        Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
+        Object.defineProperty(m, k, { enumerable: true, configurable: true, writable: true });
+      }
+      m[k] = {
+        t: i < key.length - 1 && type === 2 ? 3 : type,
+        d: false,
+        i: 0,
+        c: {}
+      };
+    }
+  }
+  state = m[k];
+  if (state.t !== type && !(type === 1 && state.t === 3)) {
+    return null;
+  }
+  if (type === 2) {
+    if (!state.d) {
+      state.d = true;
+      t[k] = [];
+    }
+    t[k].push(t = {});
+    state.c[state.i++] = state = { t: 1, d: false, i: 0, c: {} };
+  }
+  if (state.d) {
+    return null;
+  }
+  state.d = true;
+  if (type === 1) {
+    t = hasOwn ? t[k] : t[k] = {};
+  } else if (type === 0 && hasOwn) {
+    return null;
+  }
+  return [k, t, state.c];
+}
+function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
+  let res = {};
+  let meta = {};
+  let tbl = res;
+  let m = meta;
+  for (let ptr = skipVoid(toml, 0); ptr < toml.length; ) {
+    if (toml[ptr] === "[") {
+      let isTableArray = toml[++ptr] === "[";
+      let k = parseKey(toml, ptr += +isTableArray, "]");
+      if (isTableArray) {
+        if (toml[k[1] - 1] !== "]") {
+          throw new TomlError("expected end of table declaration", {
+            toml,
+            ptr: k[1] - 1
+          });
+        }
+        k[1]++;
+      }
+      let p = peekTable(
+        k[0],
+        res,
+        meta,
+        isTableArray ? 2 : 1
+        /* Type.EXPLICIT */
+      );
+      if (!p) {
+        throw new TomlError("trying to redefine an already defined table or value", {
+          toml,
+          ptr
+        });
+      }
+      m = p[2];
+      tbl = p[1];
+      ptr = k[1];
+    } else {
+      let k = parseKey(toml, ptr);
+      let p = peekTable(
+        k[0],
+        tbl,
+        m,
+        0
+        /* Type.DOTTED */
+      );
+      if (!p) {
+        throw new TomlError("trying to redefine an already defined table or value", {
+          toml,
+          ptr
+        });
+      }
+      let v = extractValue(toml, k[1], void 0, maxDepth, integersAsBigInt);
+      p[1][p[0]] = v[0];
+      ptr = v[1];
+    }
+    ptr = skipVoid(toml, ptr, true);
+    if (toml[ptr] && toml[ptr] !== "\n" && toml[ptr] !== "\r") {
+      throw new TomlError("each key-value declaration must be followed by an end-of-line", {
+        toml,
+        ptr
+      });
+    }
+    ptr = skipVoid(toml, ptr);
+  }
+  return res;
+}
+
+// node_modules/smol-toml/dist/stringify.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// node_modules/smol-toml/dist/index.js
+/*!
+ * Copyright (c) Squirrel Chat et al., All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software without
+ *    specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// src/trust.ts
+async function workspaceTrust(root, path) {
+  const workspace = await realpath2(root);
+  let content;
+  try {
+    content = await readFile2(path, "utf8");
+  } catch (error) {
+    if (record(error) && error["code"] === "ENOENT") return { path, workspace, level: "unset" };
+    throw new Error(`Cannot read Codex user trust configuration: ${path}`);
+  }
+  let config;
+  try {
+    config = parse(content);
+  } catch {
+    throw new Error(`Invalid TOML in Codex user trust configuration: ${path}`);
+  }
+  const projects = record(config) ? config["projects"] : void 0;
+  if (projects === void 0) return { path, workspace, level: "unset" };
+  if (!record(projects)) throw new Error(`Invalid projects table in Codex user trust configuration: ${path}`);
+  const levels = await Promise.all(
+    Object.entries(projects).map(async ([candidate, entry]) => {
+      if (!isAbsolute2(candidate) || !record(entry)) return void 0;
+      if (await realpath2(candidate).catch(() => void 0) !== workspace) return void 0;
+      return entry["trust_level"];
+    })
+  );
+  const level = levels.includes("untrusted") ? "untrusted" : levels.includes("trusted") ? "trusted" : "unset";
+  return { path, workspace, level };
+}
+
 // src/config.ts
 function configPaths(root) {
   for (const key of Object.keys(process.env))
     if (key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG") || key === "CODEX_LSP_TRUST_PROJECT")
       throw new Error(
-        `Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1), global trustedWorkspaces and <workspace>/.codex/lsp-client.json. See docs/migration-0.5.md`
+        `Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/migration-0.5.md`
       );
   return {
     user: join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
-    project: join2(root, ".codex", "lsp-client.json")
+    project: join2(root, ".codex", "lsp-client.json"),
+    codex: join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "config.toml")
   };
 }
 async function read(path) {
   try {
-    const value = JSON.parse(await readFile2(path, "utf8"));
+    const value = JSON.parse(await readFile3(path, "utf8"));
     if (!record(value) || value["schemaVersion"] !== 1)
       throw new Error(
         `Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`
@@ -437,10 +1397,8 @@ function freeze(value) {
 async function configuration(root) {
   const paths = configPaths(root);
   const user = await read(paths.user);
-  if (user["trustedWorkspaces"] !== void 0 && (!Array.isArray(user["trustedWorkspaces"]) || !user["trustedWorkspaces"].every((v) => typeof v === "string" && isAbsolute2(v))))
-    throw new Error("trustedWorkspaces requires absolute paths");
-  const trust = Array.isArray(user["trustedWorkspaces"]) && user["trustedWorkspaces"].includes(root);
-  const project = trust ? await read(paths.project) : {};
+  const trust = await workspaceTrust(root, paths.codex);
+  const project = trust.level === "trusted" ? await read(paths.project) : {};
   const servers = {};
   for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
   for (const [data, source] of [
@@ -478,7 +1436,7 @@ async function configuration(root) {
   if (python !== "auto" && python !== "ruff" && python !== "off") throw new Error("Invalid lint.python");
   const exclude = project["exclude"] ?? user["exclude"] ?? [];
   if (!Array.isArray(exclude) || !exclude.every(
-    (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute2(item) && !item.split("/").includes("..")
+    (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute3(item) && !item.split("/").includes("..")
   ))
     throw new Error("exclude requires relative forward-slash globs without negation");
   const formatting = {
@@ -494,7 +1452,8 @@ async function configuration(root) {
     javascript,
     python,
     exclude,
-    trusted: trust,
+    trusted: trust.level === "trusted",
+    trust,
     ...paths,
     extensions,
     servers,
@@ -504,12 +1463,12 @@ async function configuration(root) {
 }
 
 // src/identity.ts
-import { readFile as readFile5, stat as stat4 } from "node:fs/promises";
+import { readFile as readFile6, stat as stat4 } from "node:fs/promises";
 import { dirname as dirname3, extname as extname3, join as join8, resolve as resolve3 } from "node:path";
 
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
+import { access as access3, readFile as readFile5, realpath as realpath3, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
 import { basename, dirname as dirname2, extname as extname2, join as join7 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/process.js
@@ -833,16 +1792,16 @@ function logEvent(event) {
 // src/prepared-tools.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile3, rename as rename2, writeFile } from "node:fs/promises";
+import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile4, rename as rename2, writeFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute3, join as join5 } from "node:path";
+import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
 function directory() {
   return join5(process.env["CODEX_HOME"] ?? join5(homedir3(), ".codex"), "cache", "codex-lsp-v5", "tools");
 }
 async function preparedRuff() {
   try {
-    const value = JSON.parse(await readFile3(join5(directory(), "ruff.json"), "utf8"));
-    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute3(value["executable"]))
+    const value = JSON.parse(await readFile4(join5(directory(), "ruff.json"), "utf8"));
+    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute4(value["executable"]))
       return void 0;
     await access(value["executable"], constants.X_OK);
     return value["executable"];
@@ -851,7 +1810,7 @@ async function preparedRuff() {
   }
 }
 async function rememberRuff(executable3) {
-  if (!isAbsolute3(executable3)) throw new Error("Invalid prepared Ruff path");
+  if (!isAbsolute4(executable3)) throw new Error("Invalid prepared Ruff path");
   await access(executable3, constants.X_OK);
   const dir = directory();
   await mkdir2(dir, { recursive: true, mode: 448 });
@@ -867,7 +1826,7 @@ async function rememberRuff(executable3) {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants as constants2 } from "node:fs";
 import { access as access2, stat as stat2 } from "node:fs/promises";
-import { delimiter as delimiter2, dirname, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve2 } from "node:path";
+import { delimiter as delimiter2, dirname, extname, isAbsolute as isAbsolute5, join as join6, resolve as resolve2 } from "node:path";
 var temporary = {
   ty: { ecosystem: "python", packages: ["ty"] },
   ruff: { ecosystem: "python", packages: ["ruff"] },
@@ -929,7 +1888,7 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
   const name = command[0];
   if (!name) throw new Error("Empty command");
   if (explicit) {
-    const entry = isAbsolute4(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
+    const entry = isAbsolute5(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
     return resolution(
       [entry ?? name, ...command.slice(1)],
       entry && await executable(entry) ? "explicit" : "missing",
@@ -1081,7 +2040,7 @@ async function executable2(root, target, packageName, entry) {
   let dir = dirname2(target);
   while (inside(root, dir)) {
     const path = join7(dir, "node_modules", packageName, entry);
-    if (await exists(path)) return realpath2(path);
+    if (await exists(path)) return realpath3(path);
     const parent = dirname2(dir);
     if (dir === root) break;
     dir = parent;
@@ -1180,7 +2139,7 @@ async function lint(root, path, signal, provided, active = false) {
     );
     if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr || `Runner exit ${result.code}`);
     const data = JSON.parse(result.stdout);
-    const findings = parseLint(runner.name, data, path, await readFile4(absolute, "utf8"));
+    const findings = parseLint(runner.name, data, path, await readFile5(absolute, "utf8"));
     return { path, state: "complete", findings };
   } catch (error) {
     return { path, state: signal.aborted ? "pending" : "failed", findings: [], note: `lint: ${message(error)}` };
@@ -1192,11 +2151,11 @@ async function formatWithRunner(root, path, signal, provided) {
   const absolute = await workspacePath(root, path);
   const runner = await select(root, absolute, true, config, true, signal);
   if (!runner || runner.name === "eslint") return void 0;
-  const before = await readFile4(absolute, "utf8");
+  const before = await readFile5(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
   const result = await run(runner.command, [...runner.prefix, ...args], dirname2(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
-  if (await readFile4(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
+  if (await readFile5(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   if (before === result.stdout) return `Unchanged: ${path}`;
   signal.throwIfAborted();
   await writeFile2(absolute, result.stdout);
@@ -1267,7 +2226,7 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
       const path = join8(dir, name);
       try {
         if ((await stat4(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
-        contents.push(path, hash(await readFile5(path, { encoding: "utf8", signal })));
+        contents.push(path, hash(await readFile6(path, { encoding: "utf8", signal })));
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
@@ -1281,7 +2240,7 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
 
 // src/metadata.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { lstat as lstat3, mkdir as mkdir3, readdir as readdir2, readFile as readFile6, realpath as realpath3, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { lstat as lstat3, mkdir as mkdir3, readdir as readdir2, readFile as readFile7, realpath as realpath4, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
 import { join as join9 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1307,14 +2266,14 @@ var Metadata = class {
     const info = await lstat3(base);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
       throw new Error("Unsafe metadata permissions");
-    const dir = join9(base, hash(await realpath3(this.root)));
+    const dir = join9(base, hash(await realpath4(this.root)));
     await mkdir3(dir, { recursive: true, mode: 448 });
     if ((await lstat3(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
     return dir;
   }
   async load(path, id) {
     try {
-      const data = JSON.parse(await readFile6(path, "utf8"));
+      const data = JSON.parse(await readFile7(path, "utf8"));
       if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string")
         throw new Error("Invalid metadata");
       for (const key of ["touched", "current", "pending", "blocked"])
@@ -1338,7 +2297,7 @@ var Metadata = class {
     for (const file of await readdir2(dir))
       if (file.endsWith(".json")) {
         try {
-          const value = JSON.parse(await readFile6(join9(dir, file), "utf8"));
+          const value = JSON.parse(await readFile7(join9(dir, file), "utf8"));
           if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
             ids.push(value["id"]);
         } catch {
@@ -1349,7 +2308,7 @@ var Metadata = class {
   async reclaim(lock) {
     let owner;
     try {
-      owner = JSON.parse(await readFile6(join9(lock, "owner"), "utf8"));
+      owner = JSON.parse(await readFile7(join9(lock, "owner"), "utf8"));
     } catch {
       return;
     }
@@ -1361,7 +2320,7 @@ var Metadata = class {
       if (!record(error) || error["code"] !== "ESRCH") return;
     }
     try {
-      const current = JSON.parse(await readFile6(join9(lock, "owner"), "utf8"));
+      const current = JSON.parse(await readFile7(join9(lock, "owner"), "utf8"));
       if (!record(current) || current["nonce"] !== owner["nonce"]) return;
     } catch {
       return;
@@ -1508,7 +2467,7 @@ var HookEngine = class {
       const result = await this.linter(path, signal);
       if (signal.aborted) break;
       try {
-        if (hash(await readFile7(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content)
+        if (hash(await readFile8(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content)
           continue;
       } catch {
         continue;
@@ -1523,7 +2482,7 @@ var HookEngine = class {
       if (!entry) continue;
       try {
         if (hash(
-          await readFile7(await workspacePath(this.root, entry.result.path), {
+          await readFile8(await workspacePath(this.root, entry.result.path), {
             encoding: "utf8",
             signal: commitSignal
           })
@@ -1584,16 +2543,7 @@ async function runHookCli() {
   const event = text(parsed["hook_event_name"], "PostToolUse");
   const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? 44e3 : 4400;
   const signal = AbortSignal.timeout(budget);
-  let root = await realpath4(text(parsed["cwd"], process.cwd()));
-  try {
-    const result = await promisify2(execFile2)("git", ["rev-parse", "--show-toplevel"], {
-      cwd: root,
-      timeout: 1e3,
-      signal
-    });
-    root = await realpath4(result.stdout.trim());
-  } catch {
-  }
+  const root = await realpath5(text(parsed["cwd"], process.cwd()));
   try {
     const output = await new HookEngine(root).hook(parsed, signal);
     if (output) process.stdout.write(`${output}
@@ -1625,16 +2575,16 @@ function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
 import { createInterface } from "node:readline";
 
 // src/runtime.ts
-import { realpath as realpath5 } from "node:fs/promises";
-import { isAbsolute as isAbsolute6 } from "node:path";
+import { realpath as realpath6 } from "node:fs/promises";
+import { isAbsolute as isAbsolute7 } from "node:path";
 
 // src/engine.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { readFile as readFile10, stat as stat5 } from "node:fs/promises";
+import { readFile as readFile11, stat as stat5 } from "node:fs/promises";
 import { relative as relative4 } from "node:path";
 
 // src/language.ts
-import { readFile as readFile9, writeFile as writeFile4 } from "node:fs/promises";
+import { readFile as readFile10, writeFile as writeFile4 } from "node:fs/promises";
 import { dirname as dirname8, extname as extname5, relative as relative3, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
 
@@ -2933,936 +3883,7 @@ function readAncestorManifestSnapshots(manifestDir) {
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-metadata-parser.js
 import { readFileSync as readFileSync3, realpathSync, statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute5, join as join12, relative as relative2, sep as sep2 } from "node:path";
-
-// node_modules/smol-toml/dist/date.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
-var TomlDate = class _TomlDate extends Date {
-  #hasDate = false;
-  #hasTime = false;
-  #offset = null;
-  constructor(date) {
-    let hasDate = true;
-    let hasTime = true;
-    let offset = "Z";
-    if (typeof date === "string") {
-      let match = date.match(DATE_TIME_RE);
-      if (match) {
-        if (!match[1]) {
-          hasDate = false;
-          date = `0000-01-01T${date}`;
-        }
-        hasTime = !!match[2];
-        hasTime && date[10] === " " && (date = date.replace(" ", "T"));
-        if (match[2] && +match[2] > 23) {
-          date = "";
-        } else {
-          offset = match[3] || null;
-          date = date.toUpperCase();
-          if (!offset && hasTime)
-            date += "Z";
-        }
-      } else {
-        date = "";
-      }
-    }
-    super(date);
-    if (!isNaN(this.getTime())) {
-      this.#hasDate = hasDate;
-      this.#hasTime = hasTime;
-      this.#offset = offset;
-    }
-  }
-  isDateTime() {
-    return this.#hasDate && this.#hasTime;
-  }
-  isLocal() {
-    return !this.#hasDate || !this.#hasTime || !this.#offset;
-  }
-  isDate() {
-    return this.#hasDate && !this.#hasTime;
-  }
-  isTime() {
-    return this.#hasTime && !this.#hasDate;
-  }
-  isValid() {
-    return this.#hasDate || this.#hasTime;
-  }
-  toISOString() {
-    let iso = super.toISOString();
-    if (this.isDate())
-      return iso.slice(0, 10);
-    if (this.isTime())
-      return iso.slice(11, 23);
-    if (this.#offset === null)
-      return iso.slice(0, -1);
-    if (this.#offset === "Z")
-      return iso;
-    let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
-    offset = this.#offset[0] === "-" ? offset : -offset;
-    let offsetDate = new Date(this.getTime() - offset * 6e4);
-    return offsetDate.toISOString().slice(0, -1) + this.#offset;
-  }
-  static wrapAsOffsetDateTime(jsDate, offset = "Z") {
-    let date = new _TomlDate(jsDate);
-    date.#offset = offset;
-    return date;
-  }
-  static wrapAsLocalDateTime(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalDate(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#hasTime = false;
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalTime(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#hasDate = false;
-    date.#offset = null;
-    return date;
-  }
-};
-
-// node_modules/smol-toml/dist/error.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-function getLineColFromPtr(string2, ptr) {
-  let lines = string2.slice(0, ptr).split(/\r\n|\n|\r/g);
-  return [lines.length, lines.pop().length + 1];
-}
-function makeCodeBlock(string2, line, column) {
-  let lines = string2.split(/\r\n|\n|\r/g);
-  let codeblock = "";
-  let numberLen = (Math.log10(line + 1) | 0) + 1;
-  for (let i = line - 1; i <= line + 1; i++) {
-    let l = lines[i - 1];
-    if (!l)
-      continue;
-    codeblock += i.toString().padEnd(numberLen, " ");
-    codeblock += ":  ";
-    codeblock += l;
-    codeblock += "\n";
-    if (i === line) {
-      codeblock += " ".repeat(numberLen + column + 2);
-      codeblock += "^\n";
-    }
-  }
-  return codeblock;
-}
-var TomlError = class extends Error {
-  line;
-  column;
-  codeblock;
-  constructor(message2, options) {
-    const [line, column] = getLineColFromPtr(options.toml, options.ptr);
-    const codeblock = makeCodeBlock(options.toml, line, column);
-    super(`Invalid TOML document: ${message2}
-
-${codeblock}`, options);
-    this.line = line;
-    this.column = column;
-    this.codeblock = codeblock;
-  }
-};
-
-// node_modules/smol-toml/dist/primitive.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
-var FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
-var LEADING_ZERO = /^[+-]?0[0-9_]/;
-function parseString(str, ptr) {
-  let c = str[ptr++];
-  let first = c;
-  let isLiteral = c === "'";
-  let isMultiline = c === str[ptr] && c === str[ptr + 1];
-  if (isMultiline) {
-    if (str[ptr += 2] === "\n")
-      ptr++;
-    else if (str[ptr] === "\r" && str[ptr + 1] === "\n")
-      ptr += 2;
-  }
-  let parsed = "";
-  let sliceStart = ptr;
-  let state = 0;
-  for (let i = ptr; i < str.length; i++) {
-    c = str[i];
-    if (isMultiline && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
-      state = state && 3;
-    } else if (c < " " && c !== "	" || c === "\x7F") {
-      throw new TomlError("control characters are not allowed in strings", {
-        toml: str,
-        ptr: i
-      });
-    } else if ((!state || state === 3) && c === first && (!isMultiline || str[i + 1] === first && str[i + 2] === first)) {
-      if (isMultiline) {
-        if (str[i + 3] === first)
-          i++;
-        if (str[i + 3] === first)
-          i++;
-      }
-      return [
-        // If we're in a newline escape still, then there's nothing to add.
-        // Also try to avoid concat if there's nothing to add to parsed, or nothing has been added to parsed.
-        state ? parsed : parsed + str.slice(sliceStart, i),
-        i + (isMultiline ? 3 : 1)
-      ];
-    } else if (!state) {
-      if (!isLiteral && c === "\\") {
-        parsed += str.slice(sliceStart, sliceStart = i);
-        state = 1;
-      }
-    } else if (state === 1) {
-      if (c === "x" || c === "u" || c === "U") {
-        let value = 0;
-        let len = c === "x" ? 2 : c === "u" ? 4 : 8;
-        for (let j = 0; j < len; j++, i++) {
-          let hex = str.charCodeAt(i + 1);
-          let digit = (
-            /* 0-9 */
-            hex >= 48 && hex <= 57 ? hex - 48 : (
-              /* A-F */
-              hex >= 65 && hex <= 70 ? hex - 65 + 10 : (
-                /* a-f */
-                hex >= 97 && hex <= 102 ? hex - 97 + 10 : -1
-              )
-            )
-          );
-          if (digit < 0)
-            throw new TomlError("invalid non-hex character in unicode escape", { toml: str, ptr: i + 1 });
-          value = value << 4 | digit;
-        }
-        if (value < 0 || value > 1114111 || value >= 55296 && value <= 57343) {
-          throw new TomlError("invalid unicode escape", { toml: str, ptr: i });
-        }
-        parsed += String.fromCodePoint(value);
-        sliceStart = i + 1;
-        state = 0;
-      } else if (c === " " || c === "	") {
-        state = 2;
-      } else {
-        if (c === "b")
-          parsed += "\b";
-        else if (c === "t")
-          parsed += "	";
-        else if (c === "n")
-          parsed += "\n";
-        else if (c === "f")
-          parsed += "\f";
-        else if (c === "r")
-          parsed += "\r";
-        else if (c === "e")
-          parsed += "\x1B";
-        else if (c === '"')
-          parsed += '"';
-        else if (c === "\\")
-          parsed += "\\";
-        else
-          throw new TomlError("unrecognized escape sequence", { toml: str, ptr: i });
-        sliceStart = i + 1;
-        state = 0;
-      }
-    } else if (c !== " " && c !== "	") {
-      if (state === 2) {
-        throw new TomlError("invalid escape: only line-ending whitespace may be escaped", {
-          toml: str,
-          ptr: sliceStart
-        });
-      }
-      state = !isLiteral && c === "\\" ? 1 : 0;
-      sliceStart = i;
-    }
-  }
-  throw new TomlError("unfinished string", { toml: str, ptr });
-}
-function parseValue(value, toml, ptr, integersAsBigInt) {
-  if (value === "true")
-    return true;
-  if (value === "false")
-    return false;
-  if (value === "-inf")
-    return -Infinity;
-  if (value === "inf" || value === "+inf")
-    return Infinity;
-  if (value === "nan" || value === "+nan" || value === "-nan")
-    return NaN;
-  if (value === "-0")
-    return integersAsBigInt ? 0n : 0;
-  let isInt = INT_REGEX.test(value);
-  if (isInt || FLOAT_REGEX.test(value)) {
-    if (LEADING_ZERO.test(value)) {
-      throw new TomlError("leading zeroes are not allowed", {
-        toml,
-        ptr
-      });
-    }
-    value = value.replace(/_/g, "");
-    let numeric = +value;
-    if (isNaN(numeric)) {
-      throw new TomlError("invalid number", {
-        toml,
-        ptr
-      });
-    }
-    if (isInt) {
-      if ((isInt = !Number.isSafeInteger(numeric)) && !integersAsBigInt) {
-        throw new TomlError("integer value cannot be represented losslessly", {
-          toml,
-          ptr
-        });
-      }
-      if (isInt || integersAsBigInt === true)
-        numeric = BigInt(value);
-    }
-    return numeric;
-  }
-  const date = new TomlDate(value);
-  if (!date.isValid()) {
-    throw new TomlError("invalid value", {
-      toml,
-      ptr
-    });
-  }
-  return date;
-}
-
-// node_modules/smol-toml/dist/util.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-function indexOfNewline(str, start = 0, end = str.length) {
-  let idx = str.indexOf("\n", start);
-  if (str[idx - 1] === "\r")
-    idx--;
-  return idx <= end ? idx : -1;
-}
-function skipComment(str, ptr) {
-  for (let i = ptr; i < str.length; i++) {
-    let c = str[i];
-    if (c === "\n")
-      return i;
-    if (c === "\r" && str[i + 1] === "\n")
-      return i + 1;
-    if (c < " " && c !== "	" || c === "\x7F") {
-      throw new TomlError("control characters are not allowed in comments", {
-        toml: str,
-        ptr
-      });
-    }
-  }
-  return str.length;
-}
-function skipVoid(str, ptr, banNewLines, banComments) {
-  let c;
-  while (1) {
-    while ((c = str[ptr]) === " " || c === "	" || !banNewLines && (c === "\n" || c === "\r" && str[ptr + 1] === "\n"))
-      ptr++;
-    if (banComments || c !== "#")
-      break;
-    ptr = skipComment(str, ptr);
-  }
-  return ptr;
-}
-function skipUntil(str, ptr, sep3, end, banNewLines = false) {
-  if (!end) {
-    ptr = indexOfNewline(str, ptr);
-    return ptr < 0 ? str.length : ptr;
-  }
-  for (let i = ptr; i < str.length; i++) {
-    let c = str[i];
-    if (c === "#") {
-      i = indexOfNewline(str, i);
-    } else if (c === sep3) {
-      return i + 1;
-    } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
-      return i;
-    }
-  }
-  throw new TomlError("cannot find end of structure", {
-    toml: str,
-    ptr
-  });
-}
-
-// node_modules/smol-toml/dist/extract.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-function sliceAndTrimEndOf(str, startPtr, endPtr) {
-  let value = str.slice(startPtr, endPtr);
-  let commentIdx = value.indexOf("#");
-  if (commentIdx > -1) {
-    skipComment(str, commentIdx);
-    value = value.slice(0, commentIdx);
-  }
-  return [value.trimEnd(), commentIdx];
-}
-function extractValue(str, ptr, end, depth, integersAsBigInt) {
-  if (depth === 0) {
-    throw new TomlError("document contains excessively nested structures. aborting.", {
-      toml: str,
-      ptr
-    });
-  }
-  let c = str[ptr];
-  if (c === "[" || c === "{") {
-    let [value, endPtr2] = c === "[" ? parseArray(str, ptr, depth, integersAsBigInt) : parseInlineTable(str, ptr, depth, integersAsBigInt);
-    if (end) {
-      endPtr2 = skipVoid(str, endPtr2);
-      if (str[endPtr2] === ",")
-        endPtr2++;
-      else if (str[endPtr2] !== end) {
-        throw new TomlError("expected comma or end of structure", {
-          toml: str,
-          ptr: endPtr2
-        });
-      }
-    }
-    return [value, endPtr2];
-  }
-  if (c === '"' || c === "'") {
-    let [parsed, endPtr2] = parseString(str, ptr);
-    if (end) {
-      endPtr2 = skipVoid(str, endPtr2);
-      if (str[endPtr2] && str[endPtr2] !== "," && str[endPtr2] !== end && str[endPtr2] !== "\n" && str[endPtr2] !== "\r") {
-        throw new TomlError("unexpected character encountered", {
-          toml: str,
-          ptr: endPtr2
-        });
-      }
-      if (str[endPtr2] === ",")
-        endPtr2++;
-    }
-    return [parsed, endPtr2];
-  }
-  let endPtr = skipUntil(str, ptr, ",", end);
-  let slice = sliceAndTrimEndOf(str, ptr, endPtr - (str[endPtr - 1] === "," ? 1 : 0));
-  if (!slice[0]) {
-    throw new TomlError("incomplete key-value declaration: no value specified", {
-      toml: str,
-      ptr
-    });
-  }
-  if (end && slice[1] > -1) {
-    endPtr = skipVoid(str, ptr + slice[1]);
-    if (str[endPtr] === ",")
-      endPtr++;
-  }
-  return [
-    parseValue(slice[0], str, ptr, integersAsBigInt),
-    endPtr
-  ];
-}
-
-// node_modules/smol-toml/dist/struct.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
-function parseKey(str, ptr, end = "=") {
-  let dot = ptr - 1;
-  let parsed = [];
-  let endPtr = str.indexOf(end, ptr);
-  if (endPtr < 0) {
-    throw new TomlError("incomplete key-value: cannot find end of key", {
-      toml: str,
-      ptr
-    });
-  }
-  do {
-    let c = str[ptr = ++dot];
-    if (c !== " " && c !== "	") {
-      if (c === '"' || c === "'") {
-        if (c === str[ptr + 1] && c === str[ptr + 2]) {
-          throw new TomlError("multiline strings are not allowed in keys", {
-            toml: str,
-            ptr
-          });
-        }
-        let [part, eos] = parseString(str, ptr);
-        dot = str.indexOf(".", eos);
-        let strEnd = str.slice(eos, dot < 0 || dot > endPtr ? endPtr : dot);
-        let newLine = indexOfNewline(strEnd);
-        if (newLine > -1) {
-          throw new TomlError("newlines are not allowed in keys", {
-            toml: str,
-            ptr: ptr + dot + newLine
-          });
-        }
-        if (strEnd.trimStart()) {
-          throw new TomlError("found extra tokens after the string part", {
-            toml: str,
-            ptr: eos
-          });
-        }
-        if (endPtr < eos) {
-          endPtr = str.indexOf(end, eos);
-          if (endPtr < 0) {
-            throw new TomlError("incomplete key-value: cannot find end of key", {
-              toml: str,
-              ptr
-            });
-          }
-        }
-        parsed.push(part);
-      } else {
-        dot = str.indexOf(".", ptr);
-        let part = str.slice(ptr, dot < 0 || dot > endPtr ? endPtr : dot);
-        if (!KEY_PART_RE.test(part)) {
-          throw new TomlError("only letter, numbers, dashes and underscores are allowed in keys", {
-            toml: str,
-            ptr
-          });
-        }
-        parsed.push(part.trimEnd());
-      }
-    }
-  } while (dot + 1 && dot < endPtr);
-  return [parsed, skipVoid(str, endPtr + 1, true, true)];
-}
-function parseInlineTable(str, ptr, depth, integersAsBigInt) {
-  let res = {};
-  let seen = /* @__PURE__ */ new Set();
-  let c;
-  ptr++;
-  while ((c = str[ptr++]) !== "}" && c) {
-    if (c === ",") {
-      throw new TomlError("expected value, found comma", {
-        toml: str,
-        ptr: ptr - 1
-      });
-    } else if (c === "#")
-      ptr = skipComment(str, ptr);
-    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
-      let k;
-      let t = res;
-      let hasOwn = false;
-      let [key, keyEndPtr] = parseKey(str, ptr - 1);
-      for (let i = 0; i < key.length; i++) {
-        if (i)
-          t = hasOwn ? t[k] : t[k] = {};
-        k = key[i];
-        if ((hasOwn = Object.hasOwn(t, k)) && (typeof t[k] !== "object" || seen.has(t[k]))) {
-          throw new TomlError("trying to redefine an already defined value", {
-            toml: str,
-            ptr
-          });
-        }
-        if (!hasOwn && k === "__proto__") {
-          Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
-        }
-      }
-      if (hasOwn) {
-        throw new TomlError("trying to redefine an already defined value", {
-          toml: str,
-          ptr
-        });
-      }
-      let [value, valueEndPtr] = extractValue(str, keyEndPtr, "}", depth - 1, integersAsBigInt);
-      seen.add(value);
-      t[k] = value;
-      ptr = valueEndPtr;
-    }
-  }
-  if (!c) {
-    throw new TomlError("unfinished table encountered", {
-      toml: str,
-      ptr
-    });
-  }
-  return [res, ptr];
-}
-function parseArray(str, ptr, depth, integersAsBigInt) {
-  let res = [];
-  let c;
-  ptr++;
-  while ((c = str[ptr++]) !== "]" && c) {
-    if (c === ",") {
-      throw new TomlError("expected value, found comma", {
-        toml: str,
-        ptr: ptr - 1
-      });
-    } else if (c === "#")
-      ptr = skipComment(str, ptr);
-    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
-      let e = extractValue(str, ptr - 1, "]", depth - 1, integersAsBigInt);
-      res.push(e[0]);
-      ptr = e[1];
-    }
-  }
-  if (!c) {
-    throw new TomlError("unfinished array encountered", {
-      toml: str,
-      ptr
-    });
-  }
-  return [res, ptr];
-}
-
-// node_modules/smol-toml/dist/parse.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-function peekTable(key, table, meta, type) {
-  let t = table;
-  let m = meta;
-  let k;
-  let hasOwn = false;
-  let state;
-  for (let i = 0; i < key.length; i++) {
-    if (i) {
-      t = hasOwn ? t[k] : t[k] = {};
-      m = (state = m[k]).c;
-      if (type === 0 && (state.t === 1 || state.t === 2)) {
-        return null;
-      }
-      if (state.t === 2) {
-        let l = t.length - 1;
-        t = t[l];
-        m = m[l].c;
-      }
-    }
-    k = key[i];
-    if ((hasOwn = Object.hasOwn(t, k)) && m[k]?.t === 0 && m[k]?.d) {
-      return null;
-    }
-    if (!hasOwn) {
-      if (k === "__proto__") {
-        Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
-        Object.defineProperty(m, k, { enumerable: true, configurable: true, writable: true });
-      }
-      m[k] = {
-        t: i < key.length - 1 && type === 2 ? 3 : type,
-        d: false,
-        i: 0,
-        c: {}
-      };
-    }
-  }
-  state = m[k];
-  if (state.t !== type && !(type === 1 && state.t === 3)) {
-    return null;
-  }
-  if (type === 2) {
-    if (!state.d) {
-      state.d = true;
-      t[k] = [];
-    }
-    t[k].push(t = {});
-    state.c[state.i++] = state = { t: 1, d: false, i: 0, c: {} };
-  }
-  if (state.d) {
-    return null;
-  }
-  state.d = true;
-  if (type === 1) {
-    t = hasOwn ? t[k] : t[k] = {};
-  } else if (type === 0 && hasOwn) {
-    return null;
-  }
-  return [k, t, state.c];
-}
-function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
-  let res = {};
-  let meta = {};
-  let tbl = res;
-  let m = meta;
-  for (let ptr = skipVoid(toml, 0); ptr < toml.length; ) {
-    if (toml[ptr] === "[") {
-      let isTableArray = toml[++ptr] === "[";
-      let k = parseKey(toml, ptr += +isTableArray, "]");
-      if (isTableArray) {
-        if (toml[k[1] - 1] !== "]") {
-          throw new TomlError("expected end of table declaration", {
-            toml,
-            ptr: k[1] - 1
-          });
-        }
-        k[1]++;
-      }
-      let p = peekTable(
-        k[0],
-        res,
-        meta,
-        isTableArray ? 2 : 1
-        /* Type.EXPLICIT */
-      );
-      if (!p) {
-        throw new TomlError("trying to redefine an already defined table or value", {
-          toml,
-          ptr
-        });
-      }
-      m = p[2];
-      tbl = p[1];
-      ptr = k[1];
-    } else {
-      let k = parseKey(toml, ptr);
-      let p = peekTable(
-        k[0],
-        tbl,
-        m,
-        0
-        /* Type.DOTTED */
-      );
-      if (!p) {
-        throw new TomlError("trying to redefine an already defined table or value", {
-          toml,
-          ptr
-        });
-      }
-      let v = extractValue(toml, k[1], void 0, maxDepth, integersAsBigInt);
-      p[1][p[0]] = v[0];
-      ptr = v[1];
-    }
-    ptr = skipVoid(toml, ptr, true);
-    if (toml[ptr] && toml[ptr] !== "\n" && toml[ptr] !== "\r") {
-      throw new TomlError("each key-value declaration must be followed by an end-of-line", {
-        toml,
-        ptr
-      });
-    }
-    ptr = skipVoid(toml, ptr);
-  }
-  return res;
-}
-
-// node_modules/smol-toml/dist/stringify.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-// node_modules/smol-toml/dist/index.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
-// packages/lsp-tools-mcp/dist/lsp/cargo-metadata-parser.js
+import { isAbsolute as isAbsolute6, join as join12, relative as relative2, sep as sep2 } from "node:path";
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -3882,7 +3903,7 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile8(path) {
+function readFile9(path) {
   try {
     return readFileSync3(path, "utf8");
   } catch {
@@ -3890,7 +3911,7 @@ function readFile8(path) {
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile8(path);
+  const content = readFile9(path);
   if (content === void 0)
     return void 0;
   try {
@@ -3901,7 +3922,7 @@ function readCargoManifestKind(path) {
 }
 function isContainedPath(root, path) {
   const relativePath = relative2(root, path);
-  return relativePath === "" || !isAbsolute5(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
+  return relativePath === "" || !isAbsolute6(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
 }
 function parseCargoMetadata(output) {
   let parsed;
@@ -4507,7 +4528,7 @@ var Client = class extends LspClient {
   }
   async openFile(path) {
     const uri = pathToFileURL3(path).href;
-    const content = await readFile9(path, "utf8");
+    const content = await readFile10(path, "utf8");
     const previous = this.versions.get(uri);
     if (previous?.content === content) return;
     this.published.delete(diagnosticUriKey(uri));
@@ -4663,7 +4684,7 @@ var Languages = class {
     const resolved = await resolveServer(this.root, path, this.config);
     if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
     if (resolved.tool.source === "temporary" && !this.config.trusted)
-      throw new Error("Temporary tool execution requires global trustedWorkspaces");
+      throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
     const failureKey = `${resolved.language}:${resolved.tool.identity}`;
     const failed = this.failures.get(failureKey);
     if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 3e4)
@@ -4805,13 +4826,13 @@ var Languages = class {
     for (const [uri, edits] of changes) {
       const path = await workspacePath(this.root, fileURLToPath2(uri));
       await this.preflight(path, signal);
-      const before = await readFile9(path, "utf8");
+      const before = await readFile10(path, "utf8");
       pending.push({ path, before, after: applyTextChanges(before, edits) });
     }
     if ((await inventory(this.root, 1e4, signal)).version !== version)
       throw new Error("Workspace changed during rename; retry");
     for (const item of pending)
-      if (await readFile9(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
+      if (await readFile10(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
     signal.throwIfAborted();
     const modified = [];
     try {
@@ -4830,7 +4851,7 @@ var Languages = class {
   }
   async format(path, signal) {
     const absolute = await workspacePath(this.root, path);
-    const before = await readFile9(absolute, "utf8");
+    const before = await readFile10(absolute, "utf8");
     const edits = await this.withLspClient(
       absolute,
       async (client) => {
@@ -4841,7 +4862,7 @@ var Languages = class {
       { manager: this.manager, signal }
     );
     const after = applyTextChanges(before, edits);
-    if (await readFile9(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
+    if (await readFile10(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
     if (after === before) return `Unchanged: ${path}`;
     signal.throwIfAborted();
     await writeFile4(absolute, after);
@@ -4971,14 +4992,14 @@ var Engine = class {
         results.push({ path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
         continue;
       }
-      const content = hash(await readFile10(absolute, { encoding: "utf8", signal }));
+      const content = hash(await readFile11(absolute, { encoding: "utf8", signal }));
       if (snapshot.complete && cached?.version === snapshot.version && cached.identity === identity && cached.content === content && cached.result.state === "complete") {
         results.push(cached.result);
         continue;
       }
       const result = await this.checker(path, signal, lspOnly);
       signal.throwIfAborted();
-      if (hash(await readFile10(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content || await analysisIdentity(this.root, [path], await configuration(this.root), signal) !== identity) {
+      if (hash(await readFile11(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content || await analysisIdentity(this.root, [path], await configuration(this.root), signal) !== identity) {
         result.state = "stale";
         result.note = "File changed during diagnostics; retry";
       }
@@ -5330,7 +5351,7 @@ var Engine = class {
       const absolute = await workspacePath(this.root, path);
       const info = await stat5(absolute);
       if (info.size > 1024 * 1024) return "oversized";
-      return hash(await readFile10(absolute, { encoding: "utf8", signal }));
+      return hash(await readFile11(absolute, { encoding: "utf8", signal }));
     } catch {
       signal.throwIfAborted();
       return "unavailable";
@@ -5361,8 +5382,8 @@ var Runtime = class {
     this.timers = /* @__PURE__ */ new Map();
   }
   async request(root, operation, args, signal) {
-    if (!isAbsolute6(root)) throw new Error("workspace must be an absolute project directory");
-    root = await realpath5(root);
+    if (!isAbsolute7(root)) throw new Error("workspace must be an absolute project directory");
+    root = await realpath6(root);
     signal = AbortSignal.any([signal, AbortSignal.timeout(45e3)]);
     signal.throwIfAborted();
     let engine = this.engines.get(root);

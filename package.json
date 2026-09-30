@@ -49,7 +49,7 @@
 		"lint:fix": "node ./node_modules/@biomejs/biome/bin/biome check --write src test scripts",
 		"precheck": "node scripts/bootstrap-submodule.mjs",
 		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
-		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs",
+		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs",
 		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
 		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs"
 	},

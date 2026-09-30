@@ -4,12 +4,13 @@
 
 ## Configuration
 
-Only `$CODEX_HOME/lsp-client.json` (default `~/.codex/lsp-client.json`) and `<workspace>/.codex/lsp-client.json` are read. Remove `LSP_TOOLS_MCP_*_CONFIG` and `CODEX_LSP_TRUST_PROJECT`; their presence raises an actionable migration error. Add `schemaVersion: 1` to each file. Put absolute, canonical workspace paths in the global `trustedWorkspaces` array. Untrusted project plugin configuration is ignored, including malformed project JSON.
+Plugin settings are read from `$CODEX_HOME/lsp-client.json` (default `~/.codex/lsp-client.json`) and `<workspace>/.codex/lsp-client.json`. Remove `LSP_TOOLS_MCP_*_CONFIG` and `CODEX_LSP_TRUST_PROJECT`; their presence raises an actionable migration error. Add `schemaVersion: 1` to each plugin settings file. Trust comes directly from Codex's user `$CODEX_HOME/config.toml`, not either plugin settings file. Legacy `trustedWorkspaces` fields are accepted but ignored and can be removed. Untrusted project plugin configuration is ignored, including malformed project JSON.
+
+The plugin uses the recorded user-level `[projects."/absolute/workspace"]` entry's `trust_level = "trusted"`. There is no additional plugin confirmation or trust-file write. Parent trust does not grant trust to an independently selected child workspace. A trusted `/PJ` workspace can operate on `/PJ/PJ1` files; a `/PJ/PJ1` workspace needs its own Codex entry. Hook scope stays at the session `cwd` rather than the Git root. Directory aliases are normalized with real paths; conflicting trusted/untrusted aliases are untrusted. Missing entries or a missing user file disable trust; malformed user TOML reports a configuration error. User trust changes take effect on the next request/Hook, including invalidation of cached results and clients. Project `.codex/config.toml` cannot grant trust.
 
 ```json
 {
   "schemaVersion": 1,
-  "trustedWorkspaces": ["/absolute/project"],
   "lsp": {
     "python": "ty",
     "typescript": "typescript",

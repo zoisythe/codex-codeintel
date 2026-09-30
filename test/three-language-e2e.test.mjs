@@ -13,7 +13,8 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	const dir = await mkdtemp(join(tmpdir(), "codex-three-"));
 	const root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }));
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1 }));
 	const child = spawn(process.execPath, [resolve("dist/cli.js"), "mcp"], { cwd: root, env: { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") }, stdio: ["pipe", "pipe", "pipe"] });
 	const exit = once(child, "exit");
 	let sequence = 0, stderr = "";
@@ -140,7 +141,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	await writeFile(join(rust, "Cargo.toml"), (await readFile(join(rust, "Cargo.toml"), "utf8")) + "[workspace.metadata]\nacceptance = true\n");
 	assert.equal((await check("rust/core/src/lib.rs")).errors, 0);
 	const rustAnalyzer = spawnSync("which", ["rust-analyzer"], { encoding: "utf8" }).stdout.trim();
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { rust: { command: [rustAnalyzer], extensions: [".rs"], initialization: { rustfmt: { overrideCommand: [join(dir, "missing-rustfmt")] } } } } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { rust: { command: [rustAnalyzer], extensions: [".rs"], initialization: { rustfmt: { overrideCommand: [join(dir, "missing-rustfmt")] } } } } }));
 	await assert.rejects(call("lsp_format", { path: "rust/core/src/lib.rs" }), /rustfmt|formatting/i);
 	const status = (await call("lsp_status", { path: "main.py" })).structuredContent;
 	assert.equal(status.tools[0].tool.source, "PATH");

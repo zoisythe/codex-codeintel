@@ -19,7 +19,8 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 	await cp(resolve("dist/cli.js"), cli);
 	const log = join(dir, "spawns");
 	const config = join(home, "lsp-client.json");
-	await writeFile(config, JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
+	await writeFile(config, JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") };
 	const children = [];
@@ -89,8 +90,9 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const root = join(dir, "project"); await mkdir(root);
 	const cli = join(dir, "cli.mjs"); await cp(resolve("dist/cli.js"), cli);
 	const log = join(dir, "spawns");
+	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config = join(dir, "lsp-client.json");
-	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,trustedWorkspaces: [root], lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
+	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
 	await configure("slow");
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(root, "b.fake"), "broken\n");
@@ -158,8 +160,9 @@ test("short Hook budget, pending recovery, Stop deduplication and concurrent met
 	t.after(()=>rm(dir,{recursive:true,force:true}));
 	const root=join(dir,"project");await mkdir(root);
 	const cli=join(dir,"cli.mjs");await cp(resolve("dist/cli.js"),cli);
+	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config=join(dir,"lsp-client.json");
-	await writeFile(config,JSON.stringify({schemaVersion:1,trustedWorkspaces:[root],lint:{javascript:"biome"}}));
+	await writeFile(config,JSON.stringify({schemaVersion:1,lint:{javascript:"biome"}}));
 	await writeFile(join(root,"biome.json"),"{}");
 	const bin=join(root,"node_modules/@biomejs/biome/bin");await mkdir(bin,{recursive:true});
 	const log=join(dir,"runners");

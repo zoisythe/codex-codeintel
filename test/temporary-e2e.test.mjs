@@ -15,7 +15,8 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	const root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(uvx, join(bin, "uvx"));
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }));
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1 }));
 	await writeFile(join(root, "main.py"), 'import os\nvalue: int = "wrong"\n');
 	const env = { PATH: bin, UV_CACHE_DIR: join(dir, "uv-cache"), UV_TOOL_DIR: join(dir, "tools"), UV_TOOL_BIN_DIR: join(dir, "toolbin"), UV_PYTHON: python, UV_PYTHON_DOWNLOADS: "never", CODEX_LSP_CACHE: join(dir, "metadata") };
 	let client = bundleClient(root, home, env);
@@ -49,7 +50,8 @@ test(`real npx ${server} recipe works offline after preparation`, { timeout: 150
 	const dir = await mkdtemp(join(tmpdir(), "codex-npx-")), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(npx, join(bin, "npx")); await symlink(process.execPath, join(bin, "node")); await symlink("/bin/sh", join(bin, "sh"));
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { typescript: server } }));
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { typescript: server } }));
 	await writeFile(join(root, "main.ts"), 'export const value: number = "wrong";\n');
 	await writeFile(join(root, "tsconfig.json"), '{"compilerOptions":{"strict":true,"noEmit":true}}');
 	const env = { PATH: bin, npm_config_cache: join(dir, "npm-cache"), CODEX_LSP_CACHE: join(dir, "metadata") };

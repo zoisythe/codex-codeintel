@@ -9,8 +9,9 @@ test("native TypeScript 7 through delivered MCP: diagnostics, navigation, rename
 	const dir = await mkdtemp(join(tmpdir(), "codex-tsc-"));
 	const root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	await symlink(resolve("node_modules"), join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { typescript: "tsc" }, lint: { javascript: "off" } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { typescript: "tsc" }, lint: { javascript: "off" } }));
 	await writeFile(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", types: [] }, include: ["*.ts"] }));
 	const defs = 'export interface Shape { value: number; }\nexport function greet(name: string): string { return name; }\n';
 	const main = type => `import { greet, type Shape } from "./defs.js";\nexport const answer: ${type} = greet("world");\nexport const shape: Shape = { value: 1 };\n`;

@@ -11,11 +11,12 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	const dir = await mkdtemp(join(tmpdir(), "codex-diagnostics-"));
 	const root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(root); await mkdir(home);
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const preload = join(dir, "clock.mjs");
 	await writeFile(preload, 'let delta=0;const now=Date.now;Date.now=()=>now()+delta;process.on("message",value=>{delta+=value;process.send("advanced")});');
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
+	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const check = (extra = {}) => client.call("check_diagnostics", { path: "main.fake", source: "lsp", ...extra });
 	await configure("pull");

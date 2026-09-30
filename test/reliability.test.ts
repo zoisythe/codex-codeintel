@@ -31,17 +31,17 @@ async function fixture() {
 
 	vi.stubEnv("CODEX_LSP_CACHE", join(dir, "cache"));
 
-	await writeFile(user, JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }));
+	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
+	await writeFile(user, JSON.stringify({ schemaVersion: 1 }));
 	await writeFile(join(root, "a.js"), "export const a=1;");
 	return { dir, root, user, project };
 }
-it("merges lint fields and replaces exclude using the same overridden user trust source", async () => {
+it("merges lint fields and replaces exclude using Codex user trust", async () => {
 	const { root, user, project } = await fixture();
 	await writeFile(
 		user,
 		JSON.stringify({
 			schemaVersion: 1,
-			trustedWorkspaces: [root],
 			lint: { javascript: "off", python: "ruff" },
 			exclude: ["old/**"],
 		}),
@@ -50,6 +50,7 @@ it("merges lint fields and replaces exclude using the same overridden user trust
 	expect(await trusted(root)).toBe(true);
 	expect(await configuration(root)).toMatchObject({ javascript: "eslint", python: "ruff", exclude: ["new/**"] });
 	await writeFile(user, JSON.stringify({ schemaVersion: 1, lint: { javascript: "off" }, exclude: ["user/**"] }));
+	await writeFile(join(process.env["CODEX_HOME"] ?? "", "config.toml"), "");
 	await writeFile(
 		project,
 		JSON.stringify({
@@ -82,7 +83,6 @@ it("explicit Runner selection never falls back and off never runs installed Biom
 		missing.user,
 		JSON.stringify({
 			schemaVersion: 1,
-			trustedWorkspaces: [missing.root],
 			lsp: { typescript: { command: [process.execPath], extensions: [".js"] } },
 		}),
 	);

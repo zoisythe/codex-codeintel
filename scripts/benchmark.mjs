@@ -22,6 +22,7 @@ try {
 		await mkdir(join(root, "data"), { recursive: true }); await mkdir(home);
 		for (let i = 0; i < count - 1; i += 100) await Promise.all(Array.from({ length: Math.min(100, count - 1 - i) }, (_, j) => writeFile(join(root, "data", `${i + j}.txt`), "dependency\n")));
 		await writeFile(join(root, "a.fake"), "broken\n");
+		await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 		for (const revision of ["before", "after"]) {
 			const config = { trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"] } } };
 			if (revision === "after") config.schemaVersion = 1;

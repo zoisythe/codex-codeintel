@@ -332,7 +332,7 @@ export class Languages {
 		const resolved = await resolveServer(this.root, path, this.config);
 		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
 		if (resolved.tool.source === "temporary" && !this.config.trusted)
-			throw new Error("Temporary tool execution requires global trustedWorkspaces");
+			throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
 		const failureKey = `${resolved.language}:${resolved.tool.identity}`;
 		const failed = this.failures.get(failureKey);
 		if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 30000)

@@ -18,7 +18,11 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	for (const name of ["uvx", "uv", "pipx", "npx"]) await script(join(bin, name), launcher);
 	await script(join(bin, "ty"), fakeLsp); await script(join(bin, "ruff"), 'console.log("[]")');
 	await writeFile(join(root, "pkg", "src", "main.py"), "broken\n");
-	const configure = value => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], ...value }));
+	const configure = async value => {
+		const { workspaces = [root], ...settings } = value;
+		await writeFile(join(home, "config.toml"), workspaces.map(path => `[projects.${JSON.stringify(path)}]\ntrust_level = "trusted"\n`).join("\n"));
+		await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, ...settings }));
+	};
 	await configure({});
 	const client = bundleClient(root, home, { PATH: bin, CODEX_LSP_CACHE: join(dir, "cache") });
 	t.after(() => client.close());
@@ -96,7 +100,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	assert.equal(noRuff.structuredContent.results[0].channels.lint, "failed");
 	assert(!(await client.call("lsp_navigation", { path: "pkg/src/main.py", operation: "definition", line: 1, column: 1 })).isError);
 	const second = join(dir, "second"); await mkdir(second);
-	await configure({ trustedWorkspaces: [root, second], lsp: { python: false, rust: false, fake: { command: [process.execPath, fake], extensions: [".fake"] } } });
+	await configure({ workspaces: [root, second], lsp: { python: false, rust: false, fake: { command: [process.execPath, fake], extensions: [".fake"] } } });
 	await writeFile(join(root, "main.fake"), "broken\n"); await writeFile(join(second, "main.fake"), "clean\n");
 	await writeFile(join(root, "unavailable.rs"), "fn main() {}\n"); await writeFile(join(root, "note.txt"), "ordinary text\n");
 	const mixed = await client.call("check_diagnostics", { path: ".", source: "lsp" });
@@ -116,7 +120,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	await configure({ lsp: { python: false } });
 	assert((await client.call("check_diagnostics", { path: "pkg/src/main.py" })).isError);
 	await mkdir(join(root, ".codex")); await writeFile(join(root, ".codex", "lsp-client.json"), "invalid project json");
-	await configure({ trustedWorkspaces: [] }); assert(!(await client.call("lsp_status")).isError);
+	await configure({ workspaces: [] }); assert(!(await client.call("lsp_status")).isError);
 	await configure({}); assert((await client.call("lsp_status")).isError);
 	await rm(join(root, ".codex"), { recursive: true });
 	await writeFile(join(home, "lsp-client.json"), "{}");

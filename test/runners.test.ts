@@ -26,10 +26,7 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 
 	await mkdir(join(root, "home"));
 	vi.stubEnv("CODEX_HOME", join(root, "home"));
-	await writeFile(
-		join(root, "home", "lsp-client.json"),
-		JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root] }),
-	);
+	await writeFile(join(root, "home", "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const result = await lint(root, "a.js", new AbortController().signal);
 	expect(result?.state).toBe("complete");
 	expect(result?.findings.some((item) => item.line === 2 && item.source.includes("noUnusedVariables"))).toBe(true);

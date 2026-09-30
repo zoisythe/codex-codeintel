@@ -21,6 +21,8 @@ Read both text and structured content. Follow the complete `next` arguments, inc
 
 Python defaults to `ty server` plus Ruff CLI. Commands resolve nearest project environment, then PATH; explicit commands never fall back. Trusted active MCP calls may prepare registered tools in a tool cache. Hooks use only local or already prepared Ruff. A launch recipe means an attempt is possible, not that initialization succeeded. C/C++ and Rust require working local clangd/rust-analyzer toolchains. Use status to explain failures; `refresh: true` clears clients and failure state. External dependency changes require refresh.
 
+Workspace trust is read directly from the exact directory's `projects.<path>.trust_level` in the user `$CODEX_HOME/config.toml`. Parent trust does not inherit to a separately selected child workspace; files inside a trusted workspace remain in scope. Hooks use session `cwd`, MCP uses `workspace`, and neither writes trust records or prompts. `lsp_status` explains the trust file and effective level. Legacy plugin `trustedWorkspaces` is ignored.
+
 Run rename/format when requested or already authorized and keep writes sequential. Prepare rename if its range is uncertain. If a write fails or is cancelled, inspect the reported modified paths before continuing; do not replay automatically or assume rollback.
 
 `complete` describes the scope and channels executed, not a passing build. Report pending, stale, skipped, failed and unsupported capabilities explicitly. Ruff unavailability does not remove Python type/navigation support. Version 0.5 removed `lsp_diagnostics`, `mode`, `start`, `offset` and `revision`; do not send them.

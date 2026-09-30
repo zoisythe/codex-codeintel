@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Read workspace trust directly from Codex's user config.toml; match the selected directory without parent inheritance, ignore legacy plugin trust lists, and invalidate cached analysis when trust changes.
+- Keep Hook scope at the session cwd instead of promoting it to the Git root; expose the trust file and effective level in status and cover parent/child workspaces and live revocation through real MCP/Hook subprocesses.
+
 - Support native TypeScript 7 through the `tsc` built-in (`tsc --lsp --stdio`) with local-first resolution and a pinned temporary recipe; add a local-only `tsgo` preview built-in while preserving the legacy TypeScript default.
 - Send object parameters with the LSP `initialized` notification so native TypeScript completes initialization; cover real MCP diagnostics, dependency updates, navigation, rename and formatting.
 

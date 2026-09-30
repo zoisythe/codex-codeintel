@@ -38,12 +38,15 @@ Writes preflight all target languages, check conflicts and proceed sequentially.
 
 ## Configuration and local tools
 
-Read `$CODEX_HOME/lsp-client.json` (default `~/.codex/lsp-client.json`) and trusted `<workspace>/.codex/lsp-client.json`. Both require `schemaVersion: 1`. Global `trustedWorkspaces` is the only source of trust; untrusted project plugin configuration does not participate in merging.
+Read `$CODEX_HOME/lsp-client.json` (default `~/.codex/lsp-client.json`) and trusted `<workspace>/.codex/lsp-client.json`. Both require `schemaVersion: 1`. Trust comes only from `[projects."/absolute/workspace"].trust_level = "trusted"` in Codex's user `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). The plugin reads Codex's recorded choice and never prompts or writes trust records. Legacy `trustedWorkspaces` is ignored; project files cannot grant trust.
+
+Trust matches the selected workspace directory itself, with real paths used for directory aliases; it never inherits from a parent directory. With `/PJ` as the trusted workspace, files under `/PJ/PJ1` can be checked. Selecting `/PJ/PJ1` as a separate workspace requires its own Codex trust entry, even inside the same Git repository. Hooks use the session `cwd`; MCP uses the requested `workspace`. Status reports the user trust file and effective level. Missing or unrecognized entries are untrusted; malformed user TOML reports a configuration error. Changes to the selected workspace's trust invalidate analysis/client state on the next request or Hook. Untrusted project plugin configuration does not participate in merging.
+
+See [Codex trust acceptance](docs/validation-codex-trust.md) for the verified MCP/Hook behavior.
 
 ```json
 {
   "schemaVersion": 1,
-  "trustedWorkspaces": ["/absolute/project"],
   "lsp": { "python": "ty", "cpp": "clangd", "rust": "rust" },
   "lint": { "javascript": "auto", "python": "auto" },
   "formatting": { "tabSize": 4, "insertSpaces": true },
