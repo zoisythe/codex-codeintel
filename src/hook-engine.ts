@@ -21,7 +21,9 @@ export class HookEngine {
 		signal.throwIfAborted();
 		const id = text(input["session_id"]);
 		if (!id)
-			return JSON.stringify({ systemMessage: "Codex LSP: missing session_id; automatic checking unavailable" });
+			return JSON.stringify({
+				systemMessage: "Codex CodeIntel: missing session_id; automatic checking unavailable",
+			});
 		const event = text(input["hook_event_name"], "PostToolUse");
 		const stopping = event === "Stop" || event === "SubagentStop";
 		const output = (context: string) =>
@@ -62,7 +64,7 @@ export class HookEngine {
 		const snapshot = await inventory(this.root, 10000, signal, config.exclude);
 		if (!snapshot.complete)
 			return output(
-				"Codex LSP: partial; change discovery/file limit exceeded (10000 files / 1 MiB per file); baseline retained, unfinished workspace range pending. Narrow scope with check_diagnostics scope=paths run=active.",
+				"Codex CodeIntel: partial; change discovery/file limit exceeded (10000 files / 1 MiB per file); baseline retained, unfinished workspace range pending. Narrow scope with check_diagnostics scope=paths run=active.",
 			);
 		const changed = [...snapshot.files]
 			.filter(([path, content]) => initial.baseline?.[path] !== content)
@@ -119,7 +121,7 @@ export class HookEngine {
 		if (!registered || baselineOnly || mode === "off") return "";
 		if (!config.trusted && !this.checker)
 			return output(
-				`session=${id}\nCodex LSP: automatic LSP/lint requires workspace trust; lint requires workspace trust. pending=${state.pending.length}`,
+				`session=${id}\nCodex CodeIntel: automatic LSP/lint requires workspace trust; lint requires workspace trust. pending=${state.pending.length}`,
 			);
 		const paths =
 			mode === "full"
@@ -163,7 +165,7 @@ export class HookEngine {
 				) as AutomaticResult;
 			} catch (error) {
 				return output(
-					`session=${id}\nCodex LSP ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.slice(0, 10).join(", ")}. ${message(error)}. Background checks continue; later Hook/MCP can retrieve results.`,
+					`session=${id}\nCodex CodeIntel ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.slice(0, 10).join(", ")}. ${message(error)}. Background checks continue; later Hook/MCP can retrieve results.`,
 				);
 			} finally {
 				await runtime.close();
@@ -172,7 +174,7 @@ export class HookEngine {
 		if (result.generation !== state.generation) return "";
 		const commitSignal = AbortSignal.timeout(750);
 		if ((await configuration(this.root)).version !== config.version)
-			return output("Codex LSP: stale; configuration/trust changed; pending retained");
+			return output("Codex CodeIntel: stale; configuration/trust changed; pending retained");
 		const valid: FileResult[] = [];
 		for (const entry of result.results) {
 			try {

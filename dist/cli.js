@@ -5605,7 +5605,9 @@ var HookEngine = class {
     signal.throwIfAborted();
     const id = text(input["session_id"]);
     if (!id)
-      return JSON.stringify({ systemMessage: "Codex LSP: missing session_id; automatic checking unavailable" });
+      return JSON.stringify({
+        systemMessage: "Codex CodeIntel: missing session_id; automatic checking unavailable"
+      });
     const event = text(input["hook_event_name"], "PostToolUse");
     const stopping = event === "Stop" || event === "SubagentStop";
     const output = (context) => JSON.stringify(
@@ -5642,7 +5644,7 @@ var HookEngine = class {
     const snapshot = await inventory(this.root, 1e4, signal, config.exclude);
     if (!snapshot.complete)
       return output(
-        "Codex LSP: partial; change discovery/file limit exceeded (10000 files / 1 MiB per file); baseline retained, unfinished workspace range pending. Narrow scope with check_diagnostics scope=paths run=active."
+        "Codex CodeIntel: partial; change discovery/file limit exceeded (10000 files / 1 MiB per file); baseline retained, unfinished workspace range pending. Narrow scope with check_diagnostics scope=paths run=active."
       );
     const changed = [...snapshot.files].filter(([path, content]) => initial.baseline?.[path] !== content).map(([path]) => path);
     const deleted = Object.keys(initial.baseline ?? {}).filter((path) => !snapshot.files.has(path));
@@ -5696,7 +5698,7 @@ var HookEngine = class {
     if (!config.trusted && !this.checker)
       return output(
         `session=${id}
-Codex LSP: automatic LSP/lint requires workspace trust; lint requires workspace trust. pending=${state.pending.length}`
+Codex CodeIntel: automatic LSP/lint requires workspace trust; lint requires workspace trust. pending=${state.pending.length}`
       );
     const paths = mode === "full" ? [...snapshot.files.keys()].filter((path) => languageFor(config, path)) : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
     if (!paths.length && !deleted.length && !stopping) return "";
@@ -5738,7 +5740,7 @@ Codex LSP: automatic LSP/lint requires workspace trust; lint requires workspace 
       } catch (error) {
         return output(
           `session=${id}
-Codex LSP ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.slice(0, 10).join(", ")}. ${message(error)}. Background checks continue; later Hook/MCP can retrieve results.`
+Codex CodeIntel ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.slice(0, 10).join(", ")}. ${message(error)}. Background checks continue; later Hook/MCP can retrieve results.`
         );
       } finally {
         await runtime.close();
@@ -5747,7 +5749,7 @@ Codex LSP ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.sl
     if (result.generation !== state.generation) return "";
     const commitSignal = AbortSignal.timeout(750);
     if ((await configuration(this.root)).version !== config.version)
-      return output("Codex LSP: stale; configuration/trust changed; pending retained");
+      return output("Codex CodeIntel: stale; configuration/trust changed; pending retained");
     const valid = [];
     for (const entry of result.results) {
       try {
@@ -5850,7 +5852,7 @@ async function runHookCli() {
     if (output) process.stdout.write(`${output}
 `);
   } catch (error) {
-    const context = signal.aborted ? "Codex LSP: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results." : `Codex LSP unavailable: ${message(error).slice(0, 300)}`;
+    const context = signal.aborted ? "Codex CodeIntel: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results." : `Codex CodeIntel unavailable: ${message(error).slice(0, 300)}`;
     process.stdout.write(
       `${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}
 `
@@ -5991,7 +5993,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-lsp", version: "0.6.0" },
+        serverInfo: { name: "codex-codeintel", version: "0.6.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -6403,7 +6405,7 @@ async function main() {
   else if (command === "hook") await runHookCli();
   else if (command === "service")
     await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
-  else throw new Error("Usage: codex-lsp [mcp | hook]");
+  else throw new Error("Usage: codex-codeintel [mcp | hook]");
 }
 main().catch((error) => {
   process.stderr.write(`${message(error)}

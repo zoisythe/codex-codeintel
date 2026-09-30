@@ -1,9 +1,9 @@
 ---
-name: lsp
-description: Use the codex-lsp plugin for scoped diagnostics, status, symbol navigation, rename, and explicit formatting. Consult when selecting its MCP tools, especially after automatic Hook feedback.
+name: code-intelligence
+description: Use the codex-codeintel plugin for scoped diagnostics, status, symbol navigation, rename, and explicit formatting. Consult when selecting its MCP tools, especially after automatic Hook feedback.
 ---
 
-# Codex LSP tools
+# Codex CodeIntel tools
 
 | Tool | Use |
 | --- | --- |

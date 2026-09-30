@@ -23,7 +23,9 @@ test("bundle initializes without development dependencies", async (t) => {
 		timeout: 3000,
 	});
 	assert.equal(child.status, 0, child.stderr);
-	assert.equal(JSON.parse(child.stdout).id, 1);
+	const initialized = JSON.parse(child.stdout);
+	assert.equal(initialized.id, 1);
+	assert.equal(initialized.result.serverInfo.name, "codex-codeintel");
 });
 
 test(
@@ -46,11 +48,15 @@ test(
 		assert.equal(server.cwd, ".");
 		const plugin = JSON.parse(await readFile(join(root, ".codex-plugin/plugin.json"), "utf8"));
 		const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+		assert.equal(plugin.name, "codex-codeintel");
+		assert.equal(pkg.name, "@zoisythe/codex-codeintel");
+		assert.equal(pkg.bin["codex-codeintel"], "./dist/cli.js");
 		assert.equal(plugin.skills, "./skills/");
 		assert(pkg.files.includes("skills"));
 		assert.equal(pkg.dependencies, undefined);
 		assert.equal(pkg.optionalDependencies, undefined);
-		assert((await readFile(join(root, "skills/lsp/SKILL.md"), "utf8")).startsWith("---\n"));
+		const skill = await readFile(join(root, "skills/code-intelligence/SKILL.md"), "utf8");
+		assert.match(skill, /^---\nname: code-intelligence\n/);
 
 		const missing = join(temp, "lsp-client.json");
 		await writeFile(

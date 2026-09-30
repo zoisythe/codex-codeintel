@@ -95,11 +95,11 @@ describe("plugin package metadata", () => {
 			"docs",
 		]);
 		expect(packageJson.files).toContain("skills");
-		expect(packageJson.bin["codex-lsp"]).toBe("./dist/cli.js");
+		expect(packageJson.bin["codex-codeintel"]).toBe("./dist/cli.js");
 		expect(pluginJson.hooks).toBe("./hooks/hooks.json");
 		expect(pluginJson.mcpServers).toBe("./.mcp.json");
 		expect(pluginJson.skills).toBe("./skills/");
-		expect(existsSync("skills/lsp/SKILL.md")).toBe(true);
+		expect(existsSync("skills/code-intelligence/SKILL.md")).toBe(true);
 		expect(cliSource.startsWith("#!/usr/bin/env node")).toBe(true);
 		expect(sessionStart).toBe(`node "${pluginRoot}/dist/cli.js" hook`);
 		expect(postToolUse).toBe(`node "${pluginRoot}/dist/cli.js" hook`);

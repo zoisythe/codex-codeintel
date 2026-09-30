@@ -1,13 +1,13 @@
 {
-	"name": "codex-lsp",
+	"name": "codex-codeintel",
 	"version": "0.6.0",
-	"description": "Expose Language Server Protocol diagnostics, navigation, and explicit formatting tools to Codex.",
+	"description": "Give Codex LSP/lint diagnostics, symbol navigation, rename, explicit formatting, and automatic Hooks.",
 	"author": {
 		"name": "Kortexal",
 		"url": "https://github.com/zoisythe"
 	},
-	"homepage": "https://github.com/zoisythe/codex-lsp-standalone",
-	"repository": "https://github.com/zoisythe/codex-lsp-standalone",
+	"homepage": "https://github.com/zoisythe/codex-codeintel",
+	"repository": "https://github.com/zoisythe/codex-codeintel",
 	"license": "MIT",
 	"keywords": [
 		"codex",
@@ -20,9 +20,9 @@
 	"hooks": "./hooks/hooks.json",
 	"mcpServers": "./.mcp.json",
 	"interface": {
-		"displayName": "Codex LSP",
-		"shortDescription": "Adds LSP diagnostics, navigation, and formatting tools",
-		"longDescription": "Codex LSP shares a local workspace service between MCP and Hooks. Edits automatically check changed files with LSP and lint; Stop checks the full workspace without blocking. Five static tools provide diagnostics, navigation, rename, and explicit formatting. Automatic checks never download tools, format, or lint-fix.",
+		"displayName": "Codex CodeIntel",
+		"shortDescription": "Code diagnostics, symbol navigation, rename, and formatting",
+		"longDescription": "Codex CodeIntel shares a local workspace service between MCP and Hooks. Edits automatically check changed files with LSP and lint; Stop checks the full workspace without blocking. Five static tools provide diagnostics, navigation, rename, and explicit formatting. Automatic checks never download tools, format, or lint-fix.",
 		"developerName": "Kortexal",
 		"category": "Developer Tools",
 		"capabilities": [
@@ -30,9 +30,9 @@
 			"MCP Tools",
 			"Code Intelligence"
 		],
-		"websiteURL": "https://github.com/zoisythe/codex-lsp-standalone",
-		"privacyPolicyURL": "https://github.com/zoisythe/codex-lsp-standalone#privacy",
-		"termsOfServiceURL": "https://github.com/zoisythe/codex-lsp-standalone#license",
+		"websiteURL": "https://github.com/zoisythe/codex-codeintel",
+		"privacyPolicyURL": "https://github.com/zoisythe/codex-codeintel#privacy",
+		"termsOfServiceURL": "https://github.com/zoisythe/codex-codeintel#license",
 		"defaultPrompt": [
 			"Run check_diagnostics on the files I just edited.",
 			"Use lsp_navigation to find references before changing this symbol.",

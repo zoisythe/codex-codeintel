@@ -45,6 +45,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 			assert.fail(`MCP request timed out: ${method} ${params?.name ?? ""}`);
 		};
 		const init = await request("initialize", {});
+		assert.equal(init.serverInfo.name, "codex-codeintel");
 		assert.equal(init.serverInfo.version, "0.6.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};

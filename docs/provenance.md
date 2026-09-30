@@ -1,6 +1,6 @@
 # Source attribution and independent maintenance
 
-[zoisythe/codex-lsp-standalone](https://github.com/zoisythe/codex-lsp-standalone) is independently maintained by [zoisythe](https://github.com/zoisythe). It keeps the existing repository name, `codex-lsp` plugin name and `@zoisythe/codex-lsp` package name.
+[zoisythe/codex-codeintel](https://github.com/zoisythe/codex-codeintel) is independently maintained by [zoisythe](https://github.com/zoisythe). The repository and plugin are named `codex-codeintel`, the package is `@zoisythe/codex-codeintel`, and the included Skill is `code-intelligence`. These replace the original distribution names `codex-lsp-standalone`, `codex-lsp`, `@zoisythe/codex-lsp` and `lsp`; see the [name migration guide](migration-codeintel.md).
 
 ## Sources and retained history
 
@@ -10,13 +10,13 @@ Development consumes the [zoisythe/lsp-tools-mcp](https://github.com/zoisythe/ls
 
 The existing Git commit history, including original author and committer attribution, is retained. Independent maintenance adds commits to that history rather than replacing it. Removing the GitHub fork association does not remove the project's provenance or license obligations.
 
-On 2026-09-30, the repository left GitHub's fork network through the repository settings. GitHub reports `fork: false` with no parent repository; the repository name and existing branch history were retained.
+On 2026-09-30, the repository left GitHub's fork network through the repository settings. GitHub reports `fork: false` with no parent repository; the existing branch history was retained. The repository was subsequently renamed to `codex-codeintel`; the source attribution and Git history remain intact.
 
 ## Maintenance policy
 
 This repository owns its configuration, MCP interface, Hooks, bundled delivery, validation and versioning. Changes and releases are reviewed here; upstream changes are considered individually rather than automatically synchronized. Compatibility decisions are documented in the [changelog](../CHANGELOG.md) and migration guides.
 
-Use [this repository's issues](https://github.com/zoisythe/codex-lsp-standalone/issues) for bugs and feature requests concerning this distribution. Its independent maintenance does not imply endorsement or support by the original authors.
+Use [this repository's issues](https://github.com/zoisythe/codex-codeintel/issues) for bugs and feature requests concerning this distribution. Its independent maintenance does not imply endorsement or support by the original authors.
 
 ## Licensing and attribution
 

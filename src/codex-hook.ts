@@ -28,8 +28,8 @@ export async function runHookCli(): Promise<void> {
 		if (output) process.stdout.write(`${output}\n`);
 	} catch (error) {
 		const context = signal.aborted
-			? "Codex LSP: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results."
-			: `Codex LSP unavailable: ${message(error).slice(0, 300)}`;
+			? "Codex CodeIntel: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results."
+			: `Codex CodeIntel unavailable: ${message(error).slice(0, 300)}`;
 		process.stdout.write(
 			`${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}\n`,
 		);

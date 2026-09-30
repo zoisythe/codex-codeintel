@@ -12,7 +12,7 @@ async function main(): Promise<void> {
 	else if (command === "hook") await runHookCli();
 	else if (command === "service")
 		await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
-	else throw new Error("Usage: codex-lsp [mcp | hook]");
+	else throw new Error("Usage: codex-codeintel [mcp | hook]");
 }
 main().catch((error: unknown) => {
 	process.stderr.write(`${message(error)}\n`);

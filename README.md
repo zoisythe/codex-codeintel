@@ -1,10 +1,12 @@
-# codex-lsp
+# Codex CodeIntel
 
-[![ci](https://github.com/zoisythe/codex-lsp-standalone/actions/workflows/ci.yml/badge.svg)](https://github.com/zoisythe/codex-lsp-standalone/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![ci](https://github.com/zoisythe/codex-codeintel/actions/workflows/ci.yml/badge.svg)](https://github.com/zoisythe/codex-codeintel/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Standalone Codex plugin with five MCP tools and automatic LSP/lint Hooks. Requires Node.js `>=24.20.0`. Installed copies run the self-contained `dist/cli.js`; only development uses the pinned `lsp-tools-mcp` submodule.
 
-Maintained independently by [zoisythe](https://github.com/zoisythe). This project originated from [code-yeongyu/codex-lsp](https://github.com/code-yeongyu/codex-lsp), whose runtime derives from `pi-lsp-client` and `lsp-tools-mcp`. The repository remains `codex-lsp-standalone`, the plugin remains `codex-lsp`, and the package remains `@zoisythe/codex-lsp`. See [source attribution and independent maintenance](docs/provenance.md) for the retained history, licenses and maintenance policy.
+Maintained independently by [zoisythe](https://github.com/zoisythe). This project originated from [code-yeongyu/codex-lsp](https://github.com/code-yeongyu/codex-lsp), whose runtime derives from `pi-lsp-client` and `lsp-tools-mcp`. The repository and plugin are named `codex-codeintel`; the package is `@zoisythe/codex-codeintel`. See [source attribution and independent maintenance](docs/provenance.md) for the retained history, licenses and maintenance policy.
+
+Renamed from `codex-lsp-standalone` / `codex-lsp`; see the [name migration guide](docs/migration-codeintel.md) for installation and Skill changes, and [rename acceptance](docs/validation-codeintel.md) for verified installation and runtime behavior.
 
 **0.6.0 enables automatic diagnostics by default.** Read the [automatic diagnostics migration guide](docs/migration-0.6.md) and the [configuration and MCP migration guide](docs/migration-0.5.md). There are no aliases for the removed tools, modes or environment overrides.
 
@@ -40,7 +42,7 @@ Cached requests never run analysis. Completed automatic Hook results are availab
 
 Follow the complete structured `next` arguments with their opaque `cursor`. Content, configuration, tool or result changes invalidate continuation; restart without cursor. Active pages check up to 50 files. Inventory is limited to 10,000 files and 1 MiB per file. Explicit files bypass exclusions, not workspace/size limits. Incomplete dependency inventory prevents fresh cache reuse.
 
-Writes preflight all target languages, check conflicts and proceed sequentially. Structured `modifiedPaths` retains complete write records even when text is shortened. Cancellation or later failures report completed writes; changes are neither replayed nor rolled back automatically. Use the included [lsp Skill](skills/lsp/SKILL.md) for tool selection.
+Writes preflight all target languages, check conflicts and proceed sequentially. Structured `modifiedPaths` retains complete write records even when text is shortened. Cancellation or later failures report completed writes; changes are neither replayed nor rolled back automatically. Use the included [code-intelligence Skill](skills/code-intelligence/SKILL.md) for tool selection.
 
 ## Configuration and local tools
 
@@ -95,8 +97,8 @@ Incomplete discovery retains the previous baseline. Missing session_id disables 
 ## Install
 
 ```bash
-codex plugin marketplace add https://github.com/zoisythe/codex-lsp-standalone
-codex plugin add codex-lsp@codex-lsp-standalone
+codex plugin marketplace add https://github.com/zoisythe/codex-codeintel
+codex plugin add codex-codeintel@codex-codeintel
 ```
 
 Start a new session and review the exact Hook definitions through `/hooks`. Installation does not grant Hook trust. Installed copies need neither npm install nor a recursive submodule checkout. MCP runs with plugin-relative cwd; the user repository is supplied as workspace.

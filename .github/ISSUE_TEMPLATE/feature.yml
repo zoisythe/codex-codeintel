@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a focused codex-lsp improvement.
+description: Propose a focused codex-codeintel improvement.
 title: "[feature]: "
 labels: ["enhancement"]
 body:
@@ -14,6 +14,6 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: What should codex-lsp do?
+      description: What should codex-codeintel do?
     validations:
       required: true

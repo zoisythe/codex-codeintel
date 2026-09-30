@@ -1,11 +1,11 @@
 {
-	"name": "codex-lsp-standalone",
+	"name": "codex-codeintel",
 	"interface": {
-		"displayName": "Codex LSP"
+		"displayName": "Codex CodeIntel"
 	},
 	"plugins": [
 		{
-			"name": "codex-lsp",
+			"name": "codex-codeintel",
 			"source": {
 				"source": "local",
 				"path": "./"

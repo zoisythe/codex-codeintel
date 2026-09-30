@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Rename the repository, marketplace and plugin to `codex-codeintel`, the package and CLI to `@zoisythe/codex-codeintel` / `codex-codeintel`, and the `lsp` Skill to `code-intelligence`. Update MCP server identity, Hook feedback and installation guidance; preserve source attribution and Git history. See the [name migration guide](docs/migration-codeintel.md).
+- Keep existing MCP tool names, configuration paths, environment variables and cache/IPC locations compatible across the rename.
+
 ## 0.6.0
 
 - Document the original codex-lsp, pi-lsp-client and lsp-tools-mcp sources and independent maintenance by zoisythe; retain existing names, Git history and MIT attribution.

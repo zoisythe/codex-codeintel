@@ -1,17 +1,17 @@
 {
-	"name": "@zoisythe/codex-lsp",
+	"name": "@zoisythe/codex-codeintel",
 	"version": "0.6.0",
-	"description": "Standalone Codex plugin with bundled LSP diagnostics, navigation, formatting, and post-edit hooks.",
+	"description": "Codex code intelligence with LSP/lint diagnostics, symbol navigation, rename, formatting, and automatic Hooks.",
 	"type": "module",
 	"packageManager": "npm@11.12.1",
 	"license": "MIT",
-	"homepage": "https://github.com/zoisythe/codex-lsp-standalone",
+	"homepage": "https://github.com/zoisythe/codex-codeintel",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/zoisythe/codex-lsp-standalone.git"
+		"url": "git+https://github.com/zoisythe/codex-codeintel.git"
 	},
 	"bugs": {
-		"url": "https://github.com/zoisythe/codex-lsp-standalone/issues"
+		"url": "https://github.com/zoisythe/codex-codeintel/issues"
 	},
 	"keywords": [
 		"codex",
@@ -22,7 +22,7 @@
 		"diagnostics"
 	],
 	"bin": {
-		"codex-lsp": "./dist/cli.js"
+		"codex-codeintel": "./dist/cli.js"
 	},
 	"files": [
 		"dist",
