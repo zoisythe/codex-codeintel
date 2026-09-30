@@ -1,42 +1,47 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Engine } from "./engine.js";
+import { ensureService, exchange, existingService } from "./ipc.js";
 
 export class Runtime {
-	private readonly engines = new Map<string, Engine>();
-	private readonly active = new Map<string, number>();
-	private readonly timers = new Map<string, NodeJS.Timeout>();
+	private readonly active = new Set<AbortController>();
 	async request(root: string, operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
 		if (!isAbsolute(root)) throw new Error("workspace must be an absolute project directory");
 		root = await realpath(root);
-		signal = AbortSignal.any([signal, AbortSignal.timeout(45000)]);
-		signal.throwIfAborted();
-		let engine = this.engines.get(root);
-		if (!engine) {
-			engine = new Engine(root);
-			this.engines.set(root, engine);
-		}
-		clearTimeout(this.timers.get(root));
-		this.active.set(root, (this.active.get(root) ?? 0) + 1);
+		const controller = new AbortController();
+		this.active.add(controller);
+		signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(45000)]);
 		try {
-			const target = engine;
-			return await target.dispatch(operation, args, signal);
-		} finally {
-			const active = (this.active.get(root) ?? 1) - 1;
-			this.active.set(root, active);
-			if (!active) {
-				const target = engine;
-				const timer = setTimeout(() => {
-					void target.dispatch("release", {}, new AbortController().signal);
-				}, 120000);
-				timer.unref();
-				this.timers.set(root, timer);
+			const existing = await existingService(root, signal);
+			const passive =
+				operation === "lsp_status" ||
+				(operation === "check_diagnostics" && args["run"] === "cached") ||
+				operation === "session_end";
+			if (!existing && passive) {
+				if (operation === "session_end") return "";
+				const engine = new Engine(root);
+				try {
+					const output = await engine.dispatch(operation, args, signal);
+					return operation === "lsp_status"
+						? JSON.stringify({
+								...JSON.parse(output),
+								service: { state: "stopped" },
+								automaticDiagnostics: JSON.parse(output).configuration.automaticDiagnostics,
+								automaticTasks: [],
+							})
+						: output;
+				} finally {
+					await engine.dispose();
+				}
 			}
+			const endpoint = existing ?? (await ensureService(root, signal));
+			return await exchange(endpoint, operation, args, signal);
+		} finally {
+			this.active.delete(controller);
 		}
 	}
 	async close(): Promise<void> {
-		for (const timer of this.timers.values()) clearTimeout(timer);
-		await Promise.all([...this.engines.values()].map((engine) => engine.dispose()));
-		this.engines.clear();
+		for (const controller of this.active) controller.abort();
+		this.active.clear();
 	}
 }

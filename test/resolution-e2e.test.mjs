@@ -74,7 +74,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	await writeFile(join(root, "healthy", "main.py"), "broken\n");
 	await script(join(bin, "ty"), `require("node:fs").appendFileSync(${JSON.stringify(localFailures)}, "started\\n");console.error("broken local toolchain");process.exit(9)`);
 	const broken = await client.call("check_diagnostics", { path: "pkg/src/main.py", refresh: true });
-	assert(broken.isError); assert.match(broken.content[0].text, /no fallback/);
+	assert.equal(broken.structuredContent.results[0].channels.lsp, "failed"); assert.match(broken.content[0].text, /no fallback/);
 	assert(!(await client.call("check_diagnostics", { path: "healthy/main.py", source: "lsp" })).isError);
 	assert((await client.call("check_diagnostics", { path: "pkg/src/main.py", source: "lsp" })).isError);
 	assert.equal(await readFile(localFailures, "utf8"), "started\n", "a healthy package must not clear another package's failure cache");

@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
+
+- Document the original codex-lsp, pi-lsp-client and lsp-tools-mcp sources and independent maintenance by zoisythe; retain existing names, Git history and MIT attribution.
+- Share one authenticated local workspace service, Engine, diagnostic cache and LspManager across Hooks and MCP. Initialize/status/cached reads remain lazy; inactive services exit after two minutes.
+- Automatically run LSP plus independent lint after edits (delta) and at Stop (full). Configure each event as delta/full/off; a missing baseline starts with full scope. Stop never blocks.
+- Keep short Hook waits independent from five-minute background jobs; serialize workspace operations, yield between 50-file batches, merge pending edits and cancel superseded/session-ended tasks.
+- Isolate by canonical workspace, user, CODEX_HOME, bundle hash and protocol; include each request's execution environment in tool/client identity. Automatic execution requires trust and never downloads tools.
+- Share automatic findings with cached MCP queries, track per-channel pending state in metadata v6, deduplicate feedback and confirm error clearing once. Invalidate changed content/configuration/tools and remove deleted diagnostics.
+- Add bundle concurrency/recovery/full-scope acceptance, actual automatic Python/legacy and native TypeScript/C/C++/Rust checks, and a live Codex Hook session. See [migration](docs/migration-0.6.md) and [validation](docs/validation-0.6.md).
+
 
 - Read workspace trust directly from Codex's user config.toml; match the selected directory without parent inheritance, ignore legacy plugin trust lists, and invalidate cached analysis when trust changes.
 - Keep Hook scope at the session cwd instead of promoting it to the Git root; expose the trust file and effective level in status and cover parent/child workspaces and live revocation through real MCP/Hook subprocesses.

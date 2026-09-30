@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import type { Config } from "./config.js";
+import { executionEnvironment } from "./environment.js";
 import { hash, inside } from "./files.js";
 import { runnerIdentity } from "./runners.js";
 import { resolveServer } from "./tool-resolution.js";
@@ -78,5 +79,5 @@ export async function analysisIdentity(
 				representatives.map((path) => resolveServer(root, path, config).catch((error) => String(error))),
 			)
 		: [];
-	return hash(JSON.stringify([config.version, contents, [...runners].sort(), servers]));
+	return hash(JSON.stringify([config.version, executionEnvironment(), contents, [...runners].sort(), servers]));
 }

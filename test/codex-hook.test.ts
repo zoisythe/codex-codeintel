@@ -43,12 +43,12 @@ describe("inventory-based PostToolUse hook", () => {
 		await engine.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal);
 		await writeFile(join(root, "changed.ts"), "changed");
 		const output = JSON.parse(await engine.hook({ session_id: "s", hook_event_name: "Stop" }, signal));
-		expect(output.decision).toBe("block");
-		expect(output.reason).toContain("broken");
+		expect(output.decision).toBeUndefined();
+		expect(output.systemMessage).toContain("broken");
 		expect(output.hookSpecificOutput).toBeUndefined();
 		expect(await engine.hook({ session_id: "s", hook_event_name: "Stop", stop_hook_active: true }, signal)).toBe("");
 	});
-	it("adopts the first snapshot as baseline without scanning the whole tree", async () => {
+	it("checks full scope when PostToolUse has no baseline", async () => {
 		const root = await fixture();
 		let checks = 0;
 		const engine = new Engine(root, async (path) => {
@@ -61,7 +61,7 @@ describe("inventory-based PostToolUse hook", () => {
 				new AbortController().signal,
 			),
 		).toBe("");
-		expect(checks).toBe(0);
+		expect(checks).toBe(1);
 	});
 
 	it("checks only files that changed after the baseline", async () => {

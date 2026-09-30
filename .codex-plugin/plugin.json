@@ -1,6 +1,6 @@
 {
 	"name": "codex-lsp",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Expose Language Server Protocol diagnostics, navigation, and explicit formatting tools to Codex.",
 	"author": {
 		"name": "Kortexal",
@@ -22,7 +22,7 @@
 	"interface": {
 		"displayName": "Codex LSP",
 		"shortDescription": "Adds LSP diagnostics, navigation, and formatting tools",
-		"longDescription": "Codex LSP runs LSP clients inside each MCP process and independent lint checks inside short Hooks. Five static tools provide diagnostics, navigation, rename, and explicit formatting. Hooks never start LSP, auto-format, install tools, or lint-fix.",
+		"longDescription": "Codex LSP shares a local workspace service between MCP and Hooks. Edits automatically check changed files with LSP and lint; Stop checks the full workspace without blocking. Five static tools provide diagnostics, navigation, rename, and explicit formatting. Automatic checks never download tools, format, or lint-fix.",
 		"developerName": "Kortexal",
 		"category": "Developer Tools",
 		"capabilities": [

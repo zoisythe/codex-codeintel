@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
 
 const instance = `${process.pid}-${randomUUID()}`;
@@ -13,7 +14,7 @@ export function logEvent(
 	queue = queue
 		.then(async () => {
 			const dir = join(
-				process.env["CODEX_LSP_CACHE"] ??
+				executionEnvironment()["CODEX_LSP_CACHE"] ??
 					join(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir()).slice(0, 10)}`),
 				"logs-v5",
 			);

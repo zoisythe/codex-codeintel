@@ -1,9 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { ResolvedServer } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
 import type { Config, Server } from "./config.js";
+import { automaticExecution, executionEnvironment } from "./environment.js";
 import { hash, inside } from "./files.js";
 
 export interface ToolResolution {
@@ -41,7 +42,7 @@ function suffixes(name: string): string[] {
 		: [""];
 }
 export async function pathExecutable(name: string): Promise<string | undefined> {
-	for (const dir of (process.env["PATH"] ?? "").split(delimiter).filter(Boolean)) {
+	for (const dir of (executionEnvironment()["PATH"] ?? "").split(delimiter).filter(Boolean)) {
 		for (const suffix of suffixes(name)) {
 			const path = resolve(dir, name + suffix);
 			if (await executable(path)) return path;
@@ -54,7 +55,7 @@ async function resolution(command: string[], source: ToolResolution["source"], n
 	return {
 		command,
 		source,
-		identity: hash(JSON.stringify([command, source, info?.size, info?.mtimeMs, process.env["PATH"]])),
+		identity: hash(JSON.stringify([command, source, info?.size, info?.mtimeMs, executionEnvironment()])),
 		...(note ? { note } : {}),
 	};
 }
@@ -80,6 +81,17 @@ async function findTool(
 ): Promise<ToolResolution> {
 	const name = command[0];
 	if (!name) throw new Error("Empty command");
+	const executableName = basename(name).replace(/\.(?:exe|cmd|bat)$/i, "");
+	if (
+		automaticExecution() &&
+		(["uvx", "npx", "pipx"].includes(executableName) ||
+			(executableName === "uv" && command[1] === "tool" && command[2] === "run"))
+	)
+		return resolution(
+			[...command],
+			"missing",
+			`Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`,
+		);
 	if (explicit) {
 		const entry =
 			isAbsolute(name) || name.includes("/") || name.includes("\\")
@@ -106,7 +118,7 @@ async function findTool(
 	const local = await pathExecutable(name);
 	if (local) return resolution([local, ...command.slice(1)], "PATH");
 	const plan = temporary[name];
-	if (allowTemporary && plan) {
+	if (allowTemporary && !automaticExecution() && plan) {
 		if (plan.ecosystem === "python") {
 			for (const [launcher, prefix] of [
 				["uvx", ["--isolated", "--from", plan.packages[0] ?? name]],

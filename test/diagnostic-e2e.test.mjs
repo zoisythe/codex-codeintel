@@ -13,7 +13,9 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const preload = join(dir, "clock.mjs");
-	await writeFile(preload, 'let delta=0;const now=Date.now;Date.now=()=>now()+delta;process.on("message",value=>{delta+=value;process.send("advanced")});');
+	const clockFile = join(dir, "time");
+	await writeFile(clockFile, "0");
+	await writeFile(preload, `import fs from "node:fs";const path=${JSON.stringify(clockFile)};const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(path,"utf8"));process.on("message",value=>{fs.writeFileSync(path,String(Number(fs.readFileSync(path,"utf8"))+value));process.send?.("advanced")});`);
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
@@ -52,12 +54,14 @@ test("bundle idle release keeps stdio alive and starts a new client", { timeout:
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	const preload = join(dir, "idle.mjs");
-	await writeFile(preload, 'const original=setTimeout;globalThis.setTimeout=(fn,ms,...args)=>original(fn,ms===120000?100:ms,...args);');
+	const clockFile = join(dir, "time"); await writeFile(clockFile, "0");
+	await writeFile(preload, `import fs from "node:fs";const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(${JSON.stringify(clockFile)},"utf8"));`);
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	const firstPid = Number((await readFile(log, "utf8")).trim());
-	await new Promise(resolve => setTimeout(resolve, 800));
+	await writeFile(clockFile, "121000");
+	await new Promise(resolve => setTimeout(resolve, 1800));
 	assert.throws(() => process.kill(firstPid, 0));
 	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);

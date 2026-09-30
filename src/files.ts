@@ -4,6 +4,7 @@ import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { TextEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
+import { executionEnvironment } from "./environment.js";
 
 import { measured } from "./metrics.js";
 
@@ -62,7 +63,13 @@ async function scanInventory(
 		const { stdout } = await exec(
 			"git",
 			["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
-			{ cwd: scope, timeout: 5000, maxBuffer: 4 * 1024 * 1024, ...(signal ? { signal } : {}) },
+			{
+				cwd: scope,
+				env: executionEnvironment(),
+				timeout: 5000,
+				maxBuffer: 4 * 1024 * 1024,
+				...(signal ? { signal } : {}),
+			},
 		);
 		names = [
 			...new Set(

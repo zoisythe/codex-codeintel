@@ -31,7 +31,7 @@ function tool(
 export const TOOLS = [
 	tool(
 		"check_diagnostics",
-		"Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and Hook-only files remain pending. Continue with complete next arguments.",
+		"Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
 		{
 			...scope,
 			...paging,
@@ -156,7 +156,7 @@ export async function runMcp(
 		if (method === "initialize") {
 			ok({
 				protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-				serverInfo: { name: "codex-lsp", version: "0.5.0" }, // keep in sync with package.json
+				serverInfo: { name: "codex-lsp", version: "0.6.0" }, // keep in sync with package.json
 				capabilities: { tools: { listChanged: false } },
 			});
 			return;

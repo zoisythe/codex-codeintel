@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,4 +14,23 @@ export function restoreInstalledHome(script: string = fileURLToPath(import.meta.
 		}
 		child = parent;
 	}
+}
+
+interface ExecutionContext {
+	environment: NodeJS.ProcessEnv;
+	automatic: boolean;
+}
+const executions = new AsyncLocalStorage<ExecutionContext>();
+export function executionEnvironment(): NodeJS.ProcessEnv {
+	return executions.getStore()?.environment ?? process.env;
+}
+export function automaticExecution(): boolean {
+	return executions.getStore()?.automatic ?? false;
+}
+export function withExecution<T>(
+	environment: NodeJS.ProcessEnv,
+	automatic: boolean,
+	action: () => Promise<T>,
+): Promise<T> {
+	return executions.run({ environment, automatic }, action);
 }

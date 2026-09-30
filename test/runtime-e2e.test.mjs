@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 // This suite also runs in CI's no-submodule/no-node_modules delivery job.
-test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup", { timeout: 60000 }, async (t) => {
+test("shared MCP and Hook reuse, explicit writes and connection cleanup", { timeout: 60000 }, async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "codex-isolated-"));
 	const root = join(dir, "project");
 	const home = join(dir, "home");
@@ -45,7 +45,7 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 			assert.fail(`MCP request timed out: ${method} ${params?.name ?? ""}`);
 		};
 		const init = await request("initialize", {});
-		assert.equal(init.serverInfo.version, "0.5.0");
+		assert.equal(init.serverInfo.version, "0.6.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
@@ -57,16 +57,16 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "initialize is lazy");
 	assert.equal(hook("SessionStart"), "");
 	await writeFile(join(root, "main.fake"), "broken again\n");
-	assert.match(hook("PostToolUse"), /LSP not executed/);
-	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "Hook cannot launch LSP");
-	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /pending/);
+	assert.match(hook("PostToolUse"), /fake\/E1/);
+	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1, "Hook owns a shared LSP through the service");
+	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
 	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
 	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
 	const second = await client();
-	assert.match(await second.call("check_diagnostics", {scope: "session", run: "cached"}), /pending/);
+	assert.match(await second.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
 	await second.call("check_diagnostics", {path: "main.fake"});
-	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
+	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
 	await second.close();
 	assert.match(await first.call("lsp_format", {path: "main.fake"}), /Formatted/);
 	assert.equal(await readFile(join(root, "main.fake"), "utf8"), "fixed! again\n");
@@ -82,7 +82,7 @@ test("process-local MCP reuse, Hook isolation, explicit writes and EOF cleanup",
 	assert(paged.structuredContent.next?.cursor);
 	assert(!(await first.request("tools/call", {name: "check_diagnostics", arguments: paged.structuredContent.next})).isError);
 	await first.close();
-	for (const pid of (await readFile(log, "utf8")).trim().split("\n").map(Number)) assert.throws(() => process.kill(pid, 0));
+	const last = Number((await readFile(log, "utf8")).trim().split("\n").at(-1)); assert.doesNotThrow(() => process.kill(last, 0), "MCP EOF does not kill shared clients");
 });
 
 test("MCP cancellation, partial writes, schema errors and recovery through the delivered bundle", {timeout: 30000}, async (t) => {
@@ -152,7 +152,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert.match(checked.content[0].text,/fake\/E1/);
 	child.stdin.end();
 	assert.deepEqual(await exited,[0,null]);
-	assert((await pids()).every(pid=>!alive(pid)),"EOF cleans every analysis process");
+	assert(alive((await pids()).at(-1)),"EOF preserves shared analysis process");
 });
 
 test("short Hook budget, pending recovery, Stop deduplication and concurrent metadata", {timeout: 30000}, async (t) => {
@@ -162,7 +162,7 @@ test("short Hook budget, pending recovery, Stop deduplication and concurrent met
 	const cli=join(dir,"cli.mjs");await cp(resolve("dist/cli.js"),cli);
 	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config=join(dir,"lsp-client.json");
-	await writeFile(config,JSON.stringify({schemaVersion:1,lint:{javascript:"biome"}}));
+	await writeFile(config,JSON.stringify({schemaVersion:1, lsp:{typescript:{command:[process.execPath,resolve("test/fixtures/fake-lsp.mjs")],extensions:[".js"]}, json:false},lint:{javascript:"biome"}}));
 	await writeFile(join(root,"biome.json"),"{}");
 	const bin=join(root,"node_modules/@biomejs/biome/bin");await mkdir(bin,{recursive:true});
 	const log=join(dir,"runners");
@@ -192,13 +192,14 @@ test("short Hook budget, pending recovery, Stop deduplication and concurrent met
 	assert.match(await hook("PostToolUse"),/budget|pending/i);
 	assert(performance.now()-started<8000,"Hook total execution stays below host timeout");
 	assert((await metadata()).pending.includes("main.js"));
-	for(const pid of (await readFile(log,"utf8")).trim().split("\n").map(Number))assert.throws(()=>process.kill(pid,0));
+	const backgroundPid = Number((await readFile(log,"utf8")).trim().split("\n").at(-1));
+	assert.doesNotThrow(()=>process.kill(backgroundPid,0), "Hook wait expiry leaves background runner alive");
 	await writeFile(join(root,"main.js"),"warning");
-	assert.match(await hook("PostToolUse"),/LSP not executed/);
+	assert.match(await hook("PostToolUse"),/fixture finding/);
 	assert.deepEqual((await metadata()).pending,[]);
-	assert.equal(await hook("Stop"),"","warning never blocks");
+	assert.equal(JSON.parse(await hook("Stop")).decision,undefined,"warning never blocks");
 	await writeFile(join(root,"main.js"),"error");
-	assert.equal(JSON.parse(await hook("Stop")).decision,"block");
+	assert.equal(JSON.parse(await hook("Stop")).decision,undefined);
 	assert.equal(await hook("Stop"),"","fresh error blocks only once");
 	await writeFile(join(root,"a.js"),"warning");await writeFile(join(root,"b.js"),"warning");
 	await Promise.all([hook("PostToolUse"),hook("PostToolUse"),hook("PostToolUse")]);

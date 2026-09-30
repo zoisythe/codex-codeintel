@@ -3,6 +3,7 @@ import { access, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { createSpawnCommand, terminateProcessTree } from "../packages/lsp-tools-mcp/dist/lsp/process.js";
 import { type Config, configuration } from "./config.js";
+import { automaticExecution, executionEnvironment } from "./environment.js";
 
 export { trusted } from "./config.js";
 
@@ -12,7 +13,7 @@ import { logEvent } from "./log.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
 import { type FileResult, message } from "./results.js";
-import { languageFor, resolveServer, resolveTool } from "./tool-resolution.js";
+import { languageFor, resolveTool } from "./tool-resolution.js";
 
 export async function run(
 	command: string,
@@ -26,6 +27,7 @@ export async function run(
 		const prepared = createSpawnCommand([command, ...args]);
 		const child = spawn(prepared.command, prepared.args, {
 			cwd,
+			env: executionEnvironment(),
 			shell: prepared.shell,
 			detached: process.platform !== "win32",
 			windowsHide: true,
@@ -142,7 +144,7 @@ export async function select(
 		if (tool.source === "missing") {
 			const prepared = await preparedRuff();
 			if (prepared) return { name: "ruff", command: prepared, prefix: [], source: "prepared" };
-			if (!active || !config.trusted)
+			if (!active || automaticExecution() || !config.trusted)
 				throw new Error(
 					"Ruff unavailable: no local or prepared executable; run trusted active MCP diagnostics to prepare it. Hook never downloads tools",
 				);
@@ -214,9 +216,6 @@ export async function lint(
 		const absolute = await workspacePath(root, path);
 		if (!languageFor(config, path))
 			return { path, state: "skipped", findings: [], note: "Language disabled or unsupported" };
-		const server = await resolveServer(root, absolute, config);
-		if (server.tool.source === "missing")
-			return { path, state: "skipped", findings: [], note: server.tool.note ?? "LSP unavailable" };
 		const runner = await select(root, absolute, false, config, active, signal);
 		if (!runner)
 			return { path, state: "skipped", findings: [], note: "lint off or no matching Runner configuration" };

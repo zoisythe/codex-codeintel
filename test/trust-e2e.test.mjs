@@ -70,7 +70,7 @@ test("Codex user trust: exact workspaces, parent file scope, Hook cwd and live r
 	assert.equal(hook(child, "SessionEnd", "child"), "", "session cleanup survives malformed user trust");
 	await rm(user); assert.equal((await status(child)).trusted, false);
 	await configure([[root, "trusted"]]);
-	const installed = join(home, "plugins", "cache", "example", "plugin", "0.5.0", "dist", "cli.js");
+	const installed = join(home, "plugins", "cache", "example", "plugin", "0.6.0", "dist", "cli.js");
 	await mkdir(resolve(installed, ".."), { recursive: true }); await cp(cli, installed);
 	const originalTrust = await readFile(user, "utf8"), sanitized = { ...process.env, CODEX_LSP_CACHE: join(dir, "installed-cache") };
 	delete sanitized.CODEX_HOME;

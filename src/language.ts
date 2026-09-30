@@ -7,6 +7,7 @@ import { LspManager } from "../packages/lsp-tools-mcp/dist/lsp/manager.js";
 import type { Diagnostic, TextEdit, WorkspaceEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
 import { findWorkspaceRoot } from "../packages/lsp-tools-mcp/dist/lsp/workspace-root.js";
 import type { Config } from "./config.js";
+import { executionEnvironment } from "./environment.js";
 import { applyTextChanges, hash, inside, inventory, workspacePath } from "./files.js";
 import { logEvent } from "./log.js";
 import { measured } from "./metrics.js";
@@ -28,6 +29,9 @@ function diagnosticUriKey(uri: string): string {
 }
 
 class Client extends LspClient {
+	serverIdentity(): string {
+		return this.server.id;
+	}
 	private stopping = false;
 	private stopTask: Promise<void> | undefined;
 	override stop(): Promise<void> {
@@ -117,7 +121,17 @@ class Client extends LspClient {
 	private versions = new Map<string, { version: number; content: string }>();
 	override async start(): Promise<void> {
 		try {
-			await super.start();
+			const inherited = process.env;
+			let starting: Promise<void>;
+			try {
+				// The pinned transport spawns synchronously before its first await. Restore
+				// immediately, so concurrent IPC contexts never observe another request's env.
+				process.env = { ...executionEnvironment() };
+				starting = super.start();
+			} finally {
+				process.env = inherited;
+			}
+			await starting;
 		} catch (error) {
 			await logEvent("startup-failure");
 			throw error;
@@ -162,7 +176,7 @@ class Client extends LspClient {
 			});
 		}
 	}
-	async refresh(paths: string[]): Promise<void> {
+	async refresh(changes: { path: string; type: number }[]): Promise<void> {
 		// Invalidating push results alone leaves unchanged open documents permanently pending
 		// on servers that publish only after didOpen/didChange. Close them so the next request
 		// synchronizes the final disk contents, including deleted/moved dependencies.
@@ -170,8 +184,9 @@ class Client extends LspClient {
 			await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
 		this.versions.clear();
 		this.published.clear();
+		this.pulls.clear();
 		await this.sendNotification("workspace/didChangeWatchedFiles", {
-			changes: paths.map((path) => ({ uri: pathToFileURL(path).href, type: 2 })),
+			changes: changes.map(({ path, type }) => ({ uri: pathToFileURL(path).href, type })),
 		});
 	}
 	async collect(
@@ -258,18 +273,29 @@ class Client extends LspClient {
 export class Languages {
 	private manager: LspManager;
 	private readonly clients = new Set<Client>();
+	private processStarts = 0;
+	statistics(): { processStarts: number; running: number } {
+		return {
+			processStarts: this.processStarts,
+			running: [...this.clients].filter((client) => client.isAlive()).length,
+		};
+	}
 	private snapshot = new Map<string, string>();
 	async sync(files: Map<string, string>): Promise<void> {
 		const changed = [...new Set([...files.keys(), ...this.snapshot.keys()])].filter(
 			(path) => files.get(path) !== this.snapshot.get(path),
 		);
+		const events = changed.map((path) => ({
+			path: resolve(this.root, path),
+			type: !files.has(path) ? 3 : !this.snapshot.has(path) ? 1 : 2,
+		}));
 		this.snapshot = new Map(files);
 		for (const client of this.clients) {
 			if (!client.isAlive()) {
 				this.clients.delete(client);
 				continue;
 			}
-			await client.refresh(changed.map((path) => resolve(this.root, path)));
+			await client.refresh(events);
 		}
 	}
 	constructor(
@@ -281,6 +307,7 @@ export class Languages {
 			clientFactory: (root, server) => {
 				if (!inside(this.root, root))
 					throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
+				this.processStarts++;
 				const client = new Client(root, server);
 				this.clients.add(client);
 				return client;
@@ -299,7 +326,10 @@ export class Languages {
 					}))) ?? { unavailable: "No configured lint runner" })
 				: { unavailable: "Workspace trust required" },
 			running: [...this.clients].some(
-				(client) => client.isAlive() && JSON.stringify(client.command()) === JSON.stringify(resolved.tool.command),
+				(client) =>
+					client.isAlive() &&
+					client.serverIdentity() ===
+						`${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`,
 			),
 			failure:
 				failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 30000
@@ -345,7 +375,7 @@ export class Languages {
 			resolved.tool.command[0]?.includes(".venv")
 		)
 			root = dirname(dirname(dirname(resolved.tool.command[0])));
-		resolved.server.id += `:${hash(JSON.stringify(resolved.server)).slice(0, 16)}`;
+		resolved.server.id += `:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`;
 		let client: LspClient;
 		try {
 			client = await measured("startup/acquire", () =>

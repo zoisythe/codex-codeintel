@@ -1,5 +1,17 @@
-codex-lsp ports the standalone LSP runtime from pi-lsp-client into a Codex plugin.
+codex-lsp-standalone is independently maintained by zoisythe at
+https://github.com/zoisythe/codex-lsp-standalone.
 
-This standalone plugin is maintained at https://github.com/zoisythe/codex-lsp-standalone.
-The package includes adapted code originally developed for pi-lsp-client and
-the upstream codex-lsp plugin.
+The project originated from code-yeongyu/codex-lsp:
+https://github.com/code-yeongyu/codex-lsp
+It includes adapted LSP runtime code originally developed for pi-lsp-client:
+https://github.com/code-yeongyu/pi-lsp-client
+and extracted into lsp-tools-mcp:
+https://github.com/code-yeongyu/lsp-tools-mcp
+
+Development uses the pinned lsp-tools-mcp source maintained at
+https://github.com/zoisythe/lsp-tools-mcp. Installed copies include its adapted
+runtime in the self-contained bundle.
+
+Original Git history, author attribution and MIT copyright/license notices
+are retained. Independent maintenance does not imply endorsement by the
+original authors. See LICENSE and docs/provenance.md.

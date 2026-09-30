@@ -41,7 +41,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	await client.close();
 	await rm(join(bin, "uvx")); await symlink(uvx, join(bin, "uvx"));
 	client = bundleClient(root, home, { ...env, UV_CACHE_DIR: join(dir, "empty-cache"), UV_OFFLINE: "1" });
-	result = await check(); assert(result.isError, JSON.stringify(result)); assert.match(result.content[0].text, /launch\/download|initialization failed/);
+	result = await check(); assert.equal(result.structuredContent.results[0].channels.lsp, "failed", JSON.stringify(result)); assert.equal(result.structuredContent.results[0].channels.lint, "complete"); assert.match(result.content[0].text, /launch\/download|initialization failed/);
 });
 
 for (const [server, recipe] of [["typescript", "typescript@5.9.3"], ["tsc", "typescript@7.0.2"]]) {

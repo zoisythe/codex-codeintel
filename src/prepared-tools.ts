@@ -3,11 +3,12 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { executionEnvironment } from "./environment.js";
 import { record } from "./results.js";
 
 // Executable discovery metadata only; never diagnostic state or a shared process.
 function directory(): string {
-	return join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "cache", "codex-lsp-v5", "tools");
+	return join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "cache", "codex-lsp-v5", "tools");
 }
 export async function preparedRuff(): Promise<string | undefined> {
 	try {

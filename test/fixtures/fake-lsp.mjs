@@ -36,6 +36,7 @@ function handle(value) {
 		return;
 	}
 	if (id === undefined) return;
+	if (method === "initialize" && mode === "cold") { setTimeout(() => send({ id, result: { capabilities: { textDocumentSync: 1 } } }), 6000); return; }
 	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
 	if (method === "textDocument/diagnostic" && pull) { const text = docs.get(params.textDocument.uri) ?? ""; send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items: text.includes("broken") ? [{range:{start:{line:0,character:0},end:{line:0,character:6}},severity:1,source:"fake",message:"pull broken"}] : []}}); return; }
 	if (method === "textDocument/diagnostic") { send({ id, error: { code: -32601, message: "Unhandled method textDocument/diagnostic" } }); return; }
@@ -64,3 +65,5 @@ process.stdin.on("data", (chunk) => {
 		handle(JSON.parse(body));
 	}
 });
+
+process.stdin.on("end", () => process.exit(0));

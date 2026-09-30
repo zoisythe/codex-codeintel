@@ -3,28 +3,40 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
 import { record } from "./results.js";
+import { workspaceIdentity } from "./service-identity.js";
 
 export interface SessionState {
 	id: string;
 	version: number;
+	generation: number;
+	configuration: string;
+	pendingChannels: { lsp: string[]; lint: string[] };
+	automaticScope: "delta" | "full";
 	turn: string;
 	baseline: Record<string, string> | null;
 	touched: string[];
 	current: string[];
 	pending: string[];
+	delivery: string[];
 	shown: Record<string, string>;
 	blocked: string[];
 }
 const empty = (id: string): SessionState => ({
 	id,
 	version: 0,
+	generation: 0,
+	configuration: "",
+	pendingChannels: { lsp: [], lint: [] },
+	automaticScope: "delta",
 	turn: "",
 	baseline: null,
 	touched: [],
 	current: [],
 	pending: [],
+	delivery: [],
 	shown: {},
 	blocked: [],
 });
@@ -32,7 +44,10 @@ export class Metadata {
 	constructor(private readonly root: string) {}
 	private async dir(): Promise<string> {
 		const user = process.getuid?.() ?? hash(homedir()).slice(0, 10);
-		const base = join(process.env["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`), `metadata-v5-${user}`);
+		const base = join(
+			executionEnvironment()["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`),
+			`metadata-v6-${user}`,
+		);
 		await mkdir(base, { recursive: true, mode: 0o700 });
 		const info = await lstat(base);
 		if (
@@ -40,7 +55,7 @@ export class Metadata {
 			(process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0))
 		)
 			throw new Error("Unsafe metadata permissions");
-		const dir = join(base, hash(await realpath(this.root)));
+		const dir = join(base, await workspaceIdentity(await realpath(this.root)));
 		await mkdir(dir, { recursive: true, mode: 0o700 });
 		if ((await lstat(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
 		return dir;
@@ -52,10 +67,14 @@ export class Metadata {
 				!record(data) ||
 				data["id"] !== id ||
 				typeof data["version"] !== "number" ||
-				typeof data["turn"] !== "string"
+				typeof data["turn"] !== "string" ||
+				typeof data["generation"] !== "number" ||
+				typeof data["configuration"] !== "string" ||
+				!record(data["pendingChannels"]) ||
+				!["delta", "full"].includes(String(data["automaticScope"]))
 			)
 				throw new Error("Invalid metadata");
-			for (const key of ["touched", "current", "pending", "blocked"])
+			for (const key of ["touched", "current", "pending", "delivery", "blocked"])
 				if (!Array.isArray(data[key]) || !data[key].every((item: unknown) => typeof item === "string"))
 					throw new Error("Invalid metadata");
 			for (const key of ["shown", "baseline"])
@@ -64,6 +83,14 @@ export class Metadata {
 					(!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string"))
 				)
 					throw new Error("Invalid metadata");
+			const channels = data["pendingChannels"];
+			if (
+				!record(channels) ||
+				![channels["lsp"], channels["lint"]].every(
+					(paths) => Array.isArray(paths) && paths.every((path: unknown) => typeof path === "string"),
+				)
+			)
+				throw new Error("Invalid channel metadata");
 			return data as unknown as SessionState;
 		} catch (error) {
 			if (record(error) && error["code"] === "ENOENT") return empty(id);
@@ -147,7 +174,8 @@ export class Metadata {
 			signal.throwIfAborted();
 			if (change(state) === false) return state;
 			state.version++;
-			for (const key of ["touched", "current", "pending", "blocked"] as const) state[key] = [...new Set(state[key])];
+			for (const key of ["touched", "current", "pending", "delivery", "blocked"] as const)
+				state[key] = [...new Set(state[key])];
 			await writeFile(temp, JSON.stringify(state), { mode: 0o600 });
 			await rename(temp, path);
 			return state;
@@ -165,7 +193,7 @@ export class Metadata {
 	async end(id: string, signal: AbortSignal): Promise<void> {
 		// Retain a versioned tombstone until after competing old requests have failed their CAS.
 		await this.update(id, signal, (state) => {
-			Object.assign(state, { ...empty(id), version: state.version });
+			Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
 			state.turn = "__ended__";
 		});
 	}

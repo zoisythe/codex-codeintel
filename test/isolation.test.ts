@@ -20,7 +20,7 @@ async function fixture() {
 	await writeFile(join(root, "a.ts"), "before");
 	return root;
 }
-it("shares touched metadata without sharing Hook findings with MCP", async () => {
+it("persists scope metadata without diagnostic findings", async () => {
 	const root = await fixture();
 	const hook = new HookEngine(root, async (path) => ({
 		path,
@@ -29,7 +29,7 @@ it("shares touched metadata without sharing Hook findings with MCP", async () =>
 	}));
 	await hook.hook({ session_id: "s", hook_event_name: "SessionStart" }, new AbortController().signal);
 	await writeFile(join(root, "a.ts"), "after");
-	expect(await hook.hook({ session_id: "s" }, new AbortController().signal)).toContain("LSP not executed");
+	expect(await hook.hook({ session_id: "s" }, new AbortController().signal)).toContain("private finding");
 	const engine = new Engine(root);
 	const output = await engine.dispatch(
 		"check_diagnostics",

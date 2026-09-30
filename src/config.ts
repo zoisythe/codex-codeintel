@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { BUILTIN_SERVERS } from "../packages/lsp-tools-mcp/dist/lsp/server-definitions.js";
+import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
 import { record } from "./results.js";
 import { type Trust, workspaceTrust } from "./trust.js";
@@ -17,6 +18,7 @@ export interface Server {
 }
 export interface Config {
 	readonly schemaVersion: 1;
+	readonly automaticDiagnostics: Readonly<{ postToolUse: "delta" | "full" | "off"; stop: "delta" | "full" | "off" }>;
 	readonly javascript: "auto" | "biome" | "eslint" | "off";
 	readonly python: "auto" | "ruff" | "off";
 	readonly exclude: string[];
@@ -30,15 +32,15 @@ export interface Config {
 	readonly formatting: Readonly<{ tabSize: number; insertSpaces: boolean }>;
 }
 export function configPaths(root: string): { user: string; project: string; codex: string } {
-	for (const key of Object.keys(process.env))
+	for (const key of Object.keys(executionEnvironment()))
 		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
 			throw new Error(
 				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/migration-0.5.md`,
 			);
 	return {
-		user: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
+		user: join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
 		project: join(root, ".codex", "lsp-client.json"),
-		codex: join(process.env["CODEX_HOME"] ?? join(homedir(), ".codex"), "config.toml"),
+		codex: join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "config.toml"),
 	};
 }
 async function read(path: string): Promise<Record<string, unknown>> {
@@ -50,7 +52,17 @@ async function read(path: string): Promise<Record<string, unknown>> {
 			);
 		// Legacy trustedWorkspaces is accepted but grants no trust.
 		for (const key of Object.keys(value))
-			if (!["schemaVersion", "trustedWorkspaces", "lsp", "lint", "exclude", "formatting"].includes(key))
+			if (
+				![
+					"schemaVersion",
+					"trustedWorkspaces",
+					"lsp",
+					"lint",
+					"exclude",
+					"formatting",
+					"automaticDiagnostics",
+				].includes(key)
+			)
 				throw new Error(`Unknown configuration field ${key} in ${path}`);
 		return value;
 	} catch (error) {
@@ -145,7 +157,7 @@ export async function configuration(root: string): Promise<Config> {
 		if (record(data["lsp"]))
 			for (const [language, value] of Object.entries(data["lsp"]))
 				servers[language] = server(value, language, source);
-		for (const key of ["lint", "formatting"])
+		for (const key of ["lint", "formatting", "automaticDiagnostics"])
 			if (data[key] !== undefined && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
 	}
 	const extensions: Record<string, readonly string[]> = {};
@@ -196,8 +208,18 @@ export async function configuration(root: string): Promise<Config> {
 		typeof formatting.insertSpaces !== "boolean"
 	)
 		throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
+	const automaticDiagnostics = {
+		postToolUse: "delta",
+		stop: "full",
+		...(record(user["automaticDiagnostics"]) ? user["automaticDiagnostics"] : {}),
+		...(record(project["automaticDiagnostics"]) ? project["automaticDiagnostics"] : {}),
+	};
+	for (const [key, value] of Object.entries(automaticDiagnostics))
+		if (!["postToolUse", "stop"].includes(key) || !["delta", "full", "off"].includes(value))
+			throw new Error(`Invalid automaticDiagnostics.${key}`);
 	return freeze({
 		schemaVersion: 1,
+		automaticDiagnostics: automaticDiagnostics as Config["automaticDiagnostics"],
 		javascript,
 		python,
 		exclude,

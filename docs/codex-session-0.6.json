@@ -1,0 +1,68 @@
+{
+  "platform": "linux",
+  "bundleSha256": "2a5a4cae6b972c167ba1981899888236c16cae8a656733600cdf778f9096a29f",
+  "session": "01a0f247-7c06-7883-b406-7c4dab64260c",
+  "model": "gpt-6.1-sol",
+  "isolatedHome": true,
+  "hookTrustBypassForTest": true,
+  "diagnosticMcpCalls": 0,
+  "editTools": [
+    "apply_patch",
+    "apply_patch"
+  ],
+  "hooks": [
+    {
+      "event": "SessionStart",
+      "status": 0,
+      "output": null
+    },
+    {
+      "event": "PreToolUse",
+      "status": 0,
+      "output": null
+    },
+    {
+      "event": "PostToolUse",
+      "status": 0,
+      "output": {
+        "hookSpecificOutput": {
+          "hookEventName": "PostToolUse",
+          "additionalContext": "session=01a0f247-7c06-7883-b406-7c4dab64260c\nAutomatic delta: complete; checked=1/1 errors=1 pending=0\nLSP/lint channels: complete; checked=1 pending=0 skipped=0 failed=0\nmain.py:1:14 error [ty/invalid-assignment] Object of type `Literal[\"wrong\"]` is not assignable to `int`\nmain.py channels: lsp=complete lint=skipped; pull-full; lint off or no matching Runner configuration"
+        }
+      }
+    },
+    {
+      "event": "PreToolUse",
+      "status": 0,
+      "output": null
+    },
+    {
+      "event": "PostToolUse",
+      "status": 0,
+      "output": {
+        "hookSpecificOutput": {
+          "hookEventName": "PostToolUse",
+          "additionalContext": "session=01a0f247-7c06-7883-b406-7c4dab64260c\nAutomatic delta: complete; checked=1/1 errors=0 pending=0\nmain.py: previous diagnostics cleared"
+        }
+      }
+    },
+    {
+      "event": "Stop",
+      "status": 0,
+      "output": {
+        "systemMessage": "session=01a0f247-7c06-7883-b406-7c4dab64260c\nAutomatic full: complete; checked=1/1 errors=0 pending=0"
+      }
+    },
+    {
+      "event": "SessionEnd",
+      "status": 0,
+      "output": null
+    }
+  ],
+  "observedMessages": [
+    "I\u2019ll make the two requested edits and record any automatic Hook feedback after each call.\n",
+    "The automatic Hook reported: `error [ty/invalid-assignment] Object of type Literal[\"wrong\"] is not assignable to int`. I\u2019ll now restore `value: int = 1`.\n",
+    "The automatic Hook confirmed `errors=0` and `main.py: previous diagnostics cleared`.\n",
+    "Completed exactly two separate `apply_patch` calls and restored `value: int = 1`.\n\nReceived both automatic feedback messages:\n\n- Type error: `error [ty/invalid-assignment]`\n- Clearing confirmation: `main.py: previous diagnostics cleared`"
+  ]
+}

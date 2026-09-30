@@ -27,8 +27,11 @@ export async function runHookCli(): Promise<void> {
 		const output = await new HookEngine(root).hook(parsed, signal);
 		if (output) process.stdout.write(`${output}\n`);
 	} catch (error) {
+		const context = signal.aborted
+			? "Codex LSP: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results."
+			: `Codex LSP unavailable: ${message(error).slice(0, 300)}`;
 		process.stdout.write(
-			`${JSON.stringify({ systemMessage: signal.aborted ? "Codex LSP: Hook budget reached; unfinished checks remain pending. Discovery will retry from the last committed baseline. LSP not executed." : `Codex LSP unavailable: ${message(error).slice(0, 300)}` })}\n`,
+			`${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}\n`,
 		);
 	}
 }

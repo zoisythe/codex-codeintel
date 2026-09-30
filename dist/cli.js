@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 // src/codex-hook.ts
-import { realpath as realpath5 } from "node:fs/promises";
+import { realpath as realpath7 } from "node:fs/promises";
 import { stdin } from "node:process";
 
 // src/hook-engine.ts
-import { readFile as readFile8 } from "node:fs/promises";
+import { readFile as readFile13 } from "node:fs/promises";
 
 // src/config.ts
 import { readFile as readFile3 } from "node:fs/promises";
@@ -107,6 +107,32 @@ var BUILTIN_SERVERS = {
   "kotlin-ls": { command: ["kotlin-lsp"], extensions: [".kt", ".kts"] }
 };
 
+// src/environment.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
+  if (process.env["CODEX_HOME"]) return;
+  let child = dirname(script);
+  for (let parent = dirname(child); parent !== child; parent = dirname(child)) {
+    if (basename(parent) === "plugins" && basename(child) === "cache") {
+      process.env["CODEX_HOME"] = dirname(parent);
+      return;
+    }
+    child = parent;
+  }
+}
+var executions = new AsyncLocalStorage();
+function executionEnvironment() {
+  return executions.getStore()?.environment ?? process.env;
+}
+function automaticExecution() {
+  return executions.getStore()?.automatic ?? false;
+}
+function withExecution(environment, automatic, action) {
+  return executions.run({ environment, automatic }, action);
+}
+
 // src/files.ts
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -185,7 +211,13 @@ async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 
     const { stdout } = await exec(
       "git",
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
-      { cwd: scope2, timeout: 5e3, maxBuffer: 4 * 1024 * 1024, ...signal ? { signal } : {} }
+      {
+        cwd: scope2,
+        env: executionEnvironment(),
+        timeout: 5e3,
+        maxBuffer: 4 * 1024 * 1024,
+        ...signal ? { signal } : {}
+      }
     );
     names = [
       ...new Set(
@@ -1302,15 +1334,15 @@ async function workspaceTrust(root, path) {
 
 // src/config.ts
 function configPaths(root) {
-  for (const key of Object.keys(process.env))
+  for (const key of Object.keys(executionEnvironment()))
     if (key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG") || key === "CODEX_LSP_TRUST_PROJECT")
       throw new Error(
         `Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/migration-0.5.md`
       );
   return {
-    user: join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
+    user: join2(executionEnvironment()["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
     project: join2(root, ".codex", "lsp-client.json"),
-    codex: join2(process.env["CODEX_HOME"] ?? join2(homedir(), ".codex"), "config.toml")
+    codex: join2(executionEnvironment()["CODEX_HOME"] ?? join2(homedir(), ".codex"), "config.toml")
   };
 }
 async function read(path) {
@@ -1321,7 +1353,15 @@ async function read(path) {
         `Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`
       );
     for (const key of Object.keys(value))
-      if (!["schemaVersion", "trustedWorkspaces", "lsp", "lint", "exclude", "formatting"].includes(key))
+      if (![
+        "schemaVersion",
+        "trustedWorkspaces",
+        "lsp",
+        "lint",
+        "exclude",
+        "formatting",
+        "automaticDiagnostics"
+      ].includes(key))
         throw new Error(`Unknown configuration field ${key} in ${path}`);
     return value;
   } catch (error) {
@@ -1409,7 +1449,7 @@ async function configuration(root) {
     if (record(data["lsp"]))
       for (const [language, value] of Object.entries(data["lsp"]))
         servers[language] = server(value, language, source);
-    for (const key of ["lint", "formatting"])
+    for (const key of ["lint", "formatting", "automaticDiagnostics"])
       if (data[key] !== void 0 && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
   }
   const extensions = {};
@@ -1447,8 +1487,18 @@ async function configuration(root) {
   };
   if (!Number.isInteger(formatting.tabSize) || formatting.tabSize < 1 || formatting.tabSize > 16 || typeof formatting.insertSpaces !== "boolean")
     throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
+  const automaticDiagnostics = {
+    postToolUse: "delta",
+    stop: "full",
+    ...record(user["automaticDiagnostics"]) ? user["automaticDiagnostics"] : {},
+    ...record(project["automaticDiagnostics"]) ? project["automaticDiagnostics"] : {}
+  };
+  for (const [key, value] of Object.entries(automaticDiagnostics))
+    if (!["postToolUse", "stop"].includes(key) || !["delta", "full", "off"].includes(value))
+      throw new Error(`Invalid automaticDiagnostics.${key}`);
   return freeze({
     schemaVersion: 1,
+    automaticDiagnostics,
     javascript,
     python,
     exclude,
@@ -1462,19 +1512,209 @@ async function configuration(root) {
   });
 }
 
+// src/metadata.ts
+import { randomUUID } from "node:crypto";
+import { lstat as lstat2, mkdir, readdir as readdir2, readFile as readFile5, realpath as realpath4, rename, rm, writeFile } from "node:fs/promises";
+import { homedir as homedir3, tmpdir } from "node:os";
+import { join as join3 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
+// src/service-identity.ts
+import { readFile as readFile4, realpath as realpath3 } from "node:fs/promises";
+import { homedir as homedir2 } from "node:os";
+import { resolve as resolve2 } from "node:path";
+var SERVICE_PROTOCOL = 1;
+var bundle;
+function bundleIdentity() {
+  bundle ??= readFile4(new URL(import.meta.url), "utf8").then(hash);
+  return bundle;
+}
+async function workspaceIdentity(root) {
+  const home = resolve2(executionEnvironment()["CODEX_HOME"] ?? resolve2(homedir2(), ".codex"));
+  return hash(
+    JSON.stringify([
+      process.getuid?.() ?? homedir2(),
+      await realpath3(root),
+      await realpath3(home).catch(() => home),
+      await bundleIdentity(),
+      SERVICE_PROTOCOL
+    ])
+  );
+}
+
+// src/metadata.ts
+var empty = (id) => ({
+  id,
+  version: 0,
+  generation: 0,
+  configuration: "",
+  pendingChannels: { lsp: [], lint: [] },
+  automaticScope: "delta",
+  turn: "",
+  baseline: null,
+  touched: [],
+  current: [],
+  pending: [],
+  delivery: [],
+  shown: {},
+  blocked: []
+});
+var Metadata = class {
+  constructor(root) {
+    this.root = root;
+  }
+  async dir() {
+    const user = process.getuid?.() ?? hash(homedir3()).slice(0, 10);
+    const base = join3(
+      executionEnvironment()["CODEX_LSP_CACHE"] ?? join3(tmpdir(), `codex-lsp-${user}`),
+      `metadata-v6-${user}`
+    );
+    await mkdir(base, { recursive: true, mode: 448 });
+    const info = await lstat2(base);
+    if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
+      throw new Error("Unsafe metadata permissions");
+    const dir = join3(base, await workspaceIdentity(await realpath4(this.root)));
+    await mkdir(dir, { recursive: true, mode: 448 });
+    if ((await lstat2(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
+    return dir;
+  }
+  async load(path, id) {
+    try {
+      const data = JSON.parse(await readFile5(path, "utf8"));
+      if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string" || typeof data["generation"] !== "number" || typeof data["configuration"] !== "string" || !record(data["pendingChannels"]) || !["delta", "full"].includes(String(data["automaticScope"])))
+        throw new Error("Invalid metadata");
+      for (const key of ["touched", "current", "pending", "delivery", "blocked"])
+        if (!Array.isArray(data[key]) || !data[key].every((item) => typeof item === "string"))
+          throw new Error("Invalid metadata");
+      for (const key of ["shown", "baseline"])
+        if (!(key === "baseline" && data[key] === null) && (!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string")))
+          throw new Error("Invalid metadata");
+      const channels = data["pendingChannels"];
+      if (!record(channels) || ![channels["lsp"], channels["lint"]].every(
+        (paths) => Array.isArray(paths) && paths.every((path2) => typeof path2 === "string")
+      ))
+        throw new Error("Invalid channel metadata");
+      return data;
+    } catch (error) {
+      if (record(error) && error["code"] === "ENOENT") return empty(id);
+      throw error;
+    }
+  }
+  async read(id) {
+    return this.load(join3(await this.dir(), `${hash(id)}.json`), id);
+  }
+  async ids() {
+    const dir = await this.dir();
+    const ids = [];
+    for (const file of await readdir2(dir))
+      if (file.endsWith(".json")) {
+        try {
+          const value = JSON.parse(await readFile5(join3(dir, file), "utf8"));
+          if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
+            ids.push(value["id"]);
+        } catch {
+        }
+      }
+    return ids.sort();
+  }
+  async reclaim(lock) {
+    let owner;
+    try {
+      owner = JSON.parse(await readFile5(join3(lock, "owner"), "utf8"));
+    } catch {
+      return;
+    }
+    if (!record(owner) || typeof owner["pid"] !== "number" || typeof owner["nonce"] !== "string") return;
+    try {
+      process.kill(owner["pid"], 0);
+      return;
+    } catch (error) {
+      if (!record(error) || error["code"] !== "ESRCH") return;
+    }
+    try {
+      const current = JSON.parse(await readFile5(join3(lock, "owner"), "utf8"));
+      if (!record(current) || current["nonce"] !== owner["nonce"]) return;
+    } catch {
+      return;
+    }
+    await rename(lock, `${lock}.abandoned-${hash(owner["nonce"])}`).catch((error) => {
+      if (!record(error) || !["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
+    });
+  }
+  async update(id, signal, change) {
+    signal.throwIfAborted();
+    const dir = await this.dir();
+    const path = join3(dir, `${hash(id)}.json`);
+    const lock = `${path}.lock`;
+    const nonce = randomUUID();
+    const candidate = `${lock}.claim-${nonce}`;
+    const released = `${lock}.released-${nonce}`;
+    const temp = `${path}.${nonce}.tmp`;
+    const deadline = Date.now() + 1e3;
+    let acquired = false;
+    try {
+      await mkdir(candidate, { mode: 448 });
+      await writeFile(join3(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
+      while (!acquired) {
+        signal.throwIfAborted();
+        try {
+          await rename(candidate, lock);
+          acquired = true;
+        } catch (error) {
+          if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
+          await this.reclaim(lock);
+          if (Date.now() >= deadline) throw new Error("Metadata update busy; retry");
+          await delay(10, void 0, { signal });
+        }
+      }
+      const state = await this.load(path, id);
+      signal.throwIfAborted();
+      if (change(state) === false) return state;
+      state.version++;
+      for (const key of ["touched", "current", "pending", "delivery", "blocked"])
+        state[key] = [...new Set(state[key])];
+      await writeFile(temp, JSON.stringify(state), { mode: 384 });
+      await rename(temp, path);
+      return state;
+    } finally {
+      await rm(temp, { force: true });
+      await rm(candidate, { recursive: true, force: true });
+      if (acquired) {
+        await rename(lock, released);
+        await rm(released, { recursive: true, force: true });
+      }
+    }
+  }
+  async end(id, signal) {
+    await this.update(id, signal, (state) => {
+      Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
+      state.turn = "__ended__";
+    });
+  }
+};
+
+// src/runtime.ts
+import { realpath as realpath6 } from "node:fs/promises";
+import { isAbsolute as isAbsolute7 } from "node:path";
+
+// src/engine.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { readFile as readFile11, stat as stat5 } from "node:fs/promises";
+import { relative as relative4 } from "node:path";
+
 // src/identity.ts
-import { readFile as readFile6, stat as stat4 } from "node:fs/promises";
-import { dirname as dirname3, extname as extname3, join as join8, resolve as resolve3 } from "node:path";
+import { readFile as readFile8, stat as stat4 } from "node:fs/promises";
+import { dirname as dirname4, extname as extname3, join as join9, resolve as resolve4 } from "node:path";
 
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access as access3, readFile as readFile5, realpath as realpath3, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
-import { basename, dirname as dirname2, extname as extname2, join as join7 } from "node:path";
+import { access as access3, readFile as readFile7, realpath as realpath5, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
+import { basename as basename3, dirname as dirname3, extname as extname2, join as join8 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/process.js
 import * as childProcess from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { delimiter, join as join3 } from "node:path";
+import { delimiter, join as join4 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/cleanup-errors.js
 function reportBestEffortCleanupError(operation, error) {
@@ -1557,9 +1797,9 @@ function validateCwd(cwd) {
   }
 }
 function wrap(proc) {
-  const exitedPromise = new Promise((resolve7) => {
-    proc.once("close", (code) => resolve7(code ?? 0));
-    proc.once("error", () => resolve7(1));
+  const exitedPromise = new Promise((resolve8) => {
+    proc.once("close", (code) => resolve8(code ?? 0));
+    proc.once("error", () => resolve8(1));
   });
   if (!proc.stdin || !proc.stdout || !proc.stderr) {
     throw new LspProcessSpawnError("Spawned process is missing one of stdin/stdout/stderr pipes");
@@ -1675,7 +1915,7 @@ function resolveWindowsCommand(command, env) {
   const extensions = getWindowsPathExtensions(env);
   for (const baseDirectory of baseDirectories) {
     for (const extension of extensions) {
-      const candidate = baseDirectory ? join3(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
+      const candidate = baseDirectory ? join4(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
       if (existsSync(candidate))
         return candidate;
     }
@@ -1765,23 +2005,23 @@ function parseLint(runner, data, path, content) {
 }
 
 // src/log.ts
-import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
-import { homedir as homedir2, tmpdir } from "node:os";
-import { join as join4 } from "node:path";
-var instance = `${process.pid}-${randomUUID()}`;
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { appendFile, mkdir as mkdir2, rename as rename2, rm as rm2, stat } from "node:fs/promises";
+import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
+import { join as join5 } from "node:path";
+var instance = `${process.pid}-${randomUUID2()}`;
 var queue = Promise.resolve();
 function logEvent(event) {
   queue = queue.then(async () => {
-    const dir = join4(
-      process.env["CODEX_LSP_CACHE"] ?? join4(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir2()).slice(0, 10)}`),
+    const dir = join5(
+      executionEnvironment()["CODEX_LSP_CACHE"] ?? join5(tmpdir2(), `codex-lsp-${process.getuid?.() ?? hash(homedir4()).slice(0, 10)}`),
       "logs-v5"
     );
-    await mkdir(dir, { recursive: true, mode: 448 });
-    const path = join4(dir, `${instance}.log`);
+    await mkdir2(dir, { recursive: true, mode: 448 });
+    const path = join5(dir, `${instance}.log`);
     if ((await stat(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
-      await rm(`${path}.1`, { force: true });
-      await rename(path, `${path}.1`);
+      await rm2(`${path}.1`, { force: true });
+      await rename2(path, `${path}.1`);
     }
     await appendFile(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${event}
 `, { mode: 384 });
@@ -1790,17 +2030,17 @@ function logEvent(event) {
 }
 
 // src/prepared-tools.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile4, rename as rename2, writeFile } from "node:fs/promises";
-import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
+import { access, lstat as lstat3, mkdir as mkdir3, readFile as readFile6, rename as rename3, writeFile as writeFile2 } from "node:fs/promises";
+import { homedir as homedir5 } from "node:os";
+import { isAbsolute as isAbsolute4, join as join6 } from "node:path";
 function directory() {
-  return join5(process.env["CODEX_HOME"] ?? join5(homedir3(), ".codex"), "cache", "codex-lsp-v5", "tools");
+  return join6(executionEnvironment()["CODEX_HOME"] ?? join6(homedir5(), ".codex"), "cache", "codex-lsp-v5", "tools");
 }
 async function preparedRuff() {
   try {
-    const value = JSON.parse(await readFile4(join5(directory(), "ruff.json"), "utf8"));
+    const value = JSON.parse(await readFile6(join6(directory(), "ruff.json"), "utf8"));
     if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute4(value["executable"]))
       return void 0;
     await access(value["executable"], constants.X_OK);
@@ -1813,20 +2053,20 @@ async function rememberRuff(executable3) {
   if (!isAbsolute4(executable3)) throw new Error("Invalid prepared Ruff path");
   await access(executable3, constants.X_OK);
   const dir = directory();
-  await mkdir2(dir, { recursive: true, mode: 448 });
-  const info = await lstat2(dir);
+  await mkdir3(dir, { recursive: true, mode: 448 });
+  const info = await lstat3(dir);
   if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
     throw new Error("Unsafe prepared-tool directory");
-  const temporary2 = join5(dir, `${randomUUID2()}.tmp`);
-  await writeFile(temporary2, JSON.stringify({ executable: executable3 }), { mode: 384 });
-  await rename2(temporary2, join5(dir, "ruff.json"));
+  const temporary2 = join6(dir, `${randomUUID3()}.tmp`);
+  await writeFile2(temporary2, JSON.stringify({ executable: executable3 }), { mode: 384 });
+  await rename3(temporary2, join6(dir, "ruff.json"));
 }
 
 // src/tool-resolution.ts
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { constants as constants2 } from "node:fs";
 import { access as access2, stat as stat2 } from "node:fs/promises";
-import { delimiter as delimiter2, dirname, extname, isAbsolute as isAbsolute5, join as join6, resolve as resolve2 } from "node:path";
+import { basename as basename2, delimiter as delimiter2, dirname as dirname2, extname, isAbsolute as isAbsolute5, join as join7, resolve as resolve3 } from "node:path";
 var temporary = {
   ty: { ecosystem: "python", packages: ["ty"] },
   ruff: { ecosystem: "python", packages: ["ruff"] },
@@ -1854,9 +2094,9 @@ function suffixes(name) {
   return process.platform === "win32" && !/\.(?:exe|com|cmd|bat)$/i.test(name) ? [".exe", ".com", ".cmd", ".bat", ""] : [""];
 }
 async function pathExecutable(name) {
-  for (const dir of (process.env["PATH"] ?? "").split(delimiter2).filter(Boolean)) {
+  for (const dir of (executionEnvironment()["PATH"] ?? "").split(delimiter2).filter(Boolean)) {
     for (const suffix of suffixes(name)) {
-      const path = resolve2(dir, name + suffix);
+      const path = resolve3(dir, name + suffix);
       if (await executable(path)) return path;
     }
   }
@@ -1867,17 +2107,17 @@ async function resolution(command, source, note) {
   return {
     command,
     source,
-    identity: hash(JSON.stringify([command, source, info?.size, info?.mtimeMs, process.env["PATH"]])),
+    identity: hash(JSON.stringify([command, source, info?.size, info?.mtimeMs, executionEnvironment()])),
     ...note ? { note } : {}
   };
 }
-var requestTools = new AsyncLocalStorage();
+var requestTools = new AsyncLocalStorage2();
 function withToolResolution(action) {
   return requestTools.run(/* @__PURE__ */ new Map(), action);
 }
 function resolveTool(...args) {
   const cache = requestTools.getStore();
-  const key = JSON.stringify([args[0], dirname(resolve2(args[0], args[1])), ...args.slice(2)]);
+  const key = JSON.stringify([args[0], dirname2(resolve3(args[0], args[1])), ...args.slice(2)]);
   const existing = cache?.get(key);
   if (existing) return existing;
   const task = findTool(...args);
@@ -1887,30 +2127,37 @@ function resolveTool(...args) {
 async function findTool(root, path, command, explicit = false, allowTemporary = true) {
   const name = command[0];
   if (!name) throw new Error("Empty command");
+  const executableName = basename2(name).replace(/\.(?:exe|cmd|bat)$/i, "");
+  if (automaticExecution() && (["uvx", "npx", "pipx"].includes(executableName) || executableName === "uv" && command[1] === "tool" && command[2] === "run"))
+    return resolution(
+      [...command],
+      "missing",
+      `Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`
+    );
   if (explicit) {
-    const entry = isAbsolute5(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
+    const entry = isAbsolute5(name) || name.includes("/") || name.includes("\\") ? resolve3(root, name) : await pathExecutable(name);
     return resolution(
       [entry ?? name, ...command.slice(1)],
       entry && await executable(entry) ? "explicit" : "missing",
       entry && await executable(entry) ? void 0 : `Explicit command missing: ${name}; no fallback`
     );
   }
-  let dir = dirname(resolve2(root, path));
+  let dir = dirname2(resolve3(root, path));
   while (inside(root, dir)) {
     for (const candidate of [
       ...suffixes(name).map(
-        (suffix) => join6(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", name + suffix)
+        (suffix) => join7(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", name + suffix)
       ),
-      ...suffixes(name).map((suffix) => join6(dir, "node_modules", ".bin", name + suffix))
+      ...suffixes(name).map((suffix) => join7(dir, "node_modules", ".bin", name + suffix))
     ])
       if (await executable(candidate)) return resolution([candidate, ...command.slice(1)], "project");
     if (dir === root) break;
-    dir = dirname(dir);
+    dir = dirname2(dir);
   }
   const local = await pathExecutable(name);
   if (local) return resolution([local, ...command.slice(1)], "PATH");
   const plan = temporary[name];
-  if (allowTemporary && plan) {
+  if (allowTemporary && !automaticExecution() && plan) {
     if (plan.ecosystem === "python") {
       for (const [launcher, prefix] of [
         ["uvx", ["--isolated", "--from", plan.packages[0] ?? name]],
@@ -1970,10 +2217,11 @@ function codeLanguage(config, path) {
 // src/runners.ts
 async function run(command, args, cwd, signal, input) {
   signal.throwIfAborted();
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const prepared = createSpawnCommand([command, ...args]);
     const child = spawn2(prepared.command, prepared.args, {
       cwd,
+      env: executionEnvironment(),
       shell: prepared.shell,
       detached: process.platform !== "win32",
       windowsHide: true,
@@ -2012,7 +2260,7 @@ async function run(command, args, cwd, signal, input) {
       if (code !== 0 && code !== 1 && !signal.aborted) void logEvent("abnormal-exit");
       if (signal.aborted) reject(new Error("Runner cancelled"));
       else if (exceeded) reject(new Error("Runner exceeded time/output budget"));
-      else resolve7({ stdout, stderr, code: code ?? -1 });
+      else resolve8({ stdout, stderr, code: code ?? -1 });
     });
     child.stdin.on("error", () => {
     });
@@ -2028,20 +2276,20 @@ async function exists(path) {
   }
 }
 async function configured(root, path, names) {
-  let dir = dirname2(path);
+  let dir = dirname3(path);
   while (inside(root, dir)) {
-    for (const name of names) if (await exists(join7(dir, name))) return true;
+    for (const name of names) if (await exists(join8(dir, name))) return true;
     if (dir === root) break;
-    dir = dirname2(dir);
+    dir = dirname3(dir);
   }
   return false;
 }
 async function executable2(root, target, packageName, entry) {
-  let dir = dirname2(target);
+  let dir = dirname3(target);
   while (inside(root, dir)) {
-    const path = join7(dir, "node_modules", packageName, entry);
-    if (await exists(path)) return realpath3(path);
-    const parent = dirname2(dir);
+    const path = join8(dir, "node_modules", packageName, entry);
+    if (await exists(path)) return realpath5(path);
+    const parent = dirname3(dir);
     if (dir === root) break;
     dir = parent;
   }
@@ -2065,14 +2313,14 @@ async function select(root, path, formatting = false, provided, active = false, 
     if (tool2.source === "missing") {
       const prepared = await preparedRuff();
       if (prepared) return { name: "ruff", command: prepared, prefix: [], source: "prepared" };
-      if (!active || !config.trusted)
+      if (!active || automaticExecution() || !config.trusted)
         throw new Error(
           "Ruff unavailable: no local or prepared executable; run trusted active MCP diagnostics to prepare it. Hook never downloads tools"
         );
       tool2 = await resolveTool(root, path, ["ruff"]);
       if (tool2.source === "missing") throw new Error(tool2.note);
       const launcher = tool2.command[0] ?? "";
-      if (/^uvx?(?:\.exe)?$/.test(basename(launcher))) {
+      if (/^uvx?(?:\.exe)?$/.test(basename3(launcher))) {
         const prepared2 = await run(
           launcher,
           [...tool2.command.slice(1, -1), "python", "-c", "import shutil; print(shutil.which('ruff') or '')"],
@@ -2126,20 +2374,17 @@ async function lint(root, path, signal, provided, active = false) {
     const absolute = await workspacePath(root, path);
     if (!languageFor(config, path))
       return { path, state: "skipped", findings: [], note: "Language disabled or unsupported" };
-    const server2 = await resolveServer(root, absolute, config);
-    if (server2.tool.source === "missing")
-      return { path, state: "skipped", findings: [], note: server2.tool.note ?? "LSP unavailable" };
     const runner = await select(root, absolute, false, config, active, signal);
     if (!runner)
       return { path, state: "skipped", findings: [], note: "lint off or no matching Runner configuration" };
     const args = runner.name === "biome" ? ["lint", "--reporter=json", "--max-diagnostics=1000", absolute] : runner.name === "eslint" ? ["--format", "json", absolute] : ["check", "--no-cache", "--output-format", "json", "--", absolute];
     const result = await measured(
       "lint",
-      () => run(runner.command, [...runner.prefix, ...args], dirname2(absolute), signal)
+      () => run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal)
     );
     if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr || `Runner exit ${result.code}`);
     const data = JSON.parse(result.stdout);
-    const findings = parseLint(runner.name, data, path, await readFile5(absolute, "utf8"));
+    const findings = parseLint(runner.name, data, path, await readFile7(absolute, "utf8"));
     return { path, state: "complete", findings };
   } catch (error) {
     return { path, state: signal.aborted ? "pending" : "failed", findings: [], note: `lint: ${message(error)}` };
@@ -2151,14 +2396,14 @@ async function formatWithRunner(root, path, signal, provided) {
   const absolute = await workspacePath(root, path);
   const runner = await select(root, absolute, true, config, true, signal);
   if (!runner || runner.name === "eslint") return void 0;
-  const before = await readFile5(absolute, "utf8");
+  const before = await readFile7(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
-  const result = await run(runner.command, [...runner.prefix, ...args], dirname2(absolute), signal, before);
+  const result = await run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
-  if (await readFile5(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
+  if (await readFile7(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   if (before === result.stdout) return `Unchanged: ${path}`;
   signal.throwIfAborted();
-  await writeFile2(absolute, result.stdout);
+  await writeFile3(absolute, result.stdout);
   return `Formatted: ${path}`;
 }
 async function preflightRunner(root, path, config, signal) {
@@ -2209,388 +2454,43 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const runners = /* @__PURE__ */ new Map();
   for (const path of paths) {
     signal.throwIfAborted();
-    const absolute = resolve3(root, path);
-    const key = `${dirname3(absolute)}:${extname3(path)}`;
+    const absolute = resolve4(root, path);
+    const key = `${dirname4(absolute)}:${extname3(path)}`;
     if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute, config));
-    let dir = dirname3(absolute);
+    let dir = dirname4(absolute);
     while (inside(root, dir)) {
       dirs.add(dir);
       if (dir === root) break;
-      dir = dirname3(dir);
+      dir = dirname4(dir);
     }
   }
   const contents = [];
   for (const dir of [...dirs].sort())
     for (const name of CONFIGS) {
       signal.throwIfAborted();
-      const path = join8(dir, name);
+      const path = join9(dir, name);
       try {
         if ((await stat4(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
-        contents.push(path, hash(await readFile6(path, { encoding: "utf8", signal })));
+        contents.push(path, hash(await readFile8(path, { encoding: "utf8", signal })));
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
     }
-  const representatives = [...new Map(paths.map((path) => [`${dirname3(path)}:${extname3(path)}`, path])).values()];
+  const representatives = [...new Map(paths.map((path) => [`${dirname4(path)}:${extname3(path)}`, path])).values()];
   const servers = lsp ? await Promise.all(
     representatives.map((path) => resolveServer(root, path, config).catch((error) => String(error)))
   ) : [];
-  return hash(JSON.stringify([config.version, contents, [...runners].sort(), servers]));
+  return hash(JSON.stringify([config.version, executionEnvironment(), contents, [...runners].sort(), servers]));
 }
-
-// src/metadata.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { lstat as lstat3, mkdir as mkdir3, readdir as readdir2, readFile as readFile7, realpath as realpath4, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
-import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
-import { join as join9 } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-var empty = (id) => ({
-  id,
-  version: 0,
-  turn: "",
-  baseline: null,
-  touched: [],
-  current: [],
-  pending: [],
-  shown: {},
-  blocked: []
-});
-var Metadata = class {
-  constructor(root) {
-    this.root = root;
-  }
-  async dir() {
-    const user = process.getuid?.() ?? hash(homedir4()).slice(0, 10);
-    const base = join9(process.env["CODEX_LSP_CACHE"] ?? join9(tmpdir2(), `codex-lsp-${user}`), `metadata-v5-${user}`);
-    await mkdir3(base, { recursive: true, mode: 448 });
-    const info = await lstat3(base);
-    if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
-      throw new Error("Unsafe metadata permissions");
-    const dir = join9(base, hash(await realpath4(this.root)));
-    await mkdir3(dir, { recursive: true, mode: 448 });
-    if ((await lstat3(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
-    return dir;
-  }
-  async load(path, id) {
-    try {
-      const data = JSON.parse(await readFile7(path, "utf8"));
-      if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string")
-        throw new Error("Invalid metadata");
-      for (const key of ["touched", "current", "pending", "blocked"])
-        if (!Array.isArray(data[key]) || !data[key].every((item) => typeof item === "string"))
-          throw new Error("Invalid metadata");
-      for (const key of ["shown", "baseline"])
-        if (!(key === "baseline" && data[key] === null) && (!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string")))
-          throw new Error("Invalid metadata");
-      return data;
-    } catch (error) {
-      if (record(error) && error["code"] === "ENOENT") return empty(id);
-      throw error;
-    }
-  }
-  async read(id) {
-    return this.load(join9(await this.dir(), `${hash(id)}.json`), id);
-  }
-  async ids() {
-    const dir = await this.dir();
-    const ids = [];
-    for (const file of await readdir2(dir))
-      if (file.endsWith(".json")) {
-        try {
-          const value = JSON.parse(await readFile7(join9(dir, file), "utf8"));
-          if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
-            ids.push(value["id"]);
-        } catch {
-        }
-      }
-    return ids.sort();
-  }
-  async reclaim(lock) {
-    let owner;
-    try {
-      owner = JSON.parse(await readFile7(join9(lock, "owner"), "utf8"));
-    } catch {
-      return;
-    }
-    if (!record(owner) || typeof owner["pid"] !== "number" || typeof owner["nonce"] !== "string") return;
-    try {
-      process.kill(owner["pid"], 0);
-      return;
-    } catch (error) {
-      if (!record(error) || error["code"] !== "ESRCH") return;
-    }
-    try {
-      const current = JSON.parse(await readFile7(join9(lock, "owner"), "utf8"));
-      if (!record(current) || current["nonce"] !== owner["nonce"]) return;
-    } catch {
-      return;
-    }
-    await rename3(lock, `${lock}.abandoned-${hash(owner["nonce"])}`).catch((error) => {
-      if (!record(error) || !["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
-    });
-  }
-  async update(id, signal, change) {
-    signal.throwIfAborted();
-    const dir = await this.dir();
-    const path = join9(dir, `${hash(id)}.json`);
-    const lock = `${path}.lock`;
-    const nonce = randomUUID3();
-    const candidate = `${lock}.claim-${nonce}`;
-    const released = `${lock}.released-${nonce}`;
-    const temp = `${path}.${nonce}.tmp`;
-    const deadline = Date.now() + 1e3;
-    let acquired = false;
-    try {
-      await mkdir3(candidate, { mode: 448 });
-      await writeFile3(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
-      while (!acquired) {
-        signal.throwIfAborted();
-        try {
-          await rename3(candidate, lock);
-          acquired = true;
-        } catch (error) {
-          if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
-          await this.reclaim(lock);
-          if (Date.now() >= deadline) throw new Error("Metadata update busy; retry");
-          await delay(10, void 0, { signal });
-        }
-      }
-      const state = await this.load(path, id);
-      signal.throwIfAborted();
-      if (change(state) === false) return state;
-      state.version++;
-      for (const key of ["touched", "current", "pending", "blocked"]) state[key] = [...new Set(state[key])];
-      await writeFile3(temp, JSON.stringify(state), { mode: 384 });
-      await rename3(temp, path);
-      return state;
-    } finally {
-      await rm2(temp, { force: true });
-      await rm2(candidate, { recursive: true, force: true });
-      if (acquired) {
-        await rename3(lock, released);
-        await rm2(released, { recursive: true, force: true });
-      }
-    }
-  }
-  async end(id, signal) {
-    await this.update(id, signal, (state) => {
-      Object.assign(state, { ...empty(id), version: state.version });
-      state.turn = "__ended__";
-    });
-  }
-};
-
-// src/hook-engine.ts
-var HookEngine = class {
-  constructor(root, linter) {
-    this.root = root;
-    this.store = new Metadata(root);
-    this.linter = linter ?? (async (path, signal) => await lint(root, path, signal, this.config) ?? {
-      path,
-      state: "skipped",
-      findings: [],
-      note: "lint requires workspace trust"
-    });
-  }
-  async hook(input, signal) {
-    const id = text(input["session_id"]);
-    if (!id)
-      return JSON.stringify({ systemMessage: "Codex LSP: missing session_id; automatic checking unavailable" });
-    const event = text(input["hook_event_name"], "PostToolUse");
-    if (event === "SessionEnd") {
-      await this.store.end(id, signal);
-      return "";
-    }
-    const stopping = event === "Stop" || event === "SubagentStop";
-    if (stopping && input["stop_hook_active"] === true) return "";
-    const initial = await this.store.read(id);
-    if (event === "PreToolUse" && initial.baseline) {
-      await this.store.update(id, signal, (state2) => {
-        const turn = text(input["turn_id"]);
-        if (turn && turn !== state2.turn) {
-          state2.turn = turn;
-          state2.current = [];
-        }
-      });
-      return "";
-    }
-    const config = await configuration(this.root);
-    this.config = config;
-    const snapshot = await inventory(this.root, 1e4, signal, config.exclude);
-    if (!snapshot.complete)
-      return JSON.stringify({
-        systemMessage: "Codex LSP: change discovery incomplete; baseline retained; narrow scope with check_diagnostics scope=paths run=active"
-      });
-    const changed = initial.baseline ? [...snapshot.files].filter(([path, version]) => initial.baseline?.[path] !== version).map(([path]) => path) : [];
-    const deleted = /* @__PURE__ */ new Set();
-    for (const path of initial.touched) {
-      signal.throwIfAborted();
-      if (snapshot.files.has(path)) continue;
-      try {
-        await workspacePath(this.root, path);
-      } catch {
-        deleted.add(path);
-      }
-    }
-    let registered = false;
-    const state = await this.store.update(id, signal, (state2) => {
-      if (state2.version !== initial.version) return false;
-      if (state2.turn === "__ended__" && event !== "SessionStart") return false;
-      if (state2.turn === "__ended__") state2.turn = "";
-      const turn = text(input["turn_id"]);
-      if (turn && turn !== state2.turn) {
-        state2.turn = turn;
-        state2.current = [];
-      }
-      if (!state2.baseline || event !== "SessionStart" && event !== "PreToolUse") {
-        state2.baseline = Object.fromEntries(snapshot.files);
-        state2.touched = state2.touched.filter((path) => !deleted.has(path));
-        state2.current = state2.current.filter((path) => !deleted.has(path));
-        state2.pending = state2.pending.filter((path) => snapshot.files.has(path));
-        state2.touched.push(...changed);
-        state2.current.push(...changed);
-        state2.pending.push(...changed);
-      }
-      registered = true;
-      return true;
-    });
-    if (!registered || event === "SessionStart" || event === "PreToolUse") return "";
-    const paths = [
-      .../* @__PURE__ */ new Set([...changed, ...state.pending.slice().sort(), ...stopping ? state.touched.slice().sort() : []])
-    ];
-    const completed = [];
-    for (const path of paths.slice(0, 200)) {
-      if (signal.aborted) break;
-      const content = snapshot.files.get(path);
-      if (!content) continue;
-      const identity = await analysisIdentity(this.root, [path], config, signal, false);
-      const result = await this.linter(path, signal);
-      if (signal.aborted) break;
-      try {
-        if (hash(await readFile8(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content)
-          continue;
-      } catch {
-        continue;
-      }
-      completed.push({ result, content, identity, fingerprint: hash(JSON.stringify([content, identity, result])) });
-    }
-    const commitSignal = AbortSignal.timeout(350);
-    if ((await configuration(this.root)).version !== config.version)
-      return JSON.stringify({ systemMessage: "Codex LSP: configuration changed; pending retained" });
-    for (let i = completed.length - 1; i >= 0; i--) {
-      const entry = completed[i];
-      if (!entry) continue;
-      try {
-        if (hash(
-          await readFile8(await workspacePath(this.root, entry.result.path), {
-            encoding: "utf8",
-            signal: commitSignal
-          })
-        ) === entry.content && await analysisIdentity(this.root, [entry.result.path], config, commitSignal, false) === entry.identity)
-          continue;
-      } catch {
-      }
-      completed.splice(i, 1);
-    }
-    const changedResults = [];
-    let block = false;
-    await this.store.update(id, commitSignal, (current) => {
-      if (current.version !== state.version) return false;
-      for (const { result, fingerprint } of completed) {
-        if (result.state === "complete" || result.state === "skipped" || result.state === "failed")
-          current.pending = current.pending.filter((path) => path !== result.path);
-        const environment = !result.findings.length && (result.state === "failed" || result.state === "skipped");
-        const key = environment ? `environment:${codeLanguage(config, result.path)}:${result.note}` : result.path;
-        const signature = environment ? hash(result.note ?? "unavailable") : fingerprint;
-        const newFeedback = current.shown[key] !== signature;
-        if (newFeedback && (result.findings.length || result.state !== "complete")) changedResults.push(result);
-        current.shown[key] = signature;
-        if (stopping && result.state === "complete" && result.findings.some((finding) => finding.severity === "error") && !current.blocked.includes(fingerprint)) {
-          block = true;
-          current.blocked.push(fingerprint);
-          if (!changedResults.includes(result)) changedResults.push(result);
-        }
-      }
-      current.blocked = current.blocked.slice(-1e4);
-      return true;
-    });
-    if (!changedResults.length && !signal.aborted) return "";
-    const output = `session=${id}
-Lint channel: ${render(changedResults, 10, 1800)}${signal.aborted ? "\nLint budget reached; unfinished files remain pending." : ""}
-LSP not executed; use check_diagnostics scope=paths run=active workspace=${this.root}`;
-    return JSON.stringify(
-      stopping ? block ? { decision: "block", reason: output } : { systemMessage: output } : { hookSpecificOutput: { hookEventName: event, additionalContext: output } }
-    );
-  }
-};
-
-// src/codex-hook.ts
-async function runHookCli() {
-  stdin.setEncoding("utf8");
-  let raw = "";
-  for await (const chunk of stdin) {
-    raw += chunk;
-    if (raw.length > 1024 * 1024) throw new Error("Hook input too large");
-  }
-  if (!raw.trim()) return;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("Invalid Hook JSON");
-  }
-  if (!record(parsed)) throw new Error("Hook input must be an object");
-  const event = text(parsed["hook_event_name"], "PostToolUse");
-  const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? 44e3 : 4400;
-  const signal = AbortSignal.timeout(budget);
-  const root = await realpath5(text(parsed["cwd"], process.cwd()));
-  try {
-    const output = await new HookEngine(root).hook(parsed, signal);
-    if (output) process.stdout.write(`${output}
-`);
-  } catch (error) {
-    process.stdout.write(
-      `${JSON.stringify({ systemMessage: signal.aborted ? "Codex LSP: Hook budget reached; unfinished checks remain pending. Discovery will retry from the last committed baseline. LSP not executed." : `Codex LSP unavailable: ${message(error).slice(0, 300)}` })}
-`
-    );
-  }
-}
-
-// src/environment.ts
-import { basename as basename2, dirname as dirname4 } from "node:path";
-import { fileURLToPath } from "node:url";
-function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
-  if (process.env["CODEX_HOME"]) return;
-  let child = dirname4(script);
-  for (let parent = dirname4(child); parent !== child; parent = dirname4(child)) {
-    if (basename2(parent) === "plugins" && basename2(child) === "cache") {
-      process.env["CODEX_HOME"] = dirname4(parent);
-      return;
-    }
-    child = parent;
-  }
-}
-
-// src/protocol.ts
-import { createInterface } from "node:readline";
-
-// src/runtime.ts
-import { realpath as realpath6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute7 } from "node:path";
-
-// src/engine.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
-import { readFile as readFile11, stat as stat5 } from "node:fs/promises";
-import { relative as relative4 } from "node:path";
 
 // src/language.ts
 import { readFile as readFile10, writeFile as writeFile4 } from "node:fs/promises";
-import { dirname as dirname8, extname as extname5, relative as relative3, resolve as resolve6 } from "node:path";
+import { dirname as dirname8, extname as extname5, relative as relative3, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
 
 // packages/lsp-tools-mcp/dist/lsp/client.js
 import { readFileSync } from "node:fs";
-import { extname as extname4, resolve as resolve4 } from "node:path";
+import { extname as extname4, resolve as resolve5 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 
 // packages/lsp-tools-mcp/dist/lsp/connection.js
@@ -2668,10 +2568,10 @@ var JsonRpcConnection = class {
     const id = this.nextRequestId;
     this.nextRequestId += 1;
     const message2 = params === void 0 ? { jsonrpc: "2.0", id, method } : { jsonrpc: "2.0", id, method, params };
-    const responsePromise = new Promise((resolve7, reject) => {
+    const responsePromise = new Promise((resolve8, reject) => {
       this.pendingRequests.set(String(id), {
         resolve(result) {
-          resolve7(result);
+          resolve8(result);
         },
         reject
       });
@@ -2800,13 +2700,13 @@ var JsonRpcConnection = class {
     const payload = `Content-Length: ${Buffer.byteLength(body, "utf8")}\r
 \r
 ${body}`;
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       this.writer.write(payload, (error) => {
         if (error) {
           reject(error);
           return;
         }
-        resolve7();
+        resolve8();
       });
     });
   }
@@ -2912,7 +2812,7 @@ var LspClientTransport = class {
       env
     });
     this.startStderrReading();
-    await new Promise((resolve7) => setTimeout(resolve7, 100));
+    await new Promise((resolve8) => setTimeout(resolve8, 100));
     if (this.proc.exitCode !== null) {
       const stderr = this.stderrBuffer.join("\n");
       throw new LspProcessExitedError(this.server.id, this.root, this.proc.exitCode, stderr.slice(-2e3));
@@ -3039,8 +2939,8 @@ var LspClientTransport = class {
       try {
         proc.kill();
         let timeoutId;
-        const timeoutPromise = new Promise((resolve7) => {
-          timeoutId = setTimeout(resolve7, STOP_HARD_KILL_TIMEOUT_MS);
+        const timeoutPromise = new Promise((resolve8) => {
+          timeoutId = setTimeout(resolve8, STOP_HARD_KILL_TIMEOUT_MS);
         });
         await Promise.race([
           proc.exited.then(() => {
@@ -3056,7 +2956,7 @@ var LspClientTransport = class {
             proc.kill("SIGKILL");
             await Promise.race([
               proc.exited,
-              new Promise((resolve7) => setTimeout(resolve7, STOP_SIGKILL_GRACE_MS))
+              new Promise((resolve8) => setTimeout(resolve8, STOP_SIGKILL_GRACE_MS))
             ]);
           } catch (error) {
             reportBestEffortCleanupError("hard process kill", error);
@@ -3300,7 +3200,7 @@ var LspClient = class extends LspClientConnection {
     return this.diagnosticPullErrors;
   }
   async openFile(filePath) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     const uri = pathToFileURL2(absPath).href;
     const text2 = readFileSync(absPath, "utf-8");
     if (!this.openedFiles.has(absPath)) {
@@ -3338,7 +3238,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async definition(filePath, line, character) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/definition", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -3346,7 +3246,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async references(filePath, line, character, includeDeclaration = true) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/references", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -3355,7 +3255,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async documentSymbols(filePath) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/documentSymbol", {
       textDocument: { uri: pathToFileURL2(absPath).href }
@@ -3373,7 +3273,7 @@ var LspClient = class extends LspClientConnection {
     return /unsupported|not supported|method not found|unknown request/i.test(error.message);
   }
   async diagnostics(filePath) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     const uri = pathToFileURL2(absPath).href;
     await this.openFile(absPath);
     await new Promise((r) => setTimeout(r, POST_DIAGNOSTICS_WAIT_MS));
@@ -3392,7 +3292,7 @@ var LspClient = class extends LspClientConnection {
     return { items: this.getStoredDiagnostics(uri) };
   }
   async prepareRename(filePath, line, character) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/prepareRename", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -3400,7 +3300,7 @@ var LspClient = class extends LspClientConnection {
     });
   }
   async rename(filePath, line, character, newName) {
-    const absPath = resolve4(filePath);
+    const absPath = resolve5(filePath);
     await this.openFile(absPath);
     return this.sendRequest("textDocument/rename", {
       textDocument: { uri: pathToFileURL2(absPath).href },
@@ -3498,7 +3398,7 @@ async function stopClientBestEffort(client) {
 function awaitWithSignal(promise, signal) {
   if (!signal)
     return promise;
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled)
@@ -3516,7 +3416,7 @@ function awaitWithSignal(promise, signal) {
         return;
       settled = true;
       signal.removeEventListener("abort", onAbort);
-      resolve7(value);
+      resolve8(value);
     }, (err) => {
       if (settled)
         return;
@@ -3751,7 +3651,7 @@ var LspManager = class {
 
 // packages/lsp-tools-mcp/dist/lsp/workspace-root.js
 import { existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname7, join as join14, resolve as resolve5 } from "node:path";
+import { dirname as dirname7, join as join14, resolve as resolve6 } from "node:path";
 
 // packages/lsp-tools-mcp/dist/lsp/cargo-workspace-root.js
 import { existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
@@ -3789,7 +3689,7 @@ function createSharedAbortableOperation(run2, onSettled, onAbandoned) {
 function awaitSharedAbortableOperation(operation, signal) {
   signal?.throwIfAborted();
   operation.waiterCount += 1;
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled)
@@ -3806,7 +3706,7 @@ function awaitSharedAbortableOperation(operation, signal) {
       settled = true;
       signal?.removeEventListener("abort", onAbort);
       releaseSharedOperationWaiter(operation);
-      resolve7(value);
+      resolve8(value);
     }, (error) => {
       if (settled)
         return;
@@ -4071,8 +3971,8 @@ async function defaultCargoMetadataLoader(manifestPath, signal) {
       let terminationError;
       let settled = false;
       let resolveTermination;
-      const terminationComplete = new Promise((resolve7) => {
-        resolveTermination = resolve7;
+      const terminationComplete = new Promise((resolve8) => {
+        resolveTermination = resolve8;
       });
       const finishTermination = () => {
         resolveTermination?.();
@@ -4377,7 +4277,7 @@ function isDirectoryPath(filePath) {
   }
 }
 async function findWorkspaceRoot(filePath, server2, options = {}) {
-  const abs = resolve5(filePath);
+  const abs = resolve6(filePath);
   let dir = abs;
   if (!isDirectoryPath(dir)) {
     dir = dirname7(dir);
@@ -4422,6 +4322,9 @@ var Client = class extends LspClient {
     this.pulls = /* @__PURE__ */ new Map();
     this.proven = /* @__PURE__ */ new Set();
     this.versions = /* @__PURE__ */ new Map();
+  }
+  serverIdentity() {
+    return this.server.id;
   }
   stop() {
     if (this.stopTask) return this.stopTask;
@@ -4500,7 +4403,15 @@ var Client = class extends LspClient {
   }
   async start() {
     try {
-      await super.start();
+      const inherited = process.env;
+      let starting;
+      try {
+        process.env = { ...executionEnvironment() };
+        starting = super.start();
+      } finally {
+        process.env = inherited;
+      }
+      await starting;
     } catch (error) {
       await logEvent("startup-failure");
       throw error;
@@ -4545,13 +4456,14 @@ var Client = class extends LspClient {
       });
     }
   }
-  async refresh(paths) {
+  async refresh(changes) {
     for (const uri of this.versions.keys())
       await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
     this.versions.clear();
     this.published.clear();
+    this.pulls.clear();
     await this.sendNotification("workspace/didChangeWatchedFiles", {
-      changes: paths.map((path) => ({ uri: pathToFileURL3(path).href, type: 2 }))
+      changes: changes.map(({ path, type }) => ({ uri: pathToFileURL3(path).href, type }))
     });
   }
   async collect(path, signal) {
@@ -4562,14 +4474,14 @@ var Client = class extends LspClient {
     const settling = Date.now() + (cold ? 5e3 : 2e3);
     while ((this.progress.size || Date.now() - this.progressAt < 200) && Date.now() < settling) {
       signal.throwIfAborted();
-      await new Promise((resolve7) => setTimeout(resolve7, 25));
+      await new Promise((resolve8) => setTimeout(resolve8, 25));
     }
     if (this.progress.size) return { items: [], ready: false };
     if (this.capabilities["diagnosticProvider"]) {
       const previous = this.pulls.get(uri);
       const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, settling - Date.now()))]);
       const result = await new Promise(
-        (resolve7, reject) => {
+        (resolve8, reject) => {
           const abort = () => {
             void this.stop();
             reject(new Error(signal.aborted ? "Diagnostics cancelled" : "Diagnostic request timeout"));
@@ -4582,7 +4494,7 @@ var Client = class extends LspClient {
           void this.sendRequest(
             "textDocument/diagnostic",
             { textDocument: { uri }, ...previous ? { previousResultId: previous.resultId } : {} }
-          ).then(resolve7, reject).finally(() => requestSignal.removeEventListener("abort", abort));
+          ).then(resolve8, reject).finally(() => requestSignal.removeEventListener("abort", abort));
         }
       );
       if (result.kind === "unchanged" && previous)
@@ -4607,7 +4519,7 @@ var Client = class extends LspClient {
           };
         }
       }
-      await new Promise((resolve7) => setTimeout(resolve7, 25));
+      await new Promise((resolve8) => setTimeout(resolve8, 25));
     }
     return { items: [], ready: false };
   }
@@ -4625,6 +4537,7 @@ var Languages = class {
     this.root = root;
     this.config = config;
     this.clients = /* @__PURE__ */ new Set();
+    this.processStarts = 0;
     this.snapshot = /* @__PURE__ */ new Map();
     this.failures = /* @__PURE__ */ new Map();
     this.manager = new LspManager({
@@ -4632,23 +4545,34 @@ var Languages = class {
       clientFactory: (root2, server2) => {
         if (!inside(this.root, root2))
           throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
+        this.processStarts++;
         const client = new Client(root2, server2);
         this.clients.add(client);
         return client;
       }
     });
   }
+  statistics() {
+    return {
+      processStarts: this.processStarts,
+      running: [...this.clients].filter((client) => client.isAlive()).length
+    };
+  }
   async sync(files) {
     const changed = [.../* @__PURE__ */ new Set([...files.keys(), ...this.snapshot.keys()])].filter(
       (path) => files.get(path) !== this.snapshot.get(path)
     );
+    const events = changed.map((path) => ({
+      path: resolve7(this.root, path),
+      type: !files.has(path) ? 3 : !this.snapshot.has(path) ? 1 : 2
+    }));
     this.snapshot = new Map(files);
     for (const client of this.clients) {
       if (!client.isAlive()) {
         this.clients.delete(client);
         continue;
       }
-      await client.refresh(changed.map((path) => resolve6(this.root, path)));
+      await client.refresh(events);
     }
   }
   async status(path) {
@@ -4656,11 +4580,11 @@ var Languages = class {
     const failure = this.failures.get(`${resolved.language}:${resolved.tool.identity}`);
     return {
       ...resolved,
-      lint: this.config.trusted ? await select(this.root, resolve6(this.root, path), false, this.config).catch((error) => ({
+      lint: this.config.trusted ? await select(this.root, resolve7(this.root, path), false, this.config).catch((error) => ({
         unavailable: message(error)
       })) ?? { unavailable: "No configured lint runner" } : { unavailable: "Workspace trust required" },
       running: [...this.clients].some(
-        (client) => client.isAlive() && JSON.stringify(client.command()) === JSON.stringify(resolved.tool.command)
+        (client) => client.isAlive() && client.serverIdentity() === `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`
       ),
       failure: failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 3e4 ? failure.reason : void 0,
       recovery: "Install or repair the selected local tool, then lsp_status refresh=true; failures retry after 30 seconds"
@@ -4693,7 +4617,7 @@ var Languages = class {
     if (!inside(this.root, root)) root = this.root;
     if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
       root = dirname8(dirname8(dirname8(resolved.tool.command[0])));
-    resolved.server.id += `:${hash(JSON.stringify(resolved.server)).slice(0, 16)}`;
+    resolved.server.id += `:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`;
     let client;
     try {
       client = await measured(
@@ -4890,10 +4814,11 @@ var Engine = class {
       this.language ??= new Languages(root, this.requestConfig ?? await configuration(root));
       const lsp = this.source === "lint" ? { path, state: "skipped", findings: [] } : await this.language.check(path, signal);
       if (lspOnly) return lsp;
-      if (lsp.state === "skipped" || lsp.state === "failed") {
-        if (this.source !== "lint") return lsp;
-      }
-      const runner = await lint(root, path, signal, this.requestConfig, true);
+      const runner = await lint(root, path, signal, this.requestConfig, !automaticExecution());
+      this.lastChannels = {
+        lsp,
+        lint: runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" }
+      };
       if (this.source === "lint")
         return runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" };
       if (!runner)
@@ -4910,6 +4835,9 @@ var Engine = class {
         ...lsp.note || runner.note ? { note: [lsp.note, runner.note].filter(Boolean).join("; ") } : {}
       };
     });
+  }
+  channelResults() {
+    return this.lastChannels;
   }
   session(id, turn) {
     let session = this.sessions.get(id);
@@ -4949,6 +4877,10 @@ var Engine = class {
         await this.language.close();
         this.language = void 0;
       } else await this.language.sync(snapshot.files);
+    }
+    for (const key of this.cache.keys()) {
+      const path = key.replace(/^(?:lsp|lint):/, "");
+      if (previous?.files.has(path) && !snapshot.files.has(path)) this.cache.delete(key);
     }
     this.previousSnapshot = snapshot;
   }
@@ -4997,19 +4929,42 @@ var Engine = class {
         results.push(cached.result);
         continue;
       }
+      this.lastChannels = void 0;
       const result = await this.checker(path, signal, lspOnly);
       signal.throwIfAborted();
       if (hash(await readFile11(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content || await analysisIdentity(this.root, [path], await configuration(this.root), signal) !== identity) {
         result.state = "stale";
         result.note = "File changed during diagnostics; retry";
       }
+      if (lspOnly) result.channels ??= { lsp: result.state, lint: "skipped" };
       if (JSON.stringify(this.cache.get(key)?.result) !== JSON.stringify(result)) this.generation++;
       this.cache.set(key, { version: snapshot.version, identity, content, result });
+      const channels = this.channelResults();
+      if (channels)
+        for (const channel of ["lsp", "lint"]) {
+          if (channel === "lsp" && this.source === "lint" || channel === "lint" && lspOnly) continue;
+          const channelResult = { ...channels[channel] };
+          if (result.state === "stale") {
+            channelResult.state = "stale";
+            channelResult.note = result.note ?? "Stale diagnostics";
+          }
+          this.cache.set(`${channel}:${path}`, {
+            version: snapshot.version,
+            identity,
+            content,
+            result: channelResult
+          });
+        }
       results.push(result);
     }
     const after = await inventory(this.root, 1e4, signal, config.exclude, this.root, true);
     after.version = hash(after.version + (await configuration(this.root)).version);
     if (after.version !== snapshot.version) {
+      for (const entry of this.cache.values())
+        if (entry.version === snapshot.version) {
+          entry.result.state = "stale";
+          entry.result.note = "Workspace changed or snapshot incomplete; retry";
+        }
       for (const result of results) {
         result.state = "stale";
         result.note = "Workspace changed or snapshot incomplete; retry";
@@ -5034,14 +4989,14 @@ var Engine = class {
       return withToolResolution(() => this.execute(operation, args, signal));
     });
     this.queue = task.catch(() => void 0);
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const abort = () => {
         if (!started || !writes) reject(new Error("Request cancelled while queued or executing"));
         if (started) void this.close().catch(() => logEvent("cancel-cleanup-failure"));
       };
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort();
-      void task.then(resolve7, reject).finally(() => signal.removeEventListener("abort", abort));
+      void task.then(resolve8, reject).finally(() => signal.removeEventListener("abort", abort));
     });
   }
   async paths(args, signal) {
@@ -5111,8 +5066,17 @@ var Engine = class {
         ),
         timings: timings(),
         cache: this.cache.size,
+        clients: this.language.statistics(),
         sessions: [...this.sessions.keys()]
       });
+    }
+    if (operation === "automatic_batch") {
+      if (!config.trusted)
+        throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
+      this.source = "both";
+      const paths2 = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [];
+      await this.check(paths2.slice(0, 50), text(args["session"]), text(args["turn"]), false, signal);
+      return JSON.stringify(this.lastResults);
     }
     const id = args["scope"] === "paths" || args["scope"] === void 0 ? text(args["session"], "manual") : this.id(args["session"]);
     if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
@@ -5263,7 +5227,8 @@ var Engine = class {
                 selected2.add(candidate);
         }
         paths = [...selected2].sort();
-      } else paths = [...scope2 === "turn" ? this.session(id).current : this.session(id).touched].sort();
+      } else
+        paths = [...scope2 === "turn" ? this.session(id).current : this.session(id).touched].filter((path) => snapshot.files.has(path)).sort();
       identity = await this.pageIdentity(paths, config, snapshot, signal);
       if (run2 === "cached") {
         results = [];
@@ -5374,49 +5339,527 @@ var Engine = class {
   }
 };
 
+// src/ipc.ts
+import { spawn as spawn4 } from "node:child_process";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync4 } from "node:fs";
+import { chmod, lstat as lstat4, mkdir as mkdir4, readFile as readFile12, rename as rename4, rm as rm3, writeFile as writeFile5 } from "node:fs/promises";
+import { createConnection } from "node:net";
+import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
+import { join as join15 } from "node:path";
+import { setTimeout as delay2 } from "node:timers/promises";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+async function serviceLocation(root) {
+  const user = process.getuid?.() ?? hash(homedir6()).slice(0, 10);
+  const directory2 = join15(tmpdir3(), `clsp6-${user}`);
+  await mkdir4(directory2, { recursive: true, mode: 448 });
+  const info = await lstat4(directory2);
+  if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
+    throw new Error("Unsafe service directory permissions");
+  const identity = await workspaceIdentity(root);
+  const address = process.platform === "win32" ? `\\\\.\\pipe\\codex-lsp-${user}-${identity}` : join15(directory2, `${identity.slice(0, 32)}.sock`);
+  return { directory: directory2, identity, address, endpoint: join15(directory2, `${identity}.endpoint`) };
+}
+async function readEndpoint(location) {
+  try {
+    const info = await lstat4(location.endpoint);
+    if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
+      throw new Error("Unsafe service endpoint permissions");
+    const value = JSON.parse(await readFile12(location.endpoint, "utf8"));
+    if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["pid"] !== "number" || typeof value["token"] !== "string" || value["address"] !== location.address)
+      throw new Error("Invalid service endpoint");
+    return value;
+  } catch (error) {
+    if (record(error) && error["code"] === "ENOENT") return void 0;
+    throw error;
+  }
+}
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    if (process.platform === "linux") {
+      const state = readFileSync4(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)?.split(" ")[0];
+      if (state === "Z" || state === "X") return false;
+    }
+    return true;
+  } catch (error) {
+    return !(record(error) && ["ESRCH", "ENOENT"].includes(String(error["code"])));
+  }
+}
+async function exchange(endpoint, operation, args, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve8, reject) => {
+    const socket = createConnection(endpoint.address);
+    let received = "";
+    let settled = false;
+    const writes = operation === "lsp_rename" || operation === "lsp_format";
+    const finish = (error, output = "") => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", cancel);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve8(output);
+    };
+    const cancel = () => {
+      if (writes) socket.write(`${JSON.stringify({ cancel: true })}
+`);
+      else finish(new Error("Request cancelled while waiting for service; automatic work remains pending"));
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    socket.once("connect", () => {
+      socket.write(
+        `${JSON.stringify({
+          token: endpoint.token,
+          identity: endpoint.identity,
+          protocol: SERVICE_PROTOCOL,
+          operation,
+          args,
+          environment: executionEnvironment()
+        })}
+`
+      );
+      if (signal.aborted) cancel();
+    });
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (received.length > 8 * 1024 * 1024) {
+        finish(new Error("Service response exceeds limit"));
+        return;
+      }
+      const end = received.indexOf("\n");
+      if (end < 0) return;
+      try {
+        const response = JSON.parse(received.slice(0, end));
+        if (!record(response)) throw new Error("Invalid service response");
+        if (typeof response["error"] === "string") {
+          const paths = response["modifiedPaths"];
+          finish(
+            Array.isArray(paths) ? new WriteFailure(
+              response["error"],
+              paths.filter((path) => typeof path === "string")
+            ) : new Error(response["error"])
+          );
+        } else finish(void 0, text(response["output"]));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    socket.once("error", (error) => finish(error));
+    socket.once(
+      "close",
+      () => finish(
+        new Error(
+          writes ? "Service connection lost; write outcome unknown; do not replay" : "Service connection lost; retry read request"
+        )
+      )
+    );
+  });
+}
+async function existingService(root, signal) {
+  const location = await serviceLocation(root);
+  const endpoint = await readEndpoint(location);
+  if (!endpoint || !alive(endpoint.pid)) return void 0;
+  const handshake = JSON.parse(
+    await exchange(endpoint, "handshake", {}, AbortSignal.any([signal, AbortSignal.timeout(750)]))
+  );
+  if (!record(handshake) || handshake["protocol"] !== SERVICE_PROTOCOL || handshake["identity"] !== location.identity || handshake["pid"] !== endpoint.pid)
+    throw new Error("Service handshake identity mismatch");
+  return endpoint;
+}
+async function ensureService(root, signal) {
+  const location = await serviceLocation(root);
+  const lock = `${location.endpoint}.lock`;
+  const nonce = randomUUID5();
+  const candidate = `${lock}.${nonce}`;
+  await mkdir4(candidate, { mode: 448 });
+  await writeFile5(join15(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
+  let acquired = false;
+  try {
+    while (!acquired) {
+      signal.throwIfAborted();
+      const existing = await existingService(root, signal);
+      if (existing) return existing;
+      try {
+        await rename4(candidate, lock);
+        acquired = true;
+      } catch (error) {
+        if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
+        const raw = await readFile12(join15(lock, "owner"), "utf8").catch(() => "{}");
+        const owner = JSON.parse(raw);
+        if (record(owner) && typeof owner["pid"] === "number" && typeof owner["nonce"] === "string" && !alive(owner["pid"]) && await readFile12(join15(lock, "owner"), "utf8").catch(() => "") === raw)
+          await rename4(lock, `${lock}.abandoned-${owner["nonce"]}`).catch(() => void 0);
+        await delay2(25, void 0, { signal });
+      }
+    }
+    const connected = await existingService(root, signal);
+    if (connected) return connected;
+    const previous = await readEndpoint(location);
+    if (previous && alive(previous.pid))
+      throw new Error("Service process alive but handshake unavailable; retry later");
+    await rm3(location.endpoint, { force: true });
+    if (process.platform !== "win32") await rm3(location.address, { force: true });
+    const token = randomUUID5();
+    const cli = fileURLToPath3(import.meta.url);
+    const child = spawn4(process.execPath, [...process.execArgv, cli, "service", root, location.identity, token], {
+      cwd: root,
+      env: executionEnvironment(),
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    let startupError;
+    child.once("error", (error) => {
+      startupError = error;
+    });
+    child.unref();
+    const startup = AbortSignal.timeout(8e3);
+    while (!startup.aborted) {
+      if (startupError) throw startupError;
+      const endpoint = await readEndpoint(location);
+      if (endpoint) {
+        await exchange(endpoint, "handshake", {}, startup);
+        return endpoint;
+      }
+      if (child.exitCode !== null) throw new Error("Shared service failed to start");
+      await delay2(25);
+    }
+    throw new Error("Shared service startup timeout");
+  } finally {
+    await rm3(candidate, { recursive: true, force: true });
+    if (acquired) {
+      const released = `${lock}.released-${nonce}`;
+      await rename4(lock, released);
+      await rm3(released, { recursive: true, force: true });
+    }
+  }
+}
+async function publishEndpoint(location, token) {
+  if (process.platform !== "win32") await chmod(location.address, 384);
+  const temporary2 = `${location.endpoint}.${randomUUID5()}`;
+  await writeFile5(
+    temporary2,
+    JSON.stringify({
+      pid: process.pid,
+      token,
+      identity: location.identity,
+      protocol: SERVICE_PROTOCOL,
+      address: location.address
+    }),
+    { mode: 384 }
+  );
+  await rename4(temporary2, location.endpoint);
+}
+
 // src/runtime.ts
 var Runtime = class {
   constructor() {
-    this.engines = /* @__PURE__ */ new Map();
-    this.active = /* @__PURE__ */ new Map();
-    this.timers = /* @__PURE__ */ new Map();
+    this.active = /* @__PURE__ */ new Set();
   }
   async request(root, operation, args, signal) {
     if (!isAbsolute7(root)) throw new Error("workspace must be an absolute project directory");
     root = await realpath6(root);
-    signal = AbortSignal.any([signal, AbortSignal.timeout(45e3)]);
-    signal.throwIfAborted();
-    let engine = this.engines.get(root);
-    if (!engine) {
-      engine = new Engine(root);
-      this.engines.set(root, engine);
-    }
-    clearTimeout(this.timers.get(root));
-    this.active.set(root, (this.active.get(root) ?? 0) + 1);
+    const controller = new AbortController();
+    this.active.add(controller);
+    signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(45e3)]);
     try {
-      const target = engine;
-      return await target.dispatch(operation, args, signal);
-    } finally {
-      const active = (this.active.get(root) ?? 1) - 1;
-      this.active.set(root, active);
-      if (!active) {
-        const target = engine;
-        const timer = setTimeout(() => {
-          void target.dispatch("release", {}, new AbortController().signal);
-        }, 12e4);
-        timer.unref();
-        this.timers.set(root, timer);
+      const existing = await existingService(root, signal);
+      const passive = operation === "lsp_status" || operation === "check_diagnostics" && args["run"] === "cached" || operation === "session_end";
+      if (!existing && passive) {
+        if (operation === "session_end") return "";
+        const engine = new Engine(root);
+        try {
+          const output = await engine.dispatch(operation, args, signal);
+          return operation === "lsp_status" ? JSON.stringify({
+            ...JSON.parse(output),
+            service: { state: "stopped" },
+            automaticDiagnostics: JSON.parse(output).configuration.automaticDiagnostics,
+            automaticTasks: []
+          }) : output;
+        } finally {
+          await engine.dispose();
+        }
       }
+      const endpoint = existing ?? await ensureService(root, signal);
+      return await exchange(endpoint, operation, args, signal);
+    } finally {
+      this.active.delete(controller);
     }
   }
   async close() {
-    for (const timer of this.timers.values()) clearTimeout(timer);
-    await Promise.all([...this.engines.values()].map((engine) => engine.dispose()));
-    this.engines.clear();
+    for (const controller of this.active) controller.abort();
+    this.active.clear();
   }
 };
 
+// src/hook-engine.ts
+var HookEngine = class {
+  constructor(root, checker) {
+    this.root = root;
+    this.checker = checker;
+    this.store = new Metadata(root);
+  }
+  async hook(input, signal) {
+    const began = Date.now();
+    signal.throwIfAborted();
+    const id = text(input["session_id"]);
+    if (!id)
+      return JSON.stringify({ systemMessage: "Codex LSP: missing session_id; automatic checking unavailable" });
+    const event = text(input["hook_event_name"], "PostToolUse");
+    const stopping = event === "Stop" || event === "SubagentStop";
+    const output = (context) => JSON.stringify(
+      stopping ? { systemMessage: context } : { hookSpecificOutput: { hookEventName: event, additionalContext: context } }
+    );
+    if (event === "SessionEnd") {
+      await this.store.end(id, signal);
+      if (!this.checker) {
+        const runtime = new Runtime();
+        try {
+          await runtime.request(this.root, "session_end", { session: id }, signal);
+        } catch {
+        } finally {
+          await runtime.close();
+        }
+      }
+      return "";
+    }
+    if (stopping && input["stop_hook_active"] === true) return "";
+    const initial = await this.store.read(id);
+    if (initial.turn === "__ended__" && event !== "SessionStart") return "";
+    const config = await configuration(this.root);
+    const baselineOnly = event === "SessionStart" || event === "PreToolUse";
+    if (event === "PreToolUse" && initial.baseline) {
+      await this.store.update(id, signal, (state2) => {
+        const turn = text(input["turn_id"]);
+        if (turn && turn !== state2.turn) {
+          state2.turn = turn;
+          state2.current = [];
+        }
+      });
+      return "";
+    }
+    const snapshot = await inventory(this.root, 1e4, signal, config.exclude);
+    if (!snapshot.complete)
+      return output(
+        "Codex LSP: partial; change discovery/file limit exceeded (10000 files / 1 MiB per file); baseline retained, unfinished workspace range pending. Narrow scope with check_diagnostics scope=paths run=active."
+      );
+    const changed = [...snapshot.files].filter(([path, content]) => initial.baseline?.[path] !== content).map(([path]) => path);
+    const deleted = Object.keys(initial.baseline ?? {}).filter((path) => !snapshot.files.has(path));
+    const configured2 = stopping ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse;
+    const mode = !initial.baseline && !baselineOnly && configured2 !== "off" ? "full" : configured2;
+    let registered = false;
+    const state = await this.store.update(id, signal, (state2) => {
+      if (state2.version !== initial.version && state2.generation !== initial.generation) return false;
+      if (state2.turn === "__ended__" && event !== "SessionStart") return false;
+      if (state2.turn === "__ended__") state2.turn = "";
+      const turn = text(input["turn_id"]);
+      if (turn && turn !== state2.turn) {
+        state2.turn = turn;
+        state2.current = [];
+      }
+      if (baselineOnly) {
+        state2.baseline ??= Object.fromEntries(snapshot.files);
+        state2.configuration = config.version;
+        registered = true;
+        return true;
+      }
+      const configChanged = state2.configuration !== config.version || changed.some(
+        (path) => /(?:config|lock|manifest|Cargo\.toml|package\.json|pyproject|ty\.toml|ruff\.toml|\.clangd|compile_commands|compile_flags|rust-toolchain)/i.test(
+          path
+        )
+      );
+      const paths2 = (mode === "full" || configChanged ? [...snapshot.files.keys()] : changed).filter(
+        (path) => languageFor(config, path)
+      );
+      if (changed.length || deleted.length || configChanged || mode === "full" && state2.automaticScope !== "full")
+        state2.generation++;
+      state2.configuration = config.version;
+      state2.baseline = Object.fromEntries(snapshot.files);
+      state2.touched = [
+        .../* @__PURE__ */ new Set([...state2.touched, ...changed.filter((path) => languageFor(config, path))])
+      ].filter((path) => snapshot.files.has(path));
+      state2.current = [
+        .../* @__PURE__ */ new Set([...state2.current, ...changed.filter((path) => languageFor(config, path))])
+      ].filter((path) => snapshot.files.has(path));
+      state2.pending = [.../* @__PURE__ */ new Set([...state2.pending, ...paths2])].filter((path) => snapshot.files.has(path));
+      state2.delivery = [.../* @__PURE__ */ new Set([...state2.delivery, ...paths2])].filter((path) => snapshot.files.has(path));
+      for (const channel of ["lsp", "lint"])
+        state2.pendingChannels[channel] = [.../* @__PURE__ */ new Set([...state2.pendingChannels[channel], ...paths2])].filter(
+          (path) => snapshot.files.has(path)
+        );
+      state2.automaticScope = mode === "full" ? "full" : "delta";
+      registered = true;
+      return true;
+    });
+    if (!registered || baselineOnly || mode === "off") return "";
+    if (!config.trusted && !this.checker)
+      return output(
+        `session=${id}
+Codex LSP: automatic LSP/lint requires workspace trust; lint requires workspace trust. pending=${state.pending.length}`
+      );
+    const paths = mode === "full" ? [...snapshot.files.keys()].filter((path) => languageFor(config, path)) : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
+    if (!paths.length && !deleted.length && !stopping) return "";
+    let result;
+    if (this.checker) {
+      const results = [];
+      for (const path of paths) {
+        if (signal.aborted) break;
+        results.push(await this.checker(path, signal));
+      }
+      result = {
+        generation: state.generation,
+        scope: mode,
+        total: paths.length,
+        state: signal.aborted ? "pending" : "complete",
+        results,
+        pending: paths.filter(
+          (path) => !results.some((entry) => entry.path === path && entry.state === "complete")
+        ),
+        note: ""
+      };
+    } else {
+      const runtime = new Runtime();
+      try {
+        result = JSON.parse(
+          await runtime.request(
+            this.root,
+            "automatic",
+            {
+              session: id,
+              generation: state.generation,
+              scope: mode,
+              paths,
+              waitMs: Math.max(1, (stopping ? 42500 : 3600) - (Date.now() - began))
+            },
+            signal
+          )
+        );
+      } catch (error) {
+        return output(
+          `session=${id}
+Codex LSP ${mode}: partial; pending=${paths.length}; unfinished paths=${paths.slice(0, 10).join(", ")}. ${message(error)}. Background checks continue; later Hook/MCP can retrieve results.`
+        );
+      } finally {
+        await runtime.close();
+      }
+    }
+    if (result.generation !== state.generation) return "";
+    const commitSignal = AbortSignal.timeout(750);
+    if ((await configuration(this.root)).version !== config.version)
+      return output("Codex LSP: stale; configuration/trust changed; pending retained");
+    const valid = [];
+    for (const entry of result.results) {
+      try {
+        if (hash(
+          await readFile13(await workspacePath(this.root, entry.path), {
+            encoding: "utf8",
+            signal: commitSignal
+          })
+        ) === snapshot.files.get(entry.path))
+          valid.push(entry);
+      } catch {
+      }
+    }
+    let feedback = "";
+    await this.store.update(id, commitSignal, (current) => {
+      if (current.generation !== state.generation || current.turn === "__ended__") return false;
+      const fresh = [];
+      const cleared = [];
+      for (const path of deleted) {
+        if (current.shown[`issues:${path}`] === "yes")
+          cleared.push(`${path} removed; previous diagnostics cleared`);
+        delete current.shown[path];
+        delete current.shown[`issues:${path}`];
+      }
+      for (const entry of valid) {
+        if (signal.aborted && this.checker) continue;
+        if (entry.state === "complete") current.pending = current.pending.filter((path) => path !== entry.path);
+        const fingerprint = hash(
+          JSON.stringify([
+            entry.state,
+            entry.findings,
+            entry.channels,
+            entry.state === "complete" ? void 0 : entry.note
+          ])
+        );
+        if (entry.state === "complete" && !entry.findings.length && current.shown[`issues:${entry.path}`] === "yes")
+          cleared.push(`${entry.path}: previous diagnostics cleared`);
+        const environment = !entry.findings.length && (entry.state === "failed" || entry.state === "skipped");
+        const environmentKey = `environment:${languageFor(config, entry.path)?.language}:${hash(entry.note ?? "unavailable")}`;
+        if (current.shown[entry.path] !== fingerprint && (entry.findings.length || entry.state !== "complete") && (!environment || current.shown[environmentKey] !== fingerprint))
+          fresh.push(entry);
+        if (environment) current.shown[environmentKey] = fingerprint;
+        current.shown[entry.path] = fingerprint;
+        current.shown[`issues:${entry.path}`] = entry.findings.length ? "yes" : "no";
+      }
+      const pending = paths.filter(
+        (path) => !valid.some((entry) => entry.path === path && entry.state === "complete")
+      );
+      const errors = valid.flatMap((entry) => entry.findings).filter((finding) => finding.severity === "error").length;
+      const summary = `session=${id}
+Automatic ${mode}: ${pending.length ? "partial" : "complete"}; checked=${paths.length - pending.length}/${paths.length} errors=${errors} pending=${pending.length}${pending.length ? `
+Unfinished range: ${pending.slice(0, 10).join(", ")}${pending.length > 10 ? ` (+${pending.length - 10})` : ""}` : ""}${result.note ? `
+${result.note}` : ""}`;
+      const signature = hash(
+        JSON.stringify([
+          state.generation,
+          summary,
+          valid.map((entry) => [entry.path, entry.state, entry.findings, entry.channels]),
+          cleared
+        ])
+      );
+      if (stopping ? current.shown["stop"] !== signature : fresh.length || cleared.length || pending.length && current.shown["post"] !== signature) {
+        feedback = `${summary}${fresh.length ? `
+LSP/lint channels: ${render(fresh, 15, 3500)}` : ""}${cleared.length ? `
+${cleared.join("\n")}` : ""}${pending.length && result.state === "running" ? "\nBackground analysis continues; retrieve on a later Hook or cached MCP query." : ""}`;
+      }
+      if (stopping) current.shown["stop"] = signature;
+      else current.shown["post"] = signature;
+      current.delivery = current.delivery.filter(
+        (path) => !valid.some((entry) => entry.path === path && entry.state !== "pending" && entry.state !== "stale")
+      );
+      return true;
+    });
+    return feedback ? output(feedback) : "";
+  }
+};
+
+// src/codex-hook.ts
+async function runHookCli() {
+  stdin.setEncoding("utf8");
+  let raw = "";
+  for await (const chunk of stdin) {
+    raw += chunk;
+    if (raw.length > 1024 * 1024) throw new Error("Hook input too large");
+  }
+  if (!raw.trim()) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid Hook JSON");
+  }
+  if (!record(parsed)) throw new Error("Hook input must be an object");
+  const event = text(parsed["hook_event_name"], "PostToolUse");
+  const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? 44e3 : 4400;
+  const signal = AbortSignal.timeout(budget);
+  const root = await realpath7(text(parsed["cwd"], process.cwd()));
+  try {
+    const output = await new HookEngine(root).hook(parsed, signal);
+    if (output) process.stdout.write(`${output}
+`);
+  } catch (error) {
+    const context = signal.aborted ? "Codex LSP: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results." : `Codex LSP unavailable: ${message(error).slice(0, 300)}`;
+    process.stdout.write(
+      `${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}
+`
+    );
+  }
+}
+
 // src/protocol.ts
+import { createInterface } from "node:readline";
 var string = { type: "string" };
 var scope = {
   workspace: { type: "string", description: "Absolute user repository path, never the plugin directory." },
@@ -5439,7 +5882,7 @@ function tool(name, description, properties, required, readOnly) {
 var TOOLS = [
   tool(
     "check_diagnostics",
-    "Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and Hook-only files remain pending. Continue with complete next arguments.",
+    "Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
     {
       ...scope,
       ...paging,
@@ -5548,7 +5991,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-lsp", version: "0.5.0" },
+        serverInfo: { name: "codex-lsp", version: "0.6.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -5659,12 +6102,307 @@ async function runMcp(input = process.stdin, output = process.stdout) {
   }
 }
 
+// src/service.ts
+import { rm as rm4 } from "node:fs/promises";
+import { createServer } from "node:net";
+
+// src/automatic.ts
+import { setTimeout as delay3, setImmediate as yieldBatch } from "node:timers/promises";
+var Automatic = class {
+  constructor(root, engine) {
+    this.root = root;
+    this.engine = engine;
+    this.jobs = /* @__PURE__ */ new Map();
+  }
+  get active() {
+    return [...this.jobs.values()].some((job) => job.state === "running");
+  }
+  status() {
+    return [...this.jobs.values()].map((job) => ({
+      session: job.session,
+      generation: job.generation,
+      scope: job.scope,
+      state: job.state,
+      total: job.paths.length,
+      processed: job.results.size,
+      checked: [...job.results.values()].filter((result) => result.state === "complete").length,
+      remaining: job.paths.filter((path) => job.results.get(path)?.state !== "complete"),
+      note: job.note
+    }));
+  }
+  cancel(session) {
+    for (const job of this.jobs.values())
+      if (!session || job.session === session) {
+        job.controller.abort();
+        job.state = "cancelled";
+        this.jobs.delete(job.session);
+      }
+  }
+  result(job) {
+    return {
+      generation: job.generation,
+      scope: job.scope,
+      state: job.state,
+      total: job.paths.length,
+      results: [...job.results.values()],
+      pending: job.paths.filter((path) => {
+        const result = job.results.get(path);
+        return result?.state !== "complete";
+      }),
+      note: job.note
+    };
+  }
+  async request(args, environment, signal) {
+    const session = text(args["session"]);
+    const store = new Metadata(this.root);
+    const state = await store.read(session);
+    if (state.turn === "__ended__" || state.generation !== args["generation"])
+      return JSON.stringify({ generation: -1, results: [], pending: [], state: "stale" });
+    const config = await configuration(this.root);
+    if (!config.trusted) {
+      this.cancel();
+      throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
+    }
+    let job = this.jobs.get(session);
+    if (job && (job.generation !== state.generation || job.configuration !== config.version || hash(JSON.stringify(job.environment)) !== hash(JSON.stringify(environment)))) {
+      this.cancel(session);
+      job = void 0;
+    }
+    if (job?.state !== "running") {
+      const paths = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : state.pending;
+      job = {
+        session,
+        generation: state.generation,
+        scope: text(args["scope"], state.automaticScope),
+        configuration: config.version,
+        environment,
+        paths: [...new Set(paths)],
+        results: /* @__PURE__ */ new Map(),
+        controller: new AbortController(),
+        started: Date.now(),
+        state: "running",
+        note: "",
+        done: Promise.resolve()
+      };
+      this.jobs.set(session, job);
+      const target2 = job;
+      job.done = withExecution(environment, true, () => this.run(target2));
+    }
+    const target = job;
+    const wait = typeof args["waitMs"] === "number" ? Math.max(0, Math.min(43e3, args["waitMs"])) : 3500;
+    const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait))]);
+    await Promise.race([target.done, delay3(wait, void 0, { signal: waiting }).catch(() => void 0)]);
+    return JSON.stringify(this.result(target));
+  }
+  async run(job) {
+    const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(3e5)]);
+    const store = new Metadata(this.root);
+    try {
+      let remaining = [...job.paths];
+      if (!remaining.length)
+        await this.engine.dispatch("automatic_batch", { paths: [], session: job.session }, signal);
+      while (remaining.length && !signal.aborted) {
+        const retry = [];
+        for (let start = 0; start < remaining.length; start += 50) {
+          signal.throwIfAborted();
+          const state = await store.read(job.session);
+          const config = await configuration(this.root);
+          if (state.turn === "__ended__" || state.generation !== job.generation || config.version !== job.configuration || !config.trusted) {
+            job.state = "cancelled";
+            job.note = "Generation/configuration/trust changed; results stale";
+            return;
+          }
+          const paths = remaining.slice(start, start + 50);
+          const output = await this.engine.dispatch(
+            "automatic_batch",
+            { paths, session: job.session, turn: state.turn },
+            signal
+          );
+          const results = JSON.parse(output);
+          await store.update(job.session, signal, (current) => {
+            if (current.generation !== job.generation || current.turn === "__ended__") return false;
+            for (const result of results) {
+              job.results.set(result.path, result);
+              const channels = result.channels ?? { lsp: result.state, lint: result.state };
+              for (const channel of ["lsp", "lint"]) {
+                current.pendingChannels[channel] = current.pendingChannels[channel].filter(
+                  (path) => path !== result.path
+                );
+                if (channels[channel] === "pending" || channels[channel] === "stale" || channels[channel] === "failed" || channel === "lsp" && channels[channel] === "skipped")
+                  current.pendingChannels[channel].push(result.path);
+              }
+              if (result.state === "complete")
+                current.pending = current.pending.filter((path) => path !== result.path);
+              if (result.state === "pending" || result.state === "stale") retry.push(result.path);
+            }
+            return true;
+          });
+          await yieldBatch();
+        }
+        remaining = retry;
+        if (remaining.length) await delay3(1e3, void 0, { signal });
+      }
+      job.state = job.paths.every((path) => job.results.get(path)?.state === "complete") ? "complete" : "pending";
+    } catch (error) {
+      job.state = job.controller.signal.aborted ? "cancelled" : "pending";
+      job.note = signal.aborted && !job.controller.signal.aborted ? "Automatic analysis exceeded five-minute budget; unfinished range retained" : message(error);
+    }
+  }
+  async revalidate() {
+    for (const job of this.jobs.values()) {
+      if (job.state !== "running") continue;
+      await withExecution(job.environment, true, async () => {
+        try {
+          const config = await configuration(this.root);
+          const state = await new Metadata(this.root).read(job.session);
+          if (!config.trusted || config.version !== job.configuration || state.generation !== job.generation || state.turn === "__ended__")
+            this.cancel(job.session);
+        } catch {
+          this.cancel(job.session);
+        }
+      });
+    }
+  }
+  async dispose() {
+    const tasks = [...this.jobs.values()].map((job) => job.done);
+    this.cancel();
+    await Promise.allSettled(tasks);
+  }
+};
+
+// src/service.ts
+async function runService(root, identity, token) {
+  const location = await serviceLocation(root);
+  if (location.identity !== identity || !token) throw new Error("Invalid service startup identity");
+  const engine = new Engine(root);
+  const automatic = new Automatic(root, engine);
+  const sockets = /* @__PURE__ */ new Set();
+  let lastActivity = Date.now();
+  let requests = 0;
+  let stopping = false;
+  const server2 = createServer((socket) => {
+    sockets.add(socket);
+    const controller = new AbortController();
+    let input = "";
+    let started = false;
+    let authenticated = false;
+    socket.setEncoding("utf8");
+    socket.setTimeout(5e3, () => {
+      if (!authenticated) socket.destroy();
+    });
+    socket.on("error", () => socket.destroy());
+    socket.once("close", () => {
+      sockets.delete(socket);
+      controller.abort();
+    });
+    const handle = async (value) => {
+      if (started) {
+        if (authenticated && record(value) && value["cancel"] === true) controller.abort();
+        return;
+      }
+      started = true;
+      if (!record(value) || value["token"] !== token || value["identity"] !== identity || value["protocol"] !== SERVICE_PROTOCOL || !record(value["args"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string")) {
+        socket.destroy();
+        return;
+      }
+      authenticated = true;
+      requests++;
+      lastActivity = Date.now();
+      const operation = text(value["operation"]);
+      const args = value["args"];
+      const environment = value["environment"];
+      try {
+        const output = await withExecution(environment, operation === "automatic", async () => {
+          if (operation === "handshake")
+            return JSON.stringify({ protocol: SERVICE_PROTOCOL, identity, pid: process.pid });
+          if (operation === "session_end") {
+            automatic.cancel(text(args["session"]));
+            return "";
+          }
+          if (operation === "automatic") return automatic.request(args, environment, controller.signal);
+          if (!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(operation))
+            throw new Error("Unknown service operation");
+          const config = await configuration(root);
+          if (!config.trusted) automatic.cancel();
+          const output2 = await engine.dispatch(operation, args, controller.signal);
+          if (operation === "lsp_status")
+            return JSON.stringify({
+              ...JSON.parse(output2),
+              service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
+              automaticDiagnostics: config.automaticDiagnostics,
+              automaticTasks: automatic.status()
+            });
+          return output2;
+        });
+        if (!socket.destroyed) socket.end(`${JSON.stringify({ output })}
+`);
+      } catch (error) {
+        if (!socket.destroyed)
+          socket.end(
+            `${JSON.stringify({ error: message(error), ...error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {} })}
+`
+          );
+      } finally {
+        requests--;
+        lastActivity = Date.now();
+      }
+    };
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (Buffer.byteLength(input) > 1024 * 1024) {
+        socket.destroy();
+        return;
+      }
+      let end = input.indexOf("\n");
+      while (end >= 0) {
+        const line = input.slice(0, end);
+        input = input.slice(end + 1);
+        try {
+          void handle(JSON.parse(line));
+        } catch {
+          socket.destroy();
+        }
+        end = input.indexOf("\n");
+      }
+    });
+  });
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    clearInterval(idle);
+    server2.close();
+    for (const socket of sockets) socket.destroy();
+    await automatic.dispose();
+    await engine.dispose();
+    if ((await readEndpoint(location).catch(() => void 0))?.token === token)
+      await rm4(location.endpoint, { force: true });
+  };
+  const idle = setInterval(() => {
+    void automatic.revalidate();
+    if (requests || automatic.active) lastActivity = Date.now();
+    else if (Date.now() - lastActivity >= 12e4) void stop();
+  }, 1e3);
+  process.once("SIGTERM", () => {
+    void stop();
+  });
+  process.once("SIGINT", () => {
+    void stop();
+  });
+  await new Promise((resolve8, reject) => {
+    server2.once("error", reject);
+    server2.listen(location.address, resolve8);
+  });
+  await publishEndpoint(location, token);
+}
+
 // src/cli.ts
 async function main() {
   restoreInstalledHome();
   const [command = "mcp"] = process.argv.slice(2);
   if (command === "mcp") await runMcp();
   else if (command === "hook") await runHookCli();
+  else if (command === "service")
+    await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
   else throw new Error("Usage: codex-lsp [mcp | hook]");
 }
 main().catch((error) => {

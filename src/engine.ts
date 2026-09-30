@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { relative } from "node:path";
 import { type Config, configuration } from "./config.js";
+import { automaticExecution } from "./environment.js";
 import { hash, type Inventory, inventory, workspacePath } from "./files.js";
 import { analysisIdentity } from "./identity.js";
 import { Languages } from "./language.js";
@@ -36,6 +37,10 @@ export class Engine {
 	private requestConfig: Config | undefined;
 	private source = "both";
 	private lastResults: FileResult[] = [];
+	private lastChannels: { lsp: FileResult; lint: FileResult } | undefined;
+	private channelResults(): typeof this.lastChannels {
+		return this.lastChannels;
+	}
 	private generation = 0;
 	private pages = new Map<
 		string,
@@ -61,10 +66,11 @@ export class Engine {
 						? { path, state: "skipped", findings: [] }
 						: await this.language.check(path, signal);
 				if (lspOnly) return lsp;
-				if (lsp.state === "skipped" || lsp.state === "failed") {
-					if (this.source !== "lint") return lsp;
-				}
-				const runner = await lint(root, path, signal, this.requestConfig, true);
+				const runner = await lint(root, path, signal, this.requestConfig, !automaticExecution());
+				this.lastChannels = {
+					lsp,
+					lint: runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" },
+				};
 				if (this.source === "lint")
 					return runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" };
 				if (!runner)
@@ -121,6 +127,10 @@ export class Engine {
 				await this.language.close();
 				this.language = undefined;
 			} else await this.language.sync(snapshot.files);
+		}
+		for (const key of this.cache.keys()) {
+			const path = key.replace(/^(?:lsp|lint):/, "");
+			if (previous?.files.has(path) && !snapshot.files.has(path)) this.cache.delete(key);
 		}
 		this.previousSnapshot = snapshot;
 	}
@@ -184,6 +194,7 @@ export class Engine {
 				results.push(cached.result);
 				continue;
 			}
+			this.lastChannels = undefined;
 			const result = await this.checker(path, signal, lspOnly);
 			signal.throwIfAborted();
 			if (
@@ -193,13 +204,35 @@ export class Engine {
 				result.state = "stale";
 				result.note = "File changed during diagnostics; retry";
 			}
+			if (lspOnly) result.channels ??= { lsp: result.state, lint: "skipped" };
 			if (JSON.stringify(this.cache.get(key)?.result) !== JSON.stringify(result)) this.generation++;
 			this.cache.set(key, { version: snapshot.version, identity, content, result });
+			const channels = this.channelResults();
+			if (channels)
+				for (const channel of ["lsp", "lint"] as const) {
+					if ((channel === "lsp" && this.source === "lint") || (channel === "lint" && lspOnly)) continue;
+					const channelResult = { ...channels[channel] };
+					if (result.state === "stale") {
+						channelResult.state = "stale";
+						channelResult.note = result.note ?? "Stale diagnostics";
+					}
+					this.cache.set(`${channel}:${path}`, {
+						version: snapshot.version,
+						identity,
+						content,
+						result: channelResult,
+					});
+				}
 			results.push(result);
 		}
 		const after = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
 		after.version = hash(after.version + (await configuration(this.root)).version);
 		if (after.version !== snapshot.version) {
+			for (const entry of this.cache.values())
+				if (entry.version === snapshot.version) {
+					entry.result.state = "stale";
+					entry.result.note = "Workspace changed or snapshot incomplete; retry";
+				}
 			for (const result of results) {
 				result.state = "stale";
 				result.note = "Workspace changed or snapshot incomplete; retry";
@@ -313,8 +346,19 @@ export class Engine {
 				),
 				timings: timings(),
 				cache: this.cache.size,
+				clients: this.language.statistics(),
 				sessions: [...this.sessions.keys()],
 			});
+		}
+		if (operation === "automatic_batch") {
+			if (!config.trusted)
+				throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
+			this.source = "both";
+			const paths = Array.isArray(args["paths"])
+				? args["paths"].filter((path): path is string => typeof path === "string")
+				: [];
+			await this.check(paths.slice(0, 50), text(args["session"]), text(args["turn"]), false, signal);
+			return JSON.stringify(this.lastResults);
 		}
 		const id =
 			args["scope"] === "paths" || args["scope"] === undefined
@@ -497,7 +541,10 @@ export class Engine {
 								selected.add(candidate);
 				}
 				paths = [...selected].sort();
-			} else paths = [...(scope === "turn" ? this.session(id).current : this.session(id).touched)].sort();
+			} else
+				paths = [...(scope === "turn" ? this.session(id).current : this.session(id).touched)]
+					.filter((path) => snapshot.files.has(path))
+					.sort();
 			identity = await this.pageIdentity(paths, config, snapshot, signal);
 			if (run === "cached") {
 				results = [];
