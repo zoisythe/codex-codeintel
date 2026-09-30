@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { failureKind, message, record, text, WriteFailure } from "./results.js";
+import { type FileResult, failureKind, message, record, render, text, WriteFailure } from "./results.js";
 import { Runtime } from "./runtime.js";
 
 const string = { type: "string" };
@@ -30,8 +30,15 @@ function tool(
 }
 export const TOOLS = [
 	tool(
+		"check_project",
+		"Run project CLI checkers; active starts background checks, cached reads a job without launching tools. Use for workspace checks.",
+		{ workspace: scope.workspace, run: { type: "string", enum: ["active", "cached"] }, job: string, ...paging },
+		[],
+		true,
+	),
+	tool(
 		"check_diagnostics",
-		"Check paths (workspace by default), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
+		"Check paths (explicit paths), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
 		{
 			...scope,
 			...paging,
@@ -93,7 +100,7 @@ export const TOOLS = [
 function validateArguments(name: string, args: Record<string, unknown>): void {
 	if (
 		args["refresh"] !== undefined &&
-		!(name === "lsp_status" || (name === "check_diagnostics" && args["run"] !== "cached"))
+		!(name === "lsp_status" || (["check_diagnostics", "check_project"].includes(name) && args["run"] !== "cached"))
 	)
 		throw new Error("refresh requires active diagnostics or lsp_status");
 	const definition = TOOLS.find((entry) => entry.name === name);
@@ -104,7 +111,7 @@ function validateArguments(name: string, args: Record<string, unknown>): void {
 		if (!record(schema))
 			throw new Error(
 				["mode", "start", "offset", "revision"].includes(key)
-					? "Migration required: use scope/source/run/cursor; see docs/migration-0.5.md"
+					? "Migration required: use scope/source/run/cursor; see docs/usage.md#upgrade"
 					: `Unknown argument: ${key}`,
 			);
 		if (schema["type"] === "boolean" && typeof value !== "boolean") throw new Error(`${key} must be a boolean`);
@@ -156,7 +163,7 @@ export async function runMcp(
 		if (method === "initialize") {
 			ok({
 				protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-				serverInfo: { name: "codex-codeintel", version: "0.6.0" }, // keep in sync with package.json
+				serverInfo: { name: "codex-codeintel", version: "0.7.0" }, // keep in sync with package.json
 				capabilities: { tools: { listChanged: false } },
 			});
 			return;
@@ -190,19 +197,28 @@ export async function runMcp(
 		try {
 			const name = text(params["name"]);
 			if (name === "lsp_diagnostics")
-				throw new Error("Migration required: use check_diagnostics source=lsp; see docs/migration-0.5.md");
+				throw new Error("Migration required: use check_diagnostics source=lsp; see docs/usage.md#upgrade");
 			if (!TOOLS.some((entry) => entry.name === name)) throw new Error("Unknown tool");
 			if (!record(params["arguments"])) throw new Error("Tool arguments required");
 			const args = params["arguments"];
 			validateArguments(name, args);
 			const result = await runtime.request(text(args["workspace"]), name, args, controller.signal);
-			let structured: unknown;
-			try {
-				structured = JSON.parse(result);
-			} catch {
-				structured = { summary: result, operation: name, workspace: args["workspace"] };
-			}
-			if (Array.isArray(structured)) structured = { items: structured };
+			const structured = result;
+			const rendered =
+				name === "check_diagnostics" && Array.isArray(result["results"])
+					? `${render(result["results"] as FileResult[])}${result["next"] ? "\nMore results: follow structured next arguments." : ""}${result["inventoryComplete"] === false ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : ""}`
+					: name === "lsp_format" && Array.isArray(result["results"])
+						? result["results"]
+								.map((item: unknown) =>
+									record(item)
+										? `${item["status"] === "formatted" ? "Formatted" : "Unchanged"}: ${item["path"]}`
+										: "",
+								)
+								.join("\n")
+						: name === "lsp_rename" && Array.isArray(result["modifiedPaths"])
+							? `Renamed: ${result["modifiedPaths"].join(", ")}`
+							: JSON.stringify(result);
+
 			ok({
 				...(record(structured)
 					? { structuredContent: structured, ...(structured["isError"] === true ? { isError: true } : {}) }
@@ -210,7 +226,7 @@ export async function runMcp(
 				content: [
 					{
 						type: "text",
-						text: record(structured) && typeof structured["text"] === "string" ? structured["text"] : result,
+						text: rendered.slice(0, 8000),
 					},
 				],
 			});

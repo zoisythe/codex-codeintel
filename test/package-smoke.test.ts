@@ -77,7 +77,7 @@ describe("plugin package metadata", () => {
 		const sessionStart = hooksJson.hooks["SessionStart"]?.[0]?.hooks[0]?.command;
 
 		expect(pluginJson.version).toBe(packageJson.version);
-		expect(packageJson.version).toBe("0.6.0");
+		expect(packageJson.version).toBe("0.7.0");
 		expect(packageJson.type).toBe("module");
 		expect(packageJson.packageManager).toBe("npm@11.12.1");
 		expect(packageJson.dependencies).toBeUndefined();
@@ -92,7 +92,8 @@ describe("plugin package metadata", () => {
 			"NOTICE",
 			"README.md",
 			"CHANGELOG.md",
-			"docs",
+			"docs/usage.md",
+			"docs/examples/*.json",
 		]);
 		expect(packageJson.files).toContain("skills");
 		expect(packageJson.bin["codex-codeintel"]).toBe("./dist/cli.js");

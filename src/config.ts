@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { BUILTIN_SERVERS } from "../packages/lsp-tools-mcp/dist/lsp/server-definitions.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
+import { BUILTIN_SERVERS } from "./lsp/server-definitions.js";
+import type { ProjectCheck } from "./project-types.js";
 import { record } from "./results.js";
 import { type Trust, workspaceTrust } from "./trust.js";
 
@@ -18,7 +19,8 @@ export interface Server {
 }
 export interface Config {
 	readonly schemaVersion: 1;
-	readonly automaticDiagnostics: Readonly<{ postToolUse: "delta" | "full" | "off"; stop: "delta" | "full" | "off" }>;
+	readonly projectChecks: "auto" | readonly ProjectCheck[];
+	readonly automaticDiagnostics: Readonly<{ postToolUse: "delta" | "off"; stop: "errors" | "off" }>;
 	readonly javascript: "auto" | "biome" | "eslint" | "off";
 	readonly python: "auto" | "ruff" | "off";
 	readonly exclude: string[];
@@ -35,7 +37,7 @@ export function configPaths(root: string): { user: string; project: string; code
 	for (const key of Object.keys(executionEnvironment()))
 		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
 			throw new Error(
-				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/migration-0.5.md`,
+				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/usage.md#upgrade`,
 			);
 	return {
 		user: join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
@@ -48,7 +50,7 @@ async function read(path: string): Promise<Record<string, unknown>> {
 		const value: unknown = JSON.parse(await readFile(path, "utf8"));
 		if (!record(value) || value["schemaVersion"] !== 1)
 			throw new Error(
-				`Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/migration-0.5.md`,
+				`Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/usage.md#upgrade`,
 			);
 		// Legacy trustedWorkspaces is accepted but grants no trust.
 		for (const key of Object.keys(value))
@@ -61,6 +63,7 @@ async function read(path: string): Promise<Record<string, unknown>> {
 					"exclude",
 					"formatting",
 					"automaticDiagnostics",
+					"projectChecks",
 				].includes(key)
 			)
 				throw new Error(`Unknown configuration field ${key} in ${path}`);
@@ -210,15 +213,53 @@ export async function configuration(root: string): Promise<Config> {
 		throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
 	const automaticDiagnostics = {
 		postToolUse: "delta",
-		stop: "full",
+		stop: "errors",
 		...(record(user["automaticDiagnostics"]) ? user["automaticDiagnostics"] : {}),
 		...(record(project["automaticDiagnostics"]) ? project["automaticDiagnostics"] : {}),
 	};
-	for (const [key, value] of Object.entries(automaticDiagnostics))
-		if (!["postToolUse", "stop"].includes(key) || !["delta", "full", "off"].includes(value))
+	for (const [key, value] of Object.entries(automaticDiagnostics)) {
+		if (value === "full" || (key === "stop" && value === "delta"))
+			throw new Error(
+				"Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks. See docs/usage.md#upgrade",
+			);
+		if (!["postToolUse", "stop"].includes(key) || ![key === "stop" ? "errors" : "delta", "off"].includes(value))
 			throw new Error(`Invalid automaticDiagnostics.${key}`);
+	}
+	const projectChecks = project["projectChecks"] ?? user["projectChecks"] ?? "auto";
+	if (projectChecks !== "auto") {
+		if (!Array.isArray(projectChecks)) throw new Error("projectChecks requires auto or a list");
+		const used = new Set<string>();
+		for (const check of projectChecks) {
+			if (
+				!record(check) ||
+				Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) ||
+				typeof check["name"] !== "string" ||
+				!check["name"] ||
+				used.has(check["name"]) ||
+				typeof check["cwd"] !== "string" ||
+				isAbsolute(check["cwd"]) ||
+				check["cwd"].split(/[\\/]/).includes("..") ||
+				!["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(String(check["parser"])) ||
+				!Array.isArray(check["command"]) ||
+				!check["command"].length ||
+				!check["command"].every((arg: unknown) => typeof arg === "string" && arg.length) ||
+				!Array.isArray(check["coverage"]) ||
+				!check["coverage"].length ||
+				!check["coverage"].every(
+					(arg: unknown) =>
+						typeof arg === "string" && !isAbsolute(arg) && !arg.startsWith("!") && !arg.split("/").includes(".."),
+				)
+			)
+				throw new Error(
+					"Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs",
+				);
+			used.add(check["name"]);
+		}
+	}
+
 	return freeze({
 		schemaVersion: 1,
+		projectChecks: projectChecks as Config["projectChecks"],
 		automaticDiagnostics: automaticDiagnostics as Config["automaticDiagnostics"],
 		javascript,
 		python,

@@ -8,10 +8,34 @@ https://github.com/code-yeongyu/pi-lsp-client
 and extracted into lsp-tools-mcp:
 https://github.com/code-yeongyu/lsp-tools-mcp
 
-Development uses the pinned lsp-tools-mcp source maintained at
-https://github.com/zoisythe/lsp-tools-mcp. Installed copies include its adapted
-runtime in the self-contained bundle.
+src/lsp contains the dependency closure of lsp-tools-mcp at commit
+9cc6f753d04834c148d08bbca72e3b483d6301b2 from
+https://github.com/zoisythe/lsp-tools-mcp (MIT). Copyright (c) 2026 Yeongyu Kim.
+The MIT license is reproduced below and in src/lsp/LICENSE.
+
+MIT License
+
+Copyright (c) 2026 Yeongyu Kim
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 
 Original Git history, author attribution and MIT copyright/license notices
 are retained. Independent maintenance does not imply endorsement by the
-original authors. See LICENSE and docs/provenance.md.
+original authors. See LICENSE and src/lsp/LICENSE.

@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"projectChecks": [
+		{
+			"name": "web-types",
+			"cwd": "web",
+			"command": ["node_modules/.bin/tsc", "--noEmit", "--pretty", "false"],
+			"parser": "tsc",
+			"coverage": ["src/**/*.ts", "src/**/*.tsx"]
+		},
+		{
+			"name": "web-lint",
+			"cwd": "web",
+			"command": ["node_modules/.bin/eslint", "src", "--format", "json"],
+			"parser": "eslint",
+			"coverage": ["src/**/*.ts", "src/**/*.tsx"]
+		},
+		{
+			"name": "api-types",
+			"cwd": "api",
+			"command": [".venv/bin/ty", "check", "--output-format", "concise", "--color", "never"],
+			"parser": "ty",
+			"coverage": ["src/**/*.py", "src/**/*.pyi"]
+		},
+		{
+			"name": "api-lint",
+			"cwd": "api",
+			"command": [".venv/bin/ruff", "check", "--no-fix", "--no-fix-only", "--output-format", "json", "src"],
+			"parser": "ruff",
+			"coverage": ["src/**/*.py", "src/**/*.pyi"]
+		}
+	]
+}

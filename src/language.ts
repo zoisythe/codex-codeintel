@@ -1,17 +1,28 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { LspClient } from "../packages/lsp-tools-mcp/dist/lsp/client.js";
-import { getLanguageId } from "../packages/lsp-tools-mcp/dist/lsp/language-mappings.js";
-import { LspManager } from "../packages/lsp-tools-mcp/dist/lsp/manager.js";
-import type { Diagnostic, TextEdit, WorkspaceEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
-import { findWorkspaceRoot } from "../packages/lsp-tools-mcp/dist/lsp/workspace-root.js";
+import { BUDGET } from "./budgets.js";
 import type { Config } from "./config.js";
+import { configurationImpact, configurationLanguages } from "./config-files.js";
 import { executionEnvironment } from "./environment.js";
 import { applyTextChanges, hash, inside, inventory, workspacePath } from "./files.js";
 import { logEvent } from "./log.js";
+import { LspClient } from "./lsp/client.js";
+import { getLanguageId } from "./lsp/language-mappings.js";
+import { LspManager } from "./lsp/manager.js";
+import type { Diagnostic, TextEdit, WorkspaceEdit } from "./lsp/types.js";
+import { findWorkspaceRoot } from "./lsp/workspace-root.js";
 import { measured } from "./metrics.js";
-import { type FileResult, message, number, record, text, WriteFailure } from "./results.js";
+import {
+	type FileResult,
+	type FormatResult,
+	message,
+	type NavigationResult,
+	number,
+	record,
+	text,
+	WriteFailure,
+} from "./results.js";
 import { select } from "./runners.js";
 import { resolveServer } from "./tool-resolution.js";
 
@@ -33,6 +44,7 @@ class Client extends LspClient {
 		return this.server.id;
 	}
 	private stopping = false;
+	requestSignal: AbortSignal | undefined;
 	private stopTask: Promise<void> | undefined;
 	override stop(): Promise<void> {
 		if (this.stopTask) return this.stopTask;
@@ -49,6 +61,20 @@ class Client extends LspClient {
 	private capabilities: Record<string, unknown> = {};
 	private progress = new Set<string>();
 	private progressAt = 0;
+	private serverBusy = false;
+	private readonly savedVersions = new Map<string, number>();
+	private isRustAnalyzer(): boolean {
+		return this.server.command.some((argument) => /rust-analyzer/.test(argument));
+	}
+	private async settle(deadline: number, signal?: AbortSignal): Promise<boolean> {
+		const busy = () => this.serverBusy || this.progress.size > 0 || Date.now() - this.progressAt < BUDGET.lspQuiet;
+		while (busy() && Date.now() < deadline) {
+			signal?.throwIfAborted();
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		signal?.throwIfAborted();
+		return !busy();
+	}
 	supports(operation: string): boolean {
 		if (operation === "prepare_rename") {
 			const provider = this.capabilities["renameProvider"];
@@ -74,6 +100,7 @@ class Client extends LspClient {
 		if (method === "initialize" && record(params) && record(params["capabilities"])) {
 			const capabilities = params["capabilities"];
 			capabilities["window"] = { workDoneProgress: true };
+			capabilities["experimental"] = { serverStatusNotification: true };
 			if (record(capabilities["textDocument"])) {
 				capabilities["textDocument"]["publishDiagnostics"] = { versionSupport: true };
 				capabilities["textDocument"]["diagnostic"] = { dynamicRegistration: false };
@@ -91,14 +118,26 @@ class Client extends LspClient {
 								reject(
 									new Error(`LSP initialization/download timeout: ${this.stderrBuffer.slice(-5).join("\n")}`),
 								),
-							35000,
+							BUDGET.lspRequest,
 						);
 					}),
 				]);
 			} finally {
 				clearTimeout(timer);
 			}
-		} else result = await super.sendRequest<T>(method, params);
+		} else {
+			if (!this.connection) throw new Error("LSP client not started");
+			const signal = this.requestSignal
+				? AbortSignal.any([this.requestSignal, AbortSignal.timeout(BUDGET.lspRequest)])
+				: AbortSignal.timeout(BUDGET.lspRequest);
+			if (
+				this.isRustAnalyzer() &&
+				(method.startsWith("textDocument/") || method === "workspace/symbol") &&
+				!(await this.settle(Date.now() + BUDGET.lspRequest, signal))
+			)
+				throw new Error("LSP analysis pending: rust-analyzer is still indexing");
+			result = await this.connection.sendRequest<T>(method, params, signal);
+		}
 		if (method === "initialize" && record(result) && record(result["capabilities"]))
 			this.capabilities = result["capabilities"];
 		return result;
@@ -120,18 +159,9 @@ class Client extends LspClient {
 	private proven = new Set<string>();
 	private versions = new Map<string, { version: number; content: string }>();
 	override async start(): Promise<void> {
+		this.serverBusy = this.isRustAnalyzer();
 		try {
-			const inherited = process.env;
-			let starting: Promise<void>;
-			try {
-				// The pinned transport spawns synchronously before its first await. Restore
-				// immediately, so concurrent IPC contexts never observe another request's env.
-				process.env = { ...executionEnvironment() };
-				starting = super.start();
-			} finally {
-				process.env = inherited;
-			}
-			await starting;
+			await super.start();
 		} catch (error) {
 			await logEvent("startup-failure");
 			throw error;
@@ -139,6 +169,11 @@ class Client extends LspClient {
 		void this.proc?.exited.then(() => {
 			if (!this.stopping) return logEvent("abnormal-exit");
 			return undefined;
+		});
+		this.connection?.onNotification("experimental/serverStatus", (value) => {
+			if (!record(value) || typeof value["quiescent"] !== "boolean") return;
+			this.serverBusy = !value["quiescent"] || value["health"] === "error";
+			this.progressAt = Date.now();
 		});
 		this.connection?.onNotification("$/progress", (value) => {
 			if (!record(value) || !record(value["value"])) return;
@@ -157,11 +192,13 @@ class Client extends LspClient {
 			);
 		});
 	}
+	private readonly dirty = new Set<string>();
 	override async openFile(path: string): Promise<void> {
 		const uri = pathToFileURL(path).href;
 		const content = await readFile(path, "utf8");
 		const previous = this.versions.get(uri);
-		if (previous?.content === content) return;
+		if (previous?.content === content && !this.dirty.has(uri)) return;
+		this.dirty.delete(uri);
 		this.published.delete(diagnosticUriKey(uri));
 		const version = (previous?.version ?? 0) + 1;
 		this.versions.set(uri, { content, version });
@@ -175,16 +212,41 @@ class Client extends LspClient {
 				textDocument: { uri, version, languageId: getLanguageId(extname(path)), text: content },
 			});
 		}
+		if (this.isRustAnalyzer()) this.progressAt = Date.now();
 	}
 	async refresh(changes: { path: string; type: number }[]): Promise<void> {
-		// Invalidating push results alone leaves unchanged open documents permanently pending
-		// on servers that publish only after didOpen/didChange. Close them so the next request
-		// synchronizes the final disk contents, including deleted/moved dependencies.
-		for (const uri of this.versions.keys())
-			await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
-		this.versions.clear();
-		this.published.clear();
-		this.pulls.clear();
+		changes = changes.filter(
+			({ path }) =>
+				inside(this.root, path) &&
+				(!configurationImpact(path).length || configurationImpact(path).includes("types")) &&
+				(this.server.extensions.includes(extname(path)) ||
+					configurationLanguages(path).some((language) =>
+						this.server.extensions.some(
+							(extension) =>
+								getLanguageId(extension) === language ||
+								(language === "cpp" && ["c", "cpp"].includes(getLanguageId(extension))),
+						),
+					)),
+		);
+		if (!changes.length) return;
+		// A dependency change invalidates diagnostics for the client's open documents.
+		// Re-send their current version on next collection so push-only servers re-analyze.
+		for (const uri of this.versions.keys()) {
+			this.dirty.add(uri);
+			this.published.delete(diagnosticUriKey(uri));
+			this.pulls.delete(uri);
+		}
+		for (const { path, type } of changes) {
+			const uri = pathToFileURL(path).href;
+			if (type === 3) {
+				if (this.versions.has(uri)) await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
+				this.versions.delete(uri);
+				this.published.delete(diagnosticUriKey(uri));
+				this.pulls.delete(uri);
+				this.savedVersions.delete(uri);
+			} else if (this.versions.has(uri)) await this.openFile(path);
+		}
+
 		await this.sendNotification("workspace/didChangeWatchedFiles", {
 			changes: changes.map(({ path, type }) => ({ uri: pathToFileURL(path).href, type })),
 		});
@@ -196,35 +258,29 @@ class Client extends LspClient {
 		const uri = pathToFileURL(path).href;
 		const cold = !this.versions.has(uri);
 		await this.openFile(path);
-		await this.sendNotification("textDocument/didSave", { textDocument: { uri } });
-		const settling = Date.now() + (cold ? 5000 : 2000);
-		while ((this.progress.size || Date.now() - this.progressAt < 200) && Date.now() < settling) {
-			signal.throwIfAborted();
-			await new Promise((resolve) => setTimeout(resolve, 25));
+		const settling = Date.now() + (cold ? BUDGET.lspCold : BUDGET.lspWarm);
+		if (!(await this.settle(settling, signal))) return { items: [], ready: false };
+		const version = this.versions.get(uri)?.version;
+		if (version !== undefined && this.savedVersions.get(uri) !== version) {
+			await this.sendNotification("textDocument/didSave", { textDocument: { uri } });
+			this.savedVersions.set(uri, version);
+			if (this.isRustAnalyzer()) {
+				this.progressAt = Date.now();
+				if (!(await this.settle(settling, signal))) return { items: [], ready: false };
+			}
 		}
-		if (this.progress.size) return { items: [], ready: false };
 		if (this.capabilities["diagnosticProvider"]) {
 			const previous = this.pulls.get(uri);
 			const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, settling - Date.now()))]);
-			const result = await new Promise<{ kind: string; items?: Diagnostic[]; resultId?: string }>(
-				(resolve, reject) => {
-					const abort = () => {
-						void this.stop();
-						reject(new Error(signal.aborted ? "Diagnostics cancelled" : "Diagnostic request timeout"));
-					};
-					requestSignal.addEventListener("abort", abort, { once: true });
-					if (requestSignal.aborted) {
-						abort();
-						return;
-					}
-					void this.sendRequest<{ kind: string; items?: Diagnostic[]; resultId?: string }>(
-						"textDocument/diagnostic",
-						{ textDocument: { uri }, ...(previous ? { previousResultId: previous.resultId } : {}) },
-					)
-						.then(resolve, reject)
-						.finally(() => requestSignal.removeEventListener("abort", abort));
-				},
+			if (!this.connection) return { items: [], ready: false };
+			const result = await this.connection.sendRequest<{ kind: string; items?: Diagnostic[]; resultId?: string }>(
+				"textDocument/diagnostic",
+				{ textDocument: { uri }, ...(previous ? { previousResultId: previous.resultId } : {}) },
+				requestSignal,
 			);
+			signal.throwIfAborted();
+			if (requestSignal.aborted || Date.now() > settling) return { items: [], ready: false };
+
 			if (result.kind === "unchanged" && previous)
 				return { items: previous.items, ready: true, evidence: "pull-unchanged" };
 			if (Array.isArray(result.items)) {
@@ -298,9 +354,44 @@ export class Languages {
 			await client.refresh(events);
 		}
 	}
+	async update(config: Config): Promise<void> {
+		for (const managed of this.manager.getSnapshot()) {
+			if (
+				config.trusted !== this.config.trusted ||
+				Object.keys(this.config.servers).some((language) => {
+					const previous = this.config.servers[language];
+					return (
+						previous &&
+						managed.serverId.startsWith(`${previous.id}:`) &&
+						JSON.stringify(previous) !== JSON.stringify(config.servers[language])
+					);
+				})
+			)
+				this.manager.invalidateClient(managed.root, managed.serverId);
+		}
+		this.config = config;
+	}
+	async invalidate(path: string): Promise<void> {
+		const directory = dirname(resolve(this.root, path));
+		const language = configurationImpact(path).length
+			? undefined
+			: (await resolveServer(this.root, path, this.config).catch(() => undefined))?.language;
+		const languages = language ? [language] : configurationLanguages(path);
+		for (const managed of this.manager.getSnapshot()) {
+			if (
+				(inside(directory, managed.root) || inside(managed.root, directory)) &&
+				languages.some((language) => {
+					const server = this.config.servers[language];
+					return server && managed.serverId.startsWith(`${server.id}:`);
+				})
+			)
+				this.manager.invalidateClient(managed.root, managed.serverId);
+		}
+	}
+
 	constructor(
 		private readonly root: string,
-		private readonly config: Config,
+		private config: Config,
 	) {
 		this.manager = new LspManager({
 			idleTimeoutMs: 120000,
@@ -308,7 +399,7 @@ export class Languages {
 				if (!inside(this.root, root))
 					throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
 				this.processStarts++;
-				const client = new Client(root, server);
+				const client = new Client(root, server, executionEnvironment());
 				this.clients.add(client);
 				return client;
 			},
@@ -317,7 +408,9 @@ export class Languages {
 	private failures = new Map<string, { identity: string; at: number; reason: string }>();
 	async status(path: string): Promise<unknown> {
 		const resolved = await resolveServer(this.root, path, this.config);
-		const failure = this.failures.get(`${resolved.language}:${resolved.tool.identity}`);
+		const failure = this.failures.get(
+			`${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`,
+		);
 		return {
 			...resolved,
 			lint: this.config.trusted
@@ -363,7 +456,7 @@ export class Languages {
 		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
 		if (resolved.tool.source === "temporary" && !this.config.trusted)
 			throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
-		const failureKey = `${resolved.language}:${resolved.tool.identity}`;
+		const failureKey = `${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`;
 		const failed = this.failures.get(failureKey);
 		if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 30000)
 			throw new Error(failed.reason);
@@ -376,12 +469,20 @@ export class Languages {
 		)
 			root = dirname(dirname(dirname(resolved.tool.command[0])));
 		resolved.server.id += `:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`;
+		for (const managed of options.manager.getSnapshot())
+			if (
+				managed.root === root &&
+				managed.serverId.startsWith(`${resolved.server.id.split(":")[0]}:`) &&
+				managed.serverId !== resolved.server.id
+			)
+				options.manager.invalidateClient(managed.root, managed.serverId);
 		let client: LspClient;
 		try {
 			client = await measured("startup/acquire", () =>
 				options.manager.getClient(root, resolved.server, options.signal),
 			);
 		} catch (error) {
+			if (options.signal.aborted) throw error;
 			for (const [key, failure] of this.failures) if (Date.now() - failure.at >= 30000) this.failures.delete(key);
 			this.failures.set(failureKey, {
 				identity: resolved.tool.identity,
@@ -397,8 +498,10 @@ export class Languages {
 		}
 		this.failures.delete(failureKey);
 		try {
+			if (client instanceof Client) client.requestSignal = options.signal;
 			return await fn(client);
 		} finally {
+			if (client instanceof Client) client.requestSignal = undefined;
 			options.manager.releaseClient(root, resolved.server.id);
 		}
 	}
@@ -433,7 +536,7 @@ export class Languages {
 		} catch (error) {
 			const note = message(error);
 			if (
-				/server cancelled|content modified/i.test(note) ||
+				/server cancelled|content modified|cancelled|timeout|timed out/i.test(note) ||
 				(record(error) && [-32801, -32802].includes(Number(error["code"])))
 			)
 				return { path, state: "pending", findings: [], note: "Server is updating its analysis; retry" };
@@ -447,7 +550,7 @@ export class Languages {
 			};
 		}
 	}
-	async navigate(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+	async navigate(args: Record<string, unknown>, signal: AbortSignal): Promise<NavigationResult> {
 		const path = await workspacePath(this.root, text(args["path"]));
 		const operation = text(args["operation"]);
 		const line = number(args["line"], 1, 1, 10000000);
@@ -461,7 +564,7 @@ export class Languages {
 					["definition", "references", "symbols", "prepare_rename"].includes(operation) &&
 					!client.supports(operation === "symbols" && args["query"] ? "workspaceSymbolProvider" : operation)
 				)
-					return JSON.stringify({ status: "unsupported", operation });
+					return { status: "unsupported", operation };
 				let result: unknown;
 				switch (operation) {
 					case "hover":
@@ -496,21 +599,25 @@ export class Languages {
 						throw new Error("Unknown navigation operation");
 				}
 				const output = JSON.stringify(result ?? []);
-				if (output.length <= 8000) return output;
-				if (!Array.isArray(result)) return JSON.stringify({ status: "too_large", note: "Narrow query/path" });
+				if (output.length <= 8000) return { status: "complete", result: result ?? [] };
+				if (!Array.isArray(result)) return { status: "too_large", note: "Narrow query/path" };
 				const items: unknown[] = [];
 				for (const item of result) {
 					if (JSON.stringify([...items, item]).length > 7600) break;
 					items.push(item);
 				}
-				return JSON.stringify({ items, omitted: result.length - items.length, note: "Narrow query/path" });
+				return { status: "partial", items, omitted: result.length - items.length };
 			},
 			operation,
 			{ manager: this.manager, signal },
 		);
 	}
-	private async applyRename(edit: WorkspaceEdit | null, version: string, signal: AbortSignal): Promise<string> {
-		if (!edit) return "No rename edits";
+	private async applyRename(
+		edit: WorkspaceEdit | null,
+		version: string,
+		signal: AbortSignal,
+	): Promise<NavigationResult> {
+		if (!edit) return { status: "unchanged", modifiedPaths: [] };
 		const changes = new Map<string, TextEdit[]>();
 		for (const [uri, edits] of Object.entries(edit.changes ?? {})) changes.set(uri, edits);
 		for (const change of edit.documentChanges ?? []) {
@@ -540,12 +647,9 @@ export class Languages {
 		} catch (error) {
 			throw new WriteFailure(`${message(error)}; modified paths: ${JSON.stringify(modified)}`, modified);
 		}
-		return JSON.stringify({
-			text: `Renamed: ${modified.join(", ")}`.slice(0, 8000),
-			modifiedPaths: modified,
-		});
+		return { status: "renamed", modifiedPaths: modified };
 	}
-	async format(path: string, signal: AbortSignal): Promise<string> {
+	async format(path: string, signal: AbortSignal): Promise<FormatResult> {
 		const absolute = await workspacePath(this.root, path);
 		const before = await readFile(absolute, "utf8");
 		const edits = await this.withLspClient(
@@ -559,10 +663,10 @@ export class Languages {
 		);
 		const after = applyTextChanges(before, edits);
 		if ((await readFile(absolute, "utf8")) !== before) throw new Error("File changed during formatting; retry");
-		if (after === before) return `Unchanged: ${path}`;
+		if (after === before) return { status: "unchanged", path, modifiedPaths: [] };
 		signal.throwIfAborted();
 		await writeFile(absolute, after);
-		return `Formatted: ${path}`;
+		return { status: "formatted", path, modifiedPaths: [path] };
 	}
 	async close(): Promise<void> {
 		await this.manager.stopAll();

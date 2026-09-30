@@ -1,9 +1,9 @@
 {
 	"name": "codex-codeintel",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "Give Codex LSP/lint diagnostics, symbol navigation, rename, explicit formatting, and automatic Hooks.",
 	"author": {
-		"name": "Kortexal",
+		"name": "zoisythe",
 		"url": "https://github.com/zoisythe"
 	},
 	"homepage": "https://github.com/zoisythe/codex-codeintel",
@@ -22,8 +22,8 @@
 	"interface": {
 		"displayName": "Codex CodeIntel",
 		"shortDescription": "Code diagnostics, symbol navigation, rename, and formatting",
-		"longDescription": "Codex CodeIntel shares a local workspace service between MCP and Hooks. Edits automatically check changed files with LSP and lint; Stop checks the full workspace without blocking. Five static tools provide diagnostics, navigation, rename, and explicit formatting. Automatic checks never download tools, format, or lint-fix.",
-		"developerName": "Kortexal",
+		"longDescription": "Codex CodeIntel shares local LSP and project CLI checks across MCP and Hooks. Source writes wait for reliable project baselines; PostToolUse reports introduced diagnostics and Stop requests one repair pass for unresolved introduced errors. Six tools provide project checks, scoped diagnostics, navigation, rename and explicit formatting.",
+		"developerName": "zoisythe",
 		"category": "Developer Tools",
 		"capabilities": [
 			"Hooks",

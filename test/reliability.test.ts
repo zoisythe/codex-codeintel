@@ -5,11 +5,10 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { configuration, trusted } from "../src/config.js";
-import { Engine } from "../src/engine.js";
 import { inventory } from "../src/files.js";
-import { HookEngine } from "../src/hook-engine.js";
 import { Metadata } from "../src/metadata.js";
 import { lint, run } from "../src/runners.js";
+import { Engine, HookEngine } from "./engine-harness.js";
 
 const temps: string[] = [];
 const signal = () => new AbortController().signal;
@@ -234,7 +233,7 @@ it("checks a small scope in a repository over 10000 files without reusing unveri
 	});
 	const args = { scope: "paths", path: "small", session: "s" };
 	const result = await engine.dispatch("check_diagnostics", args, signal());
-	expect(result).toContain("partial; checked=1");
+	expect(result).toContain("checked=1");
 	expect(result).toContain("dependency freshness unverified");
 	await engine.dispatch("check_diagnostics", args, signal());
 	expect(calls).toBe(2);
@@ -244,7 +243,7 @@ it.each(["add", "delete", "modify", "configuration"])("rejects old revision afte
 	const { root, project } = await fixture();
 	const engine = new Engine(root, async (path) => ({ path, state: "complete", findings: [] }));
 	await Promise.all(Array.from({ length: 60 }, (_, i) => writeFile(join(root, `page${i}.js`), "x")));
-	const args = { scope: "paths", session: "s" };
+	const args = { scope: "paths", paths: Array.from({ length: 60 }, (_, i) => `page${i}.js`), session: "s" };
 	const first = await engine.dispatch("check_diagnostics", args, signal());
 	const cursor = (JSON.parse(first) as { next: { cursor: string } }).next.cursor;
 	if (change === "add") await writeFile(join(root, "b.js"), "new");

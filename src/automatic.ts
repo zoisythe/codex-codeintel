@@ -1,4 +1,5 @@
 import { setTimeout as delay, setImmediate as yieldBatch } from "node:timers/promises";
+import { BUDGET } from "./budgets.js";
 import { configuration } from "./config.js";
 import type { Engine } from "./engine.js";
 import { withExecution } from "./environment.js";
@@ -23,7 +24,7 @@ interface Job {
 export interface AutomaticResult {
 	generation: number;
 	scope: string;
-	state: string;
+	state: "running" | "complete" | "pending" | "cancelled" | "stale";
 	total: number;
 	results: FileResult[];
 	pending: string[];
@@ -73,12 +74,16 @@ export class Automatic {
 			note: job.note,
 		};
 	}
-	async request(args: Record<string, unknown>, environment: NodeJS.ProcessEnv, signal: AbortSignal): Promise<string> {
+	async request(
+		args: Record<string, unknown>,
+		environment: NodeJS.ProcessEnv,
+		signal: AbortSignal,
+	): Promise<AutomaticResult> {
 		const session = text(args["session"]);
 		const store = new Metadata(this.root);
 		const state = await store.read(session);
 		if (state.turn === "__ended__" || state.generation !== args["generation"])
-			return JSON.stringify({ generation: -1, results: [], pending: [], state: "stale" });
+			return { generation: -1, scope: "delta", total: 0, note: "", results: [], pending: [], state: "stale" };
 		const config = await configuration(this.root);
 		if (!config.trusted) {
 			this.cancel();
@@ -117,13 +122,14 @@ export class Automatic {
 			job.done = withExecution(environment, true, () => this.run(target));
 		}
 		const target = job;
-		const wait = typeof args["waitMs"] === "number" ? Math.max(0, Math.min(43000, args["waitMs"])) : 3500;
+		const wait =
+			typeof args["waitMs"] === "number" ? Math.max(0, Math.min(BUDGET.stopWait, args["waitMs"])) : BUDGET.postWait;
 		const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait))]);
 		await Promise.race([target.done, delay(wait, undefined, { signal: waiting }).catch(() => undefined)]);
-		return JSON.stringify(this.result(target));
+		return this.result(target);
 	}
 	private async run(job: Job): Promise<void> {
-		const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(300000)]);
+		const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.project)]);
 		const store = new Metadata(this.root);
 		try {
 			let remaining = [...job.paths];
@@ -131,7 +137,7 @@ export class Automatic {
 				await this.engine.dispatch("automatic_batch", { paths: [], session: job.session }, signal);
 			while (remaining.length && !signal.aborted) {
 				const retry: string[] = [];
-				for (let start = 0; start < remaining.length; start += 50) {
+				for (let start = 0; start < remaining.length; start += BUDGET.batch) {
 					signal.throwIfAborted();
 					const state = await store.read(job.session);
 					const config = await configuration(this.root);
@@ -145,13 +151,13 @@ export class Automatic {
 						job.note = "Generation/configuration/trust changed; results stale";
 						return;
 					}
-					const paths = remaining.slice(start, start + 50);
+					const paths = remaining.slice(start, start + BUDGET.batch);
 					const output = await this.engine.dispatch(
 						"automatic_batch",
 						{ paths, session: job.session, turn: state.turn },
 						signal,
 					);
-					const results = JSON.parse(output) as FileResult[];
+					const results = output["results"] as FileResult[];
 					await store.update(job.session, signal, (current) => {
 						if (current.generation !== job.generation || current.turn === "__ended__") return false;
 						for (const result of results) {

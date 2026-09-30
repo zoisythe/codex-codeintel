@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HookEngine as Engine } from "../src/hook-engine.js";
 import { Metadata } from "../src/metadata.js";
+import { HookEngine as Engine } from "./engine-harness.js";
 
 const roots: string[] = [];
 async function fixture(): Promise<string> {
@@ -43,12 +43,12 @@ describe("inventory-based PostToolUse hook", () => {
 		await engine.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal);
 		await writeFile(join(root, "changed.ts"), "changed");
 		const output = JSON.parse(await engine.hook({ session_id: "s", hook_event_name: "Stop" }, signal));
-		expect(output.decision).toBeUndefined();
-		expect(output.systemMessage).toContain("broken");
+		expect(output.decision).toBe("block");
+		expect(output.reason).toContain("broken");
 		expect(output.hookSpecificOutput).toBeUndefined();
 		expect(await engine.hook({ session_id: "s", hook_event_name: "Stop", stop_hook_active: true }, signal)).toBe("");
 	});
-	it("checks full scope when PostToolUse has no baseline", async () => {
+	it("does not manufacture a pre-edit baseline after editing", async () => {
 		const root = await fixture();
 		let checks = 0;
 		const engine = new Engine(root, async (path) => {
@@ -60,8 +60,8 @@ describe("inventory-based PostToolUse hook", () => {
 				{ session_id: "s1", turn_id: "t1", hook_event_name: "PostToolUse", cwd: root },
 				new AbortController().signal,
 			),
-		).toBe("");
-		expect(checks).toBe(1);
+		).toContain("Pre-edit baseline missing");
+		expect(checks).toBe(0);
 	});
 
 	it("checks only files that changed after the baseline", async () => {

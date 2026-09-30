@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { access, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
-import { createSpawnCommand, terminateProcessTree } from "../packages/lsp-tools-mcp/dist/lsp/process.js";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { BUDGET } from "./budgets.js";
 import { type Config, configuration } from "./config.js";
-import { automaticExecution, executionEnvironment } from "./environment.js";
+import { configurationImpact } from "./config-files.js";
+import { automaticExecution, executionEnvironment, subprocessEnvironment } from "./environment.js";
+import { createSpawnCommand, terminateProcessTree } from "./lsp/process.js";
 
 export { trusted } from "./config.js";
 
@@ -12,7 +14,7 @@ import { parseLint } from "./lint-output.js";
 import { logEvent } from "./log.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
-import { type FileResult, message } from "./results.js";
+import { type FileResult, type FormatResult, message, record } from "./results.js";
 import { languageFor, resolveTool } from "./tool-resolution.js";
 
 export async function run(
@@ -21,13 +23,15 @@ export async function run(
 	cwd: string,
 	signal: AbortSignal,
 	input?: string,
+	options: { timeout?: number; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<{ stdout: string; stderr: string; code: number }> {
 	signal.throwIfAborted();
+	const environment = subprocessEnvironment(options.environment ?? executionEnvironment());
 	return new Promise((resolve, reject) => {
-		const prepared = createSpawnCommand([command, ...args]);
+		const prepared = createSpawnCommand([command, ...args], process.platform, environment["ComSpec"], environment);
 		const child = spawn(prepared.command, prepared.args, {
 			cwd,
-			env: executionEnvironment(),
+			env: environment,
 			shell: prepared.shell,
 			detached: process.platform !== "win32",
 			windowsHide: true,
@@ -43,10 +47,10 @@ export async function run(
 			exceeded = true;
 			void logEvent("timeout");
 			terminateProcessTree(child, "SIGKILL");
-		}, 20000);
+		}, options.timeout ?? BUDGET.runner);
 		child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
 			stdout += chunk;
-			if (Buffer.byteLength(stdout) > 4 * 1024 * 1024) {
+			if (Buffer.byteLength(stdout) > BUDGET.outputBytes) {
 				exceeded = true;
 				terminateProcessTree(child, "SIGKILL");
 			}
@@ -210,38 +214,142 @@ export async function lint(
 	provided?: Config,
 	active = false,
 ): Promise<FileResult | undefined> {
+	return (await lintBatch(root, [path], signal, provided, active)).get(path);
+}
+export async function lintBatch(
+	root: string,
+	paths: string[],
+	signal: AbortSignal,
+	provided?: Config,
+	active = false,
+): Promise<Map<string, FileResult>> {
 	const config = provided ?? (await configuration(root));
-	if (!config.trusted) return undefined;
-	try {
-		const absolute = await workspacePath(root, path);
-		if (!languageFor(config, path))
-			return { path, state: "skipped", findings: [], note: "Language disabled or unsupported" };
-		const runner = await select(root, absolute, false, config, active, signal);
-		if (!runner)
-			return { path, state: "skipped", findings: [], note: "lint off or no matching Runner configuration" };
-		const args =
-			runner.name === "biome"
-				? ["lint", "--reporter=json", "--max-diagnostics=1000", absolute]
-				: runner.name === "eslint"
-					? ["--format", "json", absolute]
-					: ["check", "--no-cache", "--output-format", "json", "--", absolute];
-		const result = await measured("lint", () =>
-			run(runner.command, [...runner.prefix, ...args], dirname(absolute), signal),
-		);
-		if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr || `Runner exit ${result.code}`);
-		const data: unknown = JSON.parse(result.stdout);
-		const findings = parseLint(runner.name, data, path, await readFile(absolute, "utf8"));
-		return { path, state: "complete", findings };
-	} catch (error) {
-		return { path, state: signal.aborted ? "pending" : "failed", findings: [], note: `lint: ${message(error)}` };
+	const results = new Map<string, FileResult>();
+	if (!config.trusted) return results;
+	const groups = new Map<string, { runner: Runner; cwd: string; paths: string[] }>();
+	for (const path of paths) {
+		try {
+			const absolute = await workspacePath(root, path);
+			const runner = languageFor(config, path)
+				? await select(root, absolute, false, config, active, signal)
+				: undefined;
+			if (!runner) {
+				results.set(path, {
+					path,
+					state: "skipped",
+					findings: [],
+					note: "lint off or no matching Runner configuration",
+				});
+				continue;
+			}
+			let cwd = dirname(absolute);
+			while (cwd !== root && inside(root, cwd)) {
+				const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
+				if (names.some((name) => configurationImpact(name).includes("lint"))) break;
+				cwd = dirname(cwd);
+			}
+			const key = JSON.stringify([
+				runner,
+				cwd,
+				await runnerIdentity(root, absolute, config),
+				executionEnvironment(),
+			]);
+			const group = groups.get(key) ?? { runner, cwd, paths: [] };
+			group.paths.push(path);
+			groups.set(key, group);
+		} catch (error) {
+			results.set(path, { path, state: "failed", findings: [], note: `lint: ${message(error)}` });
+		}
 	}
+	for (const { runner, cwd, paths: members } of groups.values()) {
+		const batches: string[][] = [];
+		let batch: string[] = [];
+		let bytes = 0;
+		for (const path of members) {
+			const size = Buffer.byteLength(resolve(root, path)) + 3;
+			if (batch.length && bytes + size > BUDGET.argvBytes) {
+				batches.push(batch);
+				batch = [];
+				bytes = 0;
+			}
+			batch.push(path);
+			bytes += size;
+		}
+		if (batch.length) batches.push(batch);
+		for (const paths of batches) {
+			try {
+				const args =
+					runner.name === "biome"
+						? ["lint", "--reporter=json", "--max-diagnostics=none"]
+						: runner.name === "eslint"
+							? ["--format", "json"]
+							: ["check", "--no-fix", "--no-fix-only", "--no-cache", "--output-format", "json", "--"];
+				const output = await measured("lint", () =>
+					run(
+						runner.command,
+						[...runner.prefix, ...args, ...paths.map((path) => resolve(root, path))],
+						cwd,
+						signal,
+					),
+				);
+				if (output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `Runner exit ${output.code}`);
+				const data: unknown = JSON.parse(output.stdout);
+				const split = splitLint(runner.name, data, root, cwd);
+				for (const path of paths)
+					results.set(path, {
+						path,
+						state: "complete",
+						findings: parseLint(
+							runner.name,
+							split.get(path) ?? (runner.name === "biome" ? { diagnostics: [] } : []),
+							path,
+							await readFile(resolve(root, path), "utf8"),
+						),
+					});
+			} catch (error) {
+				for (const path of paths)
+					results.set(path, {
+						path,
+						state: signal.aborted ? "pending" : "failed",
+						findings: [],
+						note: `lint: ${message(error)}`,
+					});
+			}
+		}
+	}
+	return results;
+}
+export function splitLint(runner: string, data: unknown, root: string, cwd: string): Map<string, unknown> {
+	const grouped = new Map<string, unknown[]>();
+	const items = runner === "biome" && record(data) ? data["diagnostics"] : data;
+	if (!Array.isArray(items)) throw new Error("Unexpected lint output");
+	if (
+		runner === "biome" &&
+		record(data) &&
+		record(data["summary"]) &&
+		Number(data["summary"]["diagnosticsNotPrinted"]) > 0
+	)
+		throw new Error("Lint result truncated");
+	for (const item of items) {
+		if (!record(item)) throw new Error("Malformed lint result");
+		const location = record(item["location"]) ? item["location"] : {};
+		const biomePath = record(location["path"]) ? location["path"]["file"] : location["path"];
+		const file = runner === "eslint" ? item["filePath"] : runner === "ruff" ? item["filename"] : biomePath;
+		if (typeof file !== "string") throw new Error("Lint result has no file path");
+		const path = relative(root, resolve(cwd, file));
+		if (!inside(root, resolve(root, path))) throw new Error("Lint result outside workspace");
+		const values = grouped.get(path) ?? [];
+		values.push(item);
+		grouped.set(path, values);
+	}
+	return new Map([...grouped].map(([path, items]) => [path, runner === "biome" ? { diagnostics: items } : items]));
 }
 export async function formatWithRunner(
 	root: string,
 	path: string,
 	signal: AbortSignal,
 	provided?: Config,
-): Promise<string | undefined> {
+): Promise<FormatResult | undefined> {
 	const config = provided ?? (await configuration(root));
 	if (!config.trusted) return undefined;
 	const absolute = await workspacePath(root, path);
@@ -255,10 +363,10 @@ export async function formatWithRunner(
 	const result = await run(runner.command, [...runner.prefix, ...args], dirname(absolute), signal, before);
 	if (result.code !== 0) throw new Error(result.stderr || "Format failed");
 	if ((await readFile(absolute, "utf8")) !== before) throw new Error("File changed during format; retry");
-	if (before === result.stdout) return `Unchanged: ${path}`;
+	if (before === result.stdout) return { status: "unchanged", path, modifiedPaths: [] };
 	signal.throwIfAborted();
 	await writeFile(absolute, result.stdout);
-	return `Formatted: ${path}`;
+	return { status: "formatted", path, modifiedPaths: [path] };
 }
 
 export async function preflightRunner(

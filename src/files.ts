@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
+import * as nodePath from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { TextEdit } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
+import { BUDGET } from "./budgets.js";
 import { executionEnvironment } from "./environment.js";
+import type { TextEdit } from "./lsp/types.js";
 
 import { measured } from "./metrics.js";
 
@@ -45,6 +47,23 @@ export interface Inventory {
 export async function inventory(...args: Parameters<typeof scanInventory>): Promise<Inventory> {
 	return measured("discovery/hash", () => scanInventory(...args));
 }
+interface Indexed {
+	signature: string;
+	content: string;
+}
+const snapshots = new Map<string, Inventory>();
+export function latestInventory(root: string): Inventory | undefined {
+	return snapshots.get(root);
+}
+const indexes = new Map<string, Map<string, Indexed>>();
+const counters = { scans: 0, contentReads: 0, bytesRead: 0 };
+export function indexStatistics(): typeof counters {
+	return { ...counters };
+}
+export function forgetIndex(root: string): void {
+	indexes.delete(root);
+	snapshots.delete(root);
+}
 async function scanInventory(
 	root: string,
 	maxFiles = 10000,
@@ -52,11 +71,12 @@ async function scanInventory(
 	exclude: string[] = [],
 	scope = root,
 	dependencyOnly = false,
+	force: readonly string[] = [],
 ): Promise<Inventory> {
 	signal?.throwIfAborted();
 	const included = (name: string) =>
 		!name.split(/[\\/]/).some((part) => SKIP.has(part)) &&
-		!exclude.some((pattern) => matchesGlob(name.split(sep).join("/"), pattern));
+		!exclude.some((pattern) => nodePath.matchesGlob(name.split(sep).join("/"), pattern));
 	let names: string[];
 	let complete = true;
 	try {
@@ -105,27 +125,54 @@ async function scanInventory(
 	names.sort();
 	if (names.length > maxFiles) complete = false;
 	if (!complete && dependencyOnly) return { files, complete: false, version: hash(JSON.stringify(names)) };
-	for (const name of names.slice(0, maxFiles)) {
-		signal?.throwIfAborted();
-		if (name.split(/[\\/]/).some((part) => SKIP.has(part))) continue;
-		try {
-			const path = await workspacePath(root, name);
-			const stat = await lstat(path);
-			if (!stat.isFile()) continue;
-			if (stat.size > 1024 * 1024) {
-				complete = false;
-				continue;
-			}
-			files.set(
-				relative(root, path),
-				hash(await readFile(path, { encoding: "utf8", ...(signal ? { signal } : {}) })),
-			);
-		} catch (error) {
-			signal?.throwIfAborted();
-			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) complete = false;
-		}
+	counters.scans++;
+	let index = indexes.get(root);
+	if (!index) {
+		index = new Map();
+		indexes.set(root, index);
 	}
-	return { files, version: hash(JSON.stringify([...files])), complete };
+	const cache = index;
+	const verify = new Set(force);
+	const selected = names.slice(0, maxFiles);
+	let next = 0;
+	await Promise.all(
+		Array.from({ length: BUDGET.scanWorkers }, async () => {
+			while (next < selected.length) {
+				const name = selected[next++];
+				if (!name) continue;
+				signal?.throwIfAborted();
+				try {
+					const path = await workspacePath(root, name);
+					const info = await lstat(path);
+					if (!info.isFile()) continue;
+					if (info.size > BUDGET.fileBytes) {
+						complete = false;
+						continue;
+					}
+					const key = relative(root, path);
+					const signature = JSON.stringify([info.size, info.mtimeMs, info.ctimeMs, info.dev, info.ino]);
+					let entry = cache.get(key);
+					if (verify.has(key) || entry?.signature !== signature) {
+						const content = await readFile(path, { encoding: "utf8", ...(signal ? { signal } : {}) });
+						counters.contentReads++;
+						counters.bytesRead += Buffer.byteLength(content);
+						entry = { signature, content: hash(content) };
+						cache.set(key, entry);
+					}
+					if (entry) files.set(key, entry.content);
+				} catch (error) {
+					signal?.throwIfAborted();
+					if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) complete = false;
+				}
+			}
+		}),
+	);
+	if (scope === root && complete) for (const key of cache.keys()) if (!files.has(key)) cache.delete(key);
+	const sorted = new Map([...files].sort(([a], [b]) => a.localeCompare(b)));
+
+	const snapshot = { files: sorted, version: hash(JSON.stringify([...sorted])), complete };
+	if (scope === root) snapshots.set(root, snapshot);
+	return snapshot;
 }
 export function applyTextChanges(text: string, edits: readonly TextEdit[]): string {
 	const lines = text.split("\n");

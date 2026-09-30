@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (unreleased)
 
-- Rename the repository, marketplace and plugin to `codex-codeintel`, the package and CLI to `@zoisythe/codex-codeintel` / `codex-codeintel`, and the `lsp` Skill to `code-intelligence`. Update MCP server identity, Hook feedback and installation guidance; preserve source attribution and Git history. See the [name migration guide](docs/migration-codeintel.md).
+- Consolidate current usage and configuration examples; keep phase engineering records locally under ignored `docs/history/` and exclude common local settings/caches from Git.
+
+- Add project CLI checks and reliable pre-edit baselines; deny uncovered or failed-checker source writes while permitting reads and checker configuration repair.
+- Compare diagnostic multisets after edits; report introduced findings and repairs, and request one Stop continuation for confirmed unresolved introduced errors.
+- Vendor the pinned MIT LSP dependency closure, remove submodule/bootstrap/legacy-peer-deps, and pass explicit subprocess environments.
+- Preserve hot clients on cancellation/timeouts, classify configuration impacts precisely, batch lint and use a workspace stat index with shared session snapshots.
+- Support Node >=22.12.0, add Linux/macOS/Windows Node 22.12/24 CI, shorten user guidance and publish only user documentation.
+
+- Rename the repository, marketplace and plugin to `codex-codeintel`, the package and CLI to `@zoisythe/codex-codeintel` / `codex-codeintel`, and the `lsp` Skill to `code-intelligence`. Update MCP server identity, Hook feedback and installation guidance; preserve source attribution and Git history. See [upgrading](docs/usage.md#upgrade).
 - Keep existing MCP tool names, configuration paths, environment variables and cache/IPC locations compatible across the rename.
 
 ## 0.6.0
@@ -13,11 +21,15 @@
 - Keep short Hook waits independent from five-minute background jobs; serialize workspace operations, yield between 50-file batches, merge pending edits and cancel superseded/session-ended tasks.
 - Isolate by canonical workspace, user, CODEX_HOME, bundle hash and protocol; include each request's execution environment in tool/client identity. Automatic execution requires trust and never downloads tools.
 - Share automatic findings with cached MCP queries, track per-channel pending state in metadata v6, deduplicate feedback and confirm error clearing once. Invalidate changed content/configuration/tools and remove deleted diagnostics.
-- Add bundle concurrency/recovery/full-scope acceptance, actual automatic Python/legacy and native TypeScript/C/C++/Rust checks, and a live Codex Hook session. See [migration](docs/migration-0.6.md) and [validation](docs/validation-0.6.md).
+- Add bundle concurrency/recovery/full-scope acceptance, actual automatic Python/legacy and native TypeScript/C/C++/Rust checks, and a live Codex Hook session. Phase migration and validation records are kept locally in the ignored `docs/history/` directory.
 
+
+## 0.5.0 follow-up (2026-09-30, 386d1b1)
 
 - Read workspace trust directly from Codex's user config.toml; match the selected directory without parent inheritance, ignore legacy plugin trust lists, and invalidate cached analysis when trust changes.
 - Keep Hook scope at the session cwd instead of promoting it to the Git root; expose the trust file and effective level in status and cover parent/child workspaces and live revocation through real MCP/Hook subprocesses.
+
+## 0.5.0 follow-up (2026-09-30, cbe16cb)
 
 - Support native TypeScript 7 through the `tsc` built-in (`tsc --lsp --stdio`) with local-first resolution and a pinned temporary recipe; add a local-only `tsgo` preview built-in while preserving the legacy TypeScript default.
 - Send object parameters with the LSP `initialized` notification so native TypeScript completes initialization; cover real MCP diagnostics, dependency updates, navigation, rename and formatting.
@@ -31,7 +43,7 @@
 - Two active content inventories, one cached inventory, no redundant PreToolUse baseline scan; bounded local timing statistics.
 - Updated bundle, Skill, migration guide, real Python/C/C++/Rust subprocess acceptance and performance measurements.
 
-See [migration](docs/migration-0.5.md) and [validation](docs/validation-0.5.md).
+Phase migration and validation records are kept locally in the ignored `docs/history/` directory.
 
 ## 0.4.0
 
@@ -44,10 +56,12 @@ See [migration](docs/migration-0.5.md) and [validation](docs/validation-0.5.md).
 - Add `lint.javascript`, `lint.python`, `exclude`, unified trust/config paths, configuration-aware cache validation and explicit diagnostics `refresh`.
 - Apply directory budgets within the requested scope; require content/config-bound `revision` for nonzero `start`/`offset`, including all/delta output pages.
 - Report LSP/lint channels and partial write outcomes separately; preserve explicit-only formatting/rename and bounded local error logs.
-- Extend dependency-free delivery subprocess tests to all three CI platforms. See validation.md for actual run evidence; workflow configuration is not a remote pass.
+- Extend dependency-free delivery subprocess tests to all three CI platforms. Phase validation records are kept locally in `docs/history/`; workflow configuration is not a remote pass.
 
 
 ## 0.3.0
+
+Released from 50138d8 (2026-09-08). Earlier packaging/toolchain changes below preceded this release.
 
 - Ship a self-contained `dist/cli.js` bundle so clean installs no longer need submodule contents or runtime `node_modules`.
 - Replace the upstream MCP tool surface with four static tools: `check_diagnostics`, `lsp_diagnostics`, `lsp_navigation`, and `lsp_format`.
@@ -60,7 +74,7 @@ See [migration](docs/migration-0.5.md) and [validation](docs/validation-0.5.md).
 - Restore `.codex-plugin/plugin.json` so this repository is a standalone Codex plugin again.
 - Point package, plugin, and marketplace metadata at [`zoisythe/codex-lsp-standalone`](https://github.com/zoisythe/codex-lsp-standalone).
 - Disable npm lifecycle scripts during install so native optional packages cannot run install hooks.
-- Upgrade Biome to 2.5.12, Vitest to 5.0.0, and `@types/node` to 26.4.1. Require Node.js 22.12+ and enable `legacy-peer-deps` so the submodule's Vitest 4 tree can install beside it.
+- Historical development updates: Biome 2.5.12, Vitest 5.0.0, Node types 26.4.1 and legacy peer handling for the former submodule.
 - Point the `packages/lsp-tools-mcp` submodule at [`zoisythe/lsp-tools-mcp`](https://github.com/zoisythe/lsp-tools-mcp) and pin `main` at `9cc6f75`.
 - Install `smol-toml` as an optional dependency so Cargo workspace parsing works after a parent `npm install`.
 - Require Node.js 24.20.0 LTS (Krypton).

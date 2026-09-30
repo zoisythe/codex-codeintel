@@ -1,41 +1,12 @@
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import type { Config } from "./config.js";
+import { configNames, configurationImpact, configurationLanguages } from "./config-files.js";
 import { executionEnvironment } from "./environment.js";
 import { hash, inside } from "./files.js";
 import { runnerIdentity } from "./runners.js";
-import { resolveServer } from "./tool-resolution.js";
+import { codeLanguage, resolveServer } from "./tool-resolution.js";
 
-const CONFIGS = [
-	"ty.toml",
-	".clangd",
-	"compile_commands.json",
-	"build/compile_commands.json",
-	"compile_flags.txt",
-	".clang-format",
-	"Cargo.lock",
-	"rust-toolchain",
-	"rust-toolchain.toml",
-	"rustfmt.toml",
-	".rustfmt.toml",
-	"biome.json",
-	"biome.jsonc",
-	"eslint.config.js",
-	"eslint.config.mjs",
-	"eslint.config.cjs",
-	"eslint.config.ts",
-	".eslintrc.json",
-	".eslintrc.cjs",
-	"pyproject.toml",
-	"ruff.toml",
-	".ruff.toml",
-	"tsconfig.json",
-	"jsconfig.json",
-	"pyrightconfig.json",
-	"package.json",
-	"Cargo.toml",
-	"go.mod",
-];
 // Direct workspace configuration is read even when scan exclusions hide it.
 // External extends/imports and tool installation changes require refresh.
 export async function analysisIdentity(
@@ -62,8 +33,16 @@ export async function analysisIdentity(
 		}
 	}
 	const contents: string[] = [];
-	for (const dir of [...dirs].sort())
-		for (const name of CONFIGS) {
+	const languages = paths.map((path) => codeLanguage(config, path));
+	const scoped = languages.every((language) => ["typescript", "python", "cpp", "rust", "go"].includes(language ?? ""));
+	for (const dir of [...dirs].sort()) {
+		const names = [
+			...new Set([...configNames(), ...(await readdir(dir)).filter((name) => configurationImpact(name).length)]),
+		];
+		for (const name of names) {
+			if (!configurationImpact(name).some((impact) => impact === "types" || impact === "lint")) continue;
+			const affected = configurationLanguages(name);
+			if (scoped && affected.length && !affected.some((language) => languages.includes(language))) continue;
 			signal.throwIfAborted();
 			const path = join(dir, name);
 			try {
@@ -73,6 +52,7 @@ export async function analysisIdentity(
 				if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
 			}
 		}
+	}
 	const representatives = [...new Map(paths.map((path) => [`${dirname(path)}:${extname(path)}`, path])).values()];
 	const servers = lsp
 		? await Promise.all(

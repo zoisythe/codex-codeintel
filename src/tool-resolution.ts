@@ -2,10 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import type { ResolvedServer } from "../packages/lsp-tools-mcp/dist/lsp/types.js";
 import type { Config, Server } from "./config.js";
 import { automaticExecution, executionEnvironment } from "./environment.js";
 import { hash, inside } from "./files.js";
+import type { ResolvedServer } from "./lsp/types.js";
 
 export interface ToolResolution {
 	command: string[];

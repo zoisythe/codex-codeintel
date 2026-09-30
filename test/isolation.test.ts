@@ -2,9 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { Engine } from "../src/engine.js";
-import { HookEngine } from "../src/hook-engine.js";
 import { Metadata } from "../src/metadata.js";
+import { Engine, HookEngine } from "./engine-harness.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -61,7 +60,7 @@ it("requires revision on continuation and rejects changed content", async () => 
 	const root = await fixture();
 	const engine = new Engine(root, async (path) => ({ path, state: "complete", findings: [] }));
 	await Promise.all(Array.from({ length: 60 }, (_, i) => writeFile(join(root, `page${i}.ts`), "x")));
-	const args = { scope: "paths", session: "s" };
+	const args = { scope: "paths", paths: Array.from({ length: 60 }, (_, i) => `page${i}.ts`), session: "s" };
 	const signal = new AbortController().signal;
 	const first = await engine.dispatch("check_diagnostics", args, signal);
 	const cursor = (JSON.parse(first) as { next: { cursor: string } }).next.cursor;

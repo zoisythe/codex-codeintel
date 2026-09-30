@@ -2,9 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Engine } from "../src/engine.js";
 import { applyTextChanges, workspacePath } from "../src/files.js";
 import { TOOLS } from "../src/protocol.js";
+import { Engine } from "./engine-harness.js";
 
 const roots: string[] = [];
 async function fixture() {
@@ -20,6 +20,7 @@ afterEach(async () => {
 describe("workspace diagnostics", () => {
 	it("keeps the tool schema fixed and small", () => {
 		expect(TOOLS.map((tool) => tool.name)).toEqual([
+			"check_project",
 			"check_diagnostics",
 			"lsp_status",
 			"lsp_navigation",

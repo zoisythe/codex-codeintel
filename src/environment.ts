@@ -27,6 +27,19 @@ export function executionEnvironment(): NodeJS.ProcessEnv {
 export function automaticExecution(): boolean {
 	return executions.getStore()?.automatic ?? false;
 }
+// Local shims may otherwise install a missing toolchain or synchronize a Python
+// environment before they execute the checker. Apply only at the spawn boundary.
+export function subprocessEnvironment(environment = executionEnvironment()): NodeJS.ProcessEnv {
+	return automaticExecution()
+		? {
+				...environment,
+				RUSTUP_AUTO_INSTALL: "0",
+				UV_PYTHON_DOWNLOADS: "never",
+				UV_NO_SYNC: "1",
+				UV_OFFLINE: "1",
+			}
+		: environment;
+}
 export function withExecution<T>(
 	environment: NodeJS.ProcessEnv,
 	automatic: boolean,

@@ -1,0 +1,21 @@
+// Wait < IPC/Hook budget < hooks.json timeout (10s ordinary, 50s Stop).
+export const BUDGET = {
+	postWait: 3500,
+	hook: 4400,
+	stopWait: 42500,
+	stop: 44000,
+	request: 45000,
+	project: 300000,
+	runner: 20000,
+	lspRequest: 35000,
+	lspCold: 5000,
+	lspWarm: 2000,
+	lspQuiet: 200,
+	lock: 1000,
+	batch: 50,
+	files: 10000,
+	fileBytes: 1024 * 1024,
+	outputBytes: 4 * 1024 * 1024,
+	argvBytes: 24000,
+	scanWorkers: 16,
+} as const;

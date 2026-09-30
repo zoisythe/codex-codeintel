@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { directoryLock } from "./directory-lock.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
+import type { Finding } from "./results.js";
 import { record } from "./results.js";
 import { workspaceIdentity } from "./service-identity.js";
 
@@ -16,7 +17,10 @@ export interface SessionState {
 	pendingChannels: { lsp: string[]; lint: string[] };
 	automaticScope: "delta" | "full";
 	turn: string;
-	baseline: Record<string, string> | null;
+	baseline: string | null;
+	diagnosticBaseline: string | null;
+	edited: boolean;
+	unresolved: Record<string, Finding[]>;
 	touched: string[];
 	current: string[];
 	pending: string[];
@@ -33,6 +37,9 @@ const empty = (id: string): SessionState => ({
 	automaticScope: "delta",
 	turn: "",
 	baseline: null,
+	diagnosticBaseline: null,
+	edited: false,
+	unresolved: {},
 	touched: [],
 	current: [],
 	pending: [],
@@ -46,7 +53,7 @@ export class Metadata {
 		const user = process.getuid?.() ?? hash(homedir()).slice(0, 10);
 		const base = join(
 			executionEnvironment()["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`),
-			`metadata-v6-${user}`,
+			`metadata-v7-${user}`,
 		);
 		await mkdir(base, { recursive: true, mode: 0o700 });
 		const info = await lstat(base);
@@ -71,13 +78,35 @@ export class Metadata {
 				typeof data["generation"] !== "number" ||
 				typeof data["configuration"] !== "string" ||
 				!record(data["pendingChannels"]) ||
+				typeof data["edited"] !== "boolean" ||
 				!["delta", "full"].includes(String(data["automaticScope"]))
 			)
 				throw new Error("Invalid metadata");
 			for (const key of ["touched", "current", "pending", "delivery", "blocked"])
 				if (!Array.isArray(data[key]) || !data[key].every((item: unknown) => typeof item === "string"))
 					throw new Error("Invalid metadata");
-			for (const key of ["shown", "baseline"])
+			for (const key of ["baseline", "diagnosticBaseline"])
+				if (data[key] !== null && (typeof data[key] !== "string" || !/^[a-f0-9]{64}$/.test(String(data[key]))))
+					throw new Error("Invalid baseline reference");
+			if (
+				!record(data["unresolved"]) ||
+				!Object.values(data["unresolved"]).every(
+					(items) =>
+						Array.isArray(items) &&
+						items.every(
+							(item: unknown) =>
+								record(item) &&
+								typeof item["path"] === "string" &&
+								typeof item["source"] === "string" &&
+								typeof item["message"] === "string" &&
+								typeof item["line"] === "number" &&
+								typeof item["column"] === "number" &&
+								["error", "warning", "information", "hint"].includes(String(item["severity"])),
+						),
+				)
+			)
+				throw new Error("Invalid unresolved diagnostics");
+			for (const key of ["shown"])
 				if (
 					!(key === "baseline" && data[key] === null) &&
 					(!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string"))
@@ -115,33 +144,22 @@ export class Metadata {
 			}
 		return ids.sort();
 	}
-	private async reclaim(lock: string): Promise<void> {
-		let owner: unknown;
-		try {
-			owner = JSON.parse(await readFile(join(lock, "owner"), "utf8"));
-		} catch {
-			return;
-		}
-		if (!record(owner) || typeof owner["pid"] !== "number" || typeof owner["nonce"] !== "string") return;
-		try {
-			process.kill(owner["pid"], 0);
-			return;
-		} catch (error) {
-			if (!record(error) || error["code"] !== "ESRCH") return;
-		}
-		// The former owner may have released the lock normally just before exiting.
-		// Re-read after observing its death so we cannot move a successor's lock.
-		try {
-			const current: unknown = JSON.parse(await readFile(join(lock, "owner"), "utf8"));
-			if (!record(current) || current["nonce"] !== owner["nonce"]) return;
-		} catch {
-			return;
-		}
-		// Keep this nonempty tombstone. A second reclaimer with the old nonce then
-		// cannot rename a new writer's lock over the same destination.
-		await rename(lock, `${lock}.abandoned-${hash(owner["nonce"])}`).catch((error: unknown) => {
-			if (!record(error) || !["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
+	async shared(value: unknown): Promise<string> {
+		const content = JSON.stringify(value);
+		const reference = hash(content);
+		const dir = join(await this.dir(), "shared");
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		const path = join(dir, `${reference}.json`);
+		await writeFile(path, content, { mode: 0o600, flag: "wx" }).catch((error: unknown) => {
+			if (!record(error) || error["code"] !== "EEXIST") throw error;
 		});
+		return reference;
+	}
+	async readShared(reference: string): Promise<unknown> {
+		if (!/^[a-f0-9]{64}$/.test(reference)) throw new Error("Invalid shared reference");
+		const content = await readFile(join(await this.dir(), "shared", `${reference}.json`), "utf8");
+		if (hash(content) !== reference) throw new Error("Shared snapshot integrity mismatch");
+		return JSON.parse(content) as unknown;
 	}
 	async update(id: string, signal: AbortSignal, change: (state: SessionState) => unknown): Promise<SessionState> {
 		signal.throwIfAborted();
@@ -149,27 +167,9 @@ export class Metadata {
 		const path = join(dir, `${hash(id)}.json`);
 		const lock = `${path}.lock`;
 		const nonce = randomUUID();
-		const candidate = `${lock}.claim-${nonce}`;
-		const released = `${lock}.released-${nonce}`;
 		const temp = `${path}.${nonce}.tmp`;
-		const deadline = Date.now() + 1000;
-		let acquired = false;
+		const release = await directoryLock(lock, signal);
 		try {
-			await mkdir(candidate, { mode: 0o700 });
-			await writeFile(join(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 0o600 });
-			// Publish a nonempty directory atomically; there is no ownerless-lock window.
-			while (!acquired) {
-				signal.throwIfAborted();
-				try {
-					await rename(candidate, lock);
-					acquired = true;
-				} catch (error) {
-					if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
-					await this.reclaim(lock);
-					if (Date.now() >= deadline) throw new Error("Metadata update busy; retry");
-					await delay(10, undefined, { signal });
-				}
-			}
 			const state = await this.load(path, id);
 			signal.throwIfAborted();
 			if (change(state) === false) return state;
@@ -181,13 +181,7 @@ export class Metadata {
 			return state;
 		} finally {
 			await rm(temp, { force: true });
-			await rm(candidate, { recursive: true, force: true });
-			if (acquired) {
-				// Move away before deleting children, so an empty directory cannot be
-				// replaced by a new owner while this writer is still removing it.
-				await rename(lock, released);
-				await rm(released, { recursive: true, force: true });
-			}
+			await release();
 		}
 	}
 	async end(id: string, signal: AbortSignal): Promise<void> {

@@ -51,7 +51,7 @@ test(`real npx ${server} recipe works offline after preparation`, { timeout: 150
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(npx, join(bin, "npx")); await symlink(process.execPath, join(bin, "node")); await symlink("/bin/sh", join(bin, "sh"));
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { typescript: server } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { typescript: server } }));
 	await writeFile(join(root, "main.ts"), 'export const value: number = "wrong";\n');
 	await writeFile(join(root, "tsconfig.json"), '{"compilerOptions":{"strict":true,"noEmit":true}}');
 	const env = { PATH: bin, npm_config_cache: join(dir, "npm-cache"), CODEX_LSP_CACHE: join(dir, "metadata") };

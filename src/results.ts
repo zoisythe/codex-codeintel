@@ -9,6 +9,7 @@ export interface Finding {
 }
 export interface FileResult {
 	path: string;
+	analysisRequired?: boolean;
 	state: "complete" | "pending" | "skipped" | "failed" | "stale";
 	findings: Finding[];
 	note?: string;
@@ -99,3 +100,12 @@ export function failureKind(reason: string): string {
 	if (/initializ/i.test(reason)) return "initialization_failed";
 	return "execution_failed";
 }
+
+export type FormatResult =
+	| { status: "unchanged"; path: string; modifiedPaths: [] }
+	| { status: "formatted"; path: string; modifiedPaths: string[] };
+export type NavigationResult =
+	| { status: "complete"; result: unknown }
+	| { status: "unsupported" | "too_large"; operation?: string; note?: string }
+	| { status: "renamed" | "unchanged"; modifiedPaths: string[] }
+	| { status: "partial"; items: unknown[]; omitted: number };

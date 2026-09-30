@@ -1,6 +1,6 @@
 {
 	"name": "@zoisythe/codex-codeintel",
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"description": "Codex code intelligence with LSP/lint diagnostics, symbol navigation, rename, formatting, and automatic Hooks.",
 	"type": "module",
 	"packageManager": "npm@11.12.1",
@@ -34,20 +34,16 @@
 		"NOTICE",
 		"README.md",
 		"CHANGELOG.md",
-		"docs"
+		"docs/usage.md",
+		"docs/examples/*.json"
 	],
 	"scripts": {
-		"bootstrap": "node scripts/bootstrap-submodule.mjs",
-		"prebuild": "node scripts/bootstrap-submodule.mjs",
 		"build": "node scripts/build.mjs",
-		"pretest": "node scripts/bootstrap-submodule.mjs",
 		"test": "node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript",
 		"test:watch": "node ./node_modules/vitest/vitest.mjs",
-		"pretypecheck": "node scripts/bootstrap-submodule.mjs",
 		"typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
 		"lint": "node ./node_modules/@biomejs/biome/bin/biome check src test scripts",
 		"lint:fix": "node ./node_modules/@biomejs/biome/bin/biome check --write src test scripts",
-		"precheck": "node scripts/bootstrap-submodule.mjs",
 		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
 		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs test/automatic-e2e.test.mjs",
 		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
@@ -55,14 +51,15 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.12",
-		"@types/node": "^26.4.1",
-		"esbuild": "0.25.12",
+		"@types/node": "^22.12.0",
+		"esbuild": "0.28.2",
 		"smol-toml": "1.7.0",
 		"typescript": "7.0.2",
 		"vite": "^8.2.2",
 		"vitest": "^5.0.0"
 	},
 	"engines": {
-		"node": ">=24.20.0"
-	}
+		"node": ">=22.12.0"
+	},
+	"author": "zoisythe"
 }

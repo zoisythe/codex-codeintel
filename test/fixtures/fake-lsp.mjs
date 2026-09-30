@@ -38,7 +38,13 @@ function handle(value) {
 	if (id === undefined) return;
 	if (method === "initialize" && mode === "cold") { setTimeout(() => send({ id, result: { capabilities: { textDocumentSync: 1 } } }), 6000); return; }
 	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
-	if (method === "textDocument/diagnostic" && pull) { const text = docs.get(params.textDocument.uri) ?? ""; send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items: text.includes("broken") ? [{range:{start:{line:0,character:0},end:{line:0,character:6}},severity:1,source:"fake",message:"pull broken"}] : []}}); return; }
+	if (method === "textDocument/diagnostic" && pull) {
+		const text = docs.get(params.textDocument.uri) ?? "";
+		const items = text.split("\n").flatMap((line,index) => line.includes("broken") ? [{range:{start:{line:index,character:0},end:{line:index,character:6}},severity:1,source:"fake",message:"pull broken"}] : []);
+		const reply = () => send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items}});
+		if (text.includes("delayed-reply")) setTimeout(reply,8000); else reply();
+		return;
+	}
 	if (method === "textDocument/diagnostic") { send({ id, error: { code: -32601, message: "Unhandled method textDocument/diagnostic" } }); return; }
 	const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } };
 	if (method === "textDocument/formatting") { send({ id, result: [{ range, newText: "fixed!" }] }); return; }

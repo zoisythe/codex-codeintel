@@ -3,16 +3,29 @@ import { createServer, type Socket } from "node:net";
 import { Automatic } from "./automatic.js";
 import { configuration } from "./config.js";
 import { Engine } from "./engine.js";
-import { withExecution } from "./environment.js";
+import { executionEnvironment, withExecution } from "./environment.js";
+import { HookEngine } from "./hook-engine.js";
 import { publishEndpoint, readEndpoint, serviceLocation } from "./ipc.js";
+import { ProjectChecks } from "./project-checks.js";
 import { message, record, text, WriteFailure } from "./results.js";
 import { SERVICE_PROTOCOL } from "./service-identity.js";
 
 export async function runService(root: string, identity: string, token: string): Promise<void> {
 	const location = await serviceLocation(root);
 	if (location.identity !== identity || !token) throw new Error("Invalid service startup identity");
-	const engine = new Engine(root);
+	const projects = new ProjectChecks(root);
+	const engine = new Engine(root, undefined, projects);
 	const automatic = new Automatic(root, engine);
+	const hooks = new HookEngine(root, {
+		projects,
+		check: async (paths, session, turn, generation, waitMs, signal) =>
+			automatic.request(
+				{ paths, session, turn, generation, waitMs, scope: "delta" },
+				executionEnvironment(),
+				signal,
+			),
+		end: (session) => automatic.cancel(session),
+	});
 	const sockets = new Set<Socket>();
 	let lastActivity = Date.now();
 	let requests = 0;
@@ -57,30 +70,40 @@ export async function runService(root: string, identity: string, token: string):
 			const args = value["args"];
 			const environment = value["environment"] as NodeJS.ProcessEnv;
 			try {
-				const output = await withExecution(environment, operation === "automatic", async () => {
-					if (operation === "handshake")
-						return JSON.stringify({ protocol: SERVICE_PROTOCOL, identity, pid: process.pid });
-					if (operation === "session_end") {
-						automatic.cancel(text(args["session"]));
-						return "";
-					}
-					if (operation === "automatic") return automatic.request(args, environment, controller.signal);
-					if (
-						!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(operation)
-					)
-						throw new Error("Unknown service operation");
-					const config = await configuration(root);
-					if (!config.trusted) automatic.cancel();
-					const output = await engine.dispatch(operation, args, controller.signal);
-					if (operation === "lsp_status")
-						return JSON.stringify({
-							...JSON.parse(output),
-							service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
-							automaticDiagnostics: config.automaticDiagnostics,
-							automaticTasks: automatic.status(),
-						});
-					return output;
-				});
+				const output = await withExecution(
+					environment,
+					operation === "automatic" || operation === "hook",
+					async () => {
+						if (operation === "handshake")
+							return { operation, protocol: SERVICE_PROTOCOL, identity, pid: process.pid };
+						if (operation === "session_end") {
+							automatic.cancel(text(args["session"]));
+							return { operation };
+						}
+						if (operation === "automatic")
+							return { operation, ...(await automatic.request(args, environment, controller.signal)) };
+						if (operation === "check_project")
+							return { ...(await projects.request(args, environment, controller.signal)) };
+						if (operation === "hook") return { operation, output: await hooks.hook(args, controller.signal) };
+						if (
+							!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(
+								operation,
+							)
+						)
+							throw new Error("Unknown service operation");
+						const config = await configuration(root);
+						if (!config.trusted) automatic.cancel();
+						const output = await engine.dispatch(operation, args, controller.signal);
+						if (operation === "lsp_status")
+							return {
+								...output,
+								service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
+								automaticDiagnostics: config.automaticDiagnostics,
+								automaticTasks: automatic.status(),
+							};
+						return output;
+					},
+				);
 				if (!socket.destroyed) socket.end(`${JSON.stringify({ output })}\n`);
 			} catch (error) {
 				if (!socket.destroyed)
@@ -118,13 +141,14 @@ export async function runService(root: string, identity: string, token: string):
 		server.close();
 		for (const socket of sockets) socket.destroy();
 		await automatic.dispose();
+		await projects.dispose();
 		await engine.dispose();
 		if ((await readEndpoint(location).catch(() => undefined))?.token === token)
 			await rm(location.endpoint, { force: true });
 	};
 	const idle = setInterval(() => {
 		void automatic.revalidate();
-		if (requests || automatic.active) lastActivity = Date.now();
+		if (requests || automatic.active || projects.active) lastActivity = Date.now();
 		else if (Date.now() - lastActivity >= 120000) void stop();
 	}, 1000);
 	process.once("SIGTERM", () => {

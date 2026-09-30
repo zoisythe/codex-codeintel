@@ -18,7 +18,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	await writeFile(preload, `import fs from "node:fs";const path=${JSON.stringify(clockFile)};const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(path,"utf8"));process.on("message",value=>{fs.writeFileSync(path,String(Number(fs.readFileSync(path,"utf8"))+value));process.send?.("advanced")});`);
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
+	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const check = (extra = {}) => client.call("check_diagnostics", { path: "main.fake", source: "lsp", ...extra });
 	await configure("pull");
@@ -29,7 +29,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	await writeFile(join(root, "main.fake"), "fixed\n"); assert.equal((await check()).structuredContent.errors, 0);
 	await configure("rename-only");
 	assert.equal((await client.call("lsp_navigation", { path: "main.fake", operation: "prepare_rename" })).structuredContent.status, "unsupported");
-	assert.equal((await client.call("lsp_navigation", { path: "main.fake", operation: "hover" })).structuredContent.status, "unsupported");
+	assert.equal((await client.call("lsp_navigation", { path: "main.fake", operation: "hover" })).structuredContent.result.status, "unsupported");
 	assert.equal((await check()).structuredContent.results[0].state, "complete", "unsupported capability leaves the language enabled");
 	await configure("empty-unversioned");
 	assert.equal((await check()).structuredContent.results[0].state, "pending");
@@ -52,7 +52,7 @@ test("bundle idle release keeps stdio alive and starts a new client", { timeout:
 	const dir = await mkdtemp(join(tmpdir(), "codex-idle-")), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "a.fake"), "broken\n");
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	const preload = join(dir, "idle.mjs");
 	const clockFile = join(dir, "time"); await writeFile(clockFile, "0");
 	await writeFile(preload, `import fs from "node:fs";const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(${JSON.stringify(clockFile)},"utf8"));`);

@@ -14,7 +14,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	const root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1 }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" } }));
 	const child = spawn(process.execPath, [resolve("dist/cli.js"), "mcp"], { cwd: root, env: { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") }, stdio: ["pipe", "pipe", "pipe"] });
 	const exit = once(child, "exit");
 	let sequence = 0, stderr = "";
@@ -47,7 +47,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	assert.equal((await check("main.py")).errors, 0);
 	for (const operation of ["definition", "references", "symbols", "hover", "typeDefinition", "implementation", "signatureHelp", "prepare_rename"]) {
 		const response = await call("lsp_navigation", { path: operation === "prepare_rename" ? "lib.py" : "main.py", operation, line: operation === "prepare_rename" ? 1 : 3, column: operation === "prepare_rename" ? 6 : operation === "signatureHelp" ? 16 : 12 });
-		const navigation = JSON.parse(response.content[0].text);
+		const navigation = response.structuredContent.result ?? response.structuredContent;
 		if (operation === "definition") assert.match(JSON.stringify(navigation), /lib\.py/);
 		if (operation === "references") assert.match(JSON.stringify(navigation), /main\.py/);
 		if (operation === "symbols") assert(Array.isArray(navigation) && navigation.length > 0);
@@ -95,7 +95,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 		await writeFile(join(project, "compile_commands.json"), JSON.stringify(database));
 		assert.equal((await check(`${folder}/value.${extension}`)).errors, 0);
 		for (const operation of ["definition", "references", "hover", "symbols"]) {
-			const navigation = JSON.parse((await call("lsp_navigation", { path: `${folder}/main.${extension}`, operation, line: 2, column: 21 })).content[0].text);
+			const navigation = (await call("lsp_navigation", { path: `${folder}/main.${extension}`, operation, line: 2, column: 21 })).structuredContent.result;
 			if (operation === "definition") assert.match(JSON.stringify(navigation), /value\./);
 			if (operation === "references") assert.match(JSON.stringify(navigation), /main\./);
 			if (operation === "hover") assert(navigation.contents);
@@ -124,7 +124,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	await writeFile(join(rust, "app", "src", "main.rs"), 'fn main(){let value: i32 = 2;println!("{}",example_core::twice(value));}\n');
 	assert.equal((await check("rust/app/src/main.rs")).errors, 0);
 	for (const operation of ["definition", "references", "hover", "symbols"]) {
-		const navigation = JSON.parse((await call("lsp_navigation", { path: "rust/core/src/lib.rs", operation, line: 1, column: 9 })).content[0].text);
+		const navigation = (await call("lsp_navigation", { path: "rust/core/src/lib.rs", operation, line: 1, column: 9 })).structuredContent.result;
 		if (operation === "definition") assert.match(JSON.stringify(navigation), /lib\.rs/);
 		if (operation === "references") assert.match(JSON.stringify(navigation), /main\.rs/);
 		if (operation === "hover") assert(navigation.contents);
@@ -141,7 +141,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	await writeFile(join(rust, "Cargo.toml"), (await readFile(join(rust, "Cargo.toml"), "utf8")) + "[workspace.metadata]\nacceptance = true\n");
 	assert.equal((await check("rust/core/src/lib.rs")).errors, 0);
 	const rustAnalyzer = spawnSync("which", ["rust-analyzer"], { encoding: "utf8" }).stdout.trim();
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { rust: { command: [rustAnalyzer], extensions: [".rs"], initialization: { rustfmt: { overrideCommand: [join(dir, "missing-rustfmt")] } } } } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { rust: { command: [rustAnalyzer], extensions: [".rs"], initialization: { rustfmt: { overrideCommand: [join(dir, "missing-rustfmt")] } } } } }));
 	await assert.rejects(call("lsp_format", { path: "rust/core/src/lib.rs" }), /rustfmt|formatting/i);
 	const status = (await call("lsp_status", { path: "main.py" })).structuredContent;
 	assert.equal(status.tools[0].tool.source, "PATH");

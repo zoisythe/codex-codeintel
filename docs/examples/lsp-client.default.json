@@ -1,0 +1,9 @@
+{
+	"schemaVersion": 1,
+	"projectChecks": "auto",
+	"automaticDiagnostics": { "postToolUse": "delta", "stop": "errors" },
+	"lsp": { "python": "ty", "typescript": "typescript", "cpp": "clangd", "rust": "rust" },
+	"lint": { "javascript": "auto", "python": "auto" },
+	"formatting": { "tabSize": 4, "insertSpaces": true },
+	"exclude": []
+}

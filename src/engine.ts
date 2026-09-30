@@ -1,19 +1,53 @@
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { relative } from "node:path";
+import { dirname, relative } from "node:path";
+import type { AutomaticResult } from "./automatic.js";
+import { BUDGET } from "./budgets.js";
 import { type Config, configuration } from "./config.js";
-import { automaticExecution } from "./environment.js";
-import { hash, type Inventory, inventory, workspacePath } from "./files.js";
+import { configurationImpact, configurationLanguages } from "./config-files.js";
+import { automaticExecution, executionEnvironment } from "./environment.js";
+import { hash, type Inventory, indexStatistics, inventory, latestInventory, workspacePath } from "./files.js";
+import type { HookOutput } from "./hook-engine.js";
 import { analysisIdentity } from "./identity.js";
 import { Languages } from "./language.js";
-import { logEvent } from "./log.js";
 import { Metadata } from "./metadata.js";
 import { timings } from "./metrics.js";
-import { type FileResult, mergeFindings, message, record, render, text, WriteFailure } from "./results.js";
-import { formatWithRunner, lint, preflightRunner } from "./runners.js";
-import { codeLanguage, languageFor, withToolResolution } from "./tool-resolution.js";
+import { ProjectChecks } from "./project-checks.js";
+import type { ProjectResult } from "./project-types.js";
+import {
+	type FileResult,
+	type FormatResult,
+	mergeFindings,
+	message,
+	type NavigationResult,
+	text,
+	WriteFailure,
+} from "./results.js";
+import { formatWithRunner, lintBatch, preflightRunner } from "./runners.js";
+import { codeLanguage, withToolResolution } from "./tool-resolution.js";
 
-type Checker = (path: string, signal: AbortSignal, lspOnly: boolean) => Promise<FileResult>;
+export interface EngineDependencies {
+	checkBatch(
+		paths: string[],
+		config: Config,
+		source: string,
+		signal: AbortSignal,
+	): Promise<{ result: FileResult; lsp: FileResult; lint: FileResult }[]>;
+}
+export type ToolOutput = Record<string, unknown> &
+	(
+		| { operation: "release" | "session_end" }
+		| { operation: "handshake"; protocol: number; identity: string; pid: number }
+		| { operation: "hook"; output: HookOutput }
+		| ({ operation: "automatic" } & AutomaticResult)
+		| { operation: "automatic_batch"; results: FileResult[] }
+		| { operation: "lsp_status"; workspace: string; trusted: boolean; configuration: Config }
+		| { operation: "check_diagnostics"; results: FileResult[]; partial: boolean; errors: number; warnings: number }
+		| ({ operation: "lsp_navigation" | "lsp_rename" } & NavigationResult)
+		| { operation: "lsp_format"; results: FormatResult[]; modifiedPaths: string[] }
+		| ProjectResult
+	);
+
 interface Cached {
 	identity: string;
 	version: string;
@@ -33,14 +67,6 @@ export class Engine {
 	private configVersion = "";
 	private previousSnapshot: Inventory | undefined;
 	private queue: Promise<unknown> = Promise.resolve();
-	private readonly checker: Checker;
-	private requestConfig: Config | undefined;
-	private source = "both";
-	private lastResults: FileResult[] = [];
-	private lastChannels: { lsp: FileResult; lint: FileResult } | undefined;
-	private channelResults(): typeof this.lastChannels {
-		return this.lastChannels;
-	}
 	private generation = 0;
 	private pages = new Map<
 		string,
@@ -55,39 +81,52 @@ export class Engine {
 	>();
 	constructor(
 		readonly root: string,
-		checker?: Checker,
-	) {
-		this.checker =
-			checker ??
-			(async (path, signal, lspOnly) => {
-				this.language ??= new Languages(root, this.requestConfig ?? (await configuration(root)));
-				const lsp: FileResult =
-					this.source === "lint"
-						? { path, state: "skipped", findings: [] }
-						: await this.language.check(path, signal);
-				if (lspOnly) return lsp;
-				const runner = await lint(root, path, signal, this.requestConfig, !automaticExecution());
-				this.lastChannels = {
-					lsp,
-					lint: runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" },
-				};
-				if (this.source === "lint")
-					return runner ?? { path, state: "skipped", findings: [], note: "lint requires workspace trust" };
-				if (!runner)
-					return {
-						...lsp,
-						channels: { lsp: lsp.state, lint: "skipped" },
-						note: [lsp.note, "lint requires workspace trust"].filter(Boolean).join("; "),
+		private readonly dependencies: EngineDependencies = {
+			checkBatch: async (paths, config, source, signal) => {
+				this.language ??= new Languages(root, config);
+				const runners =
+					source === "lsp"
+						? new Map<string, FileResult>()
+						: await lintBatch(root, paths, signal, config, !automaticExecution());
+				const results = [];
+				for (const path of paths) {
+					const lsp: FileResult =
+						source === "lint"
+							? { path, state: "skipped", findings: [] }
+							: await this.language.check(path, signal);
+					const runner: FileResult = runners.get(path) ?? {
+						path,
+						state: "skipped",
+						findings: [],
+						note: "lint off or unavailable",
 					};
-				return {
-					path,
-					state: lsp.state === "complete" ? (runner.state === "skipped" ? "complete" : runner.state) : lsp.state,
-					channels: { lsp: lsp.state, lint: runner.state },
-					findings: mergeFindings([...lsp.findings, ...runner.findings]),
-					...(lsp.note || runner.note ? { note: [lsp.note, runner.note].filter(Boolean).join("; ") } : {}),
-				};
-			});
-	}
+					const selected =
+						source === "lsp"
+							? lsp
+							: source === "lint"
+								? runner
+								: {
+										path,
+										state:
+											lsp.state === "complete"
+												? runner.state === "skipped"
+													? ("complete" as const)
+													: runner.state
+												: lsp.state,
+										findings: mergeFindings([...lsp.findings, ...runner.findings]),
+										note: [lsp.note, runner.note].filter(Boolean).join("; "),
+									};
+					results.push({
+						result: { ...selected, channels: { lsp: lsp.state, lint: runner.state } },
+						lsp,
+						lint: runner,
+					});
+				}
+				return results;
+			},
+		},
+		private readonly projects = new ProjectChecks(root),
+	) {}
 	private session(id: string, turn?: string): Session {
 		let session = this.sessions.get(id);
 		if (!session) {
@@ -114,20 +153,20 @@ export class Engine {
 		return "manual";
 	}
 	private async synchronize(snapshot: Inventory): Promise<void> {
-		if (!snapshot.complete) await this.close();
 		const previous = this.previousSnapshot;
 		if (previous?.version !== snapshot.version && this.language) {
-			const configChanged = [...new Set([...snapshot.files.keys(), ...(previous?.files.keys() ?? [])])].some(
-				(path) =>
-					/(?:config|lock|manifest|Cargo\.toml|package\.json|go\.mod|pyproject|ty\.toml|ruff\.toml|\.clangd|compile_commands\.json|compile_flags\.txt|\.clang-format|rust-toolchain|rustfmt)/i.test(
-						path,
-					) && previous?.files.get(path) !== snapshot.files.get(path),
+			const changed = [...new Set([...snapshot.files.keys(), ...(previous?.files.keys() ?? [])])].filter(
+				(path) => previous?.files.get(path) !== snapshot.files.get(path),
 			);
-			if (configChanged) {
-				await this.language.close();
-				this.language = undefined;
-			} else await this.language.sync(snapshot.files);
+			for (const path of changed)
+				if (
+					configurationImpact(path).includes("types") &&
+					!/(?:\.lock|(?:^|\/)package(?:-lock)?\.json|(?:^|\/)pnpm-lock\.yaml)$/.test(path)
+				)
+					await this.language.invalidate(path);
+			await this.language.sync(snapshot.files);
 		}
+
 		for (const key of this.cache.keys()) {
 			const path = key.replace(/^(?:lsp|lint):/, "");
 			if (previous?.files.has(path) && !snapshot.files.has(path)) this.cache.delete(key);
@@ -141,118 +180,103 @@ export class Engine {
 		turn: string,
 		lspOnly = false,
 		signal: AbortSignal = new AbortController().signal,
-		offset = 0,
+		_offset = 0,
 		baseline?: Inventory,
-	): Promise<string> {
-		const config = this.requestConfig ?? (await configuration(this.root));
-		const snapshot = baseline ?? (await inventory(this.root, 10000, signal, config.exclude, this.root, true));
-		if (!baseline) snapshot.version = hash(snapshot.version + config.version);
+		provided?: Config,
+		source = lspOnly ? "lsp" : "both",
+	): Promise<FileResult[]> {
+		const config = provided ?? (await configuration(this.root));
+		const snapshot =
+			baseline ?? latestInventory(this.root) ?? (await inventory(this.root, BUDGET.files, signal, config.exclude));
 		await this.synchronize(snapshot);
 		const session = this.session(id, turn);
-		const results: FileResult[] = [];
-		const deadline = Date.now() + 45000;
-		for (const requested of [...new Set(paths)]) {
+		const results = new Map<string, FileResult>();
+		const pending: { path: string; identity: string; content: string; key: string }[] = [];
+		for (const requested of [...new Set(paths)].slice(0, 200)) {
 			signal.throwIfAborted();
-			let path = requested;
 			try {
-				path = relative(this.root, await workspacePath(this.root, requested));
+				const absolute = await workspacePath(this.root, requested);
+				const path = relative(this.root, absolute);
+				session.touched.add(path);
+				session.current.add(path);
+				if ((await stat(absolute)).size > BUDGET.fileBytes) {
+					results.set(path, { path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
+					continue;
+				}
+				const identity = await analysisIdentity(this.root, [path], config, signal);
+				this.identities.set(path, identity);
+				const content = hash(await readFile(absolute, { encoding: "utf8", signal }));
+				const key = `${source === "both" ? "" : `${source}:`}${path}`;
+				const cached = this.cache.get(key);
+				if (
+					snapshot.complete &&
+					cached?.version === this.projectVersion(snapshot, path, config) &&
+					cached.identity === identity &&
+					cached.content === content &&
+					cached.result.state === "complete"
+				)
+					results.set(path, cached.result);
+				else pending.push({ path, identity, content, key });
 			} catch (error) {
-				results.push({ path, state: "skipped", findings: [], note: message(error) });
-				this.cache.delete(path);
-				session.touched.delete(path);
-				continue;
+				signal.throwIfAborted();
+				results.set(requested, { path: requested, state: "skipped", findings: [], note: message(error) });
 			}
-			session.touched.add(path);
-			session.current.add(path);
-			if (Date.now() >= deadline || results.length >= 200) {
-				this.cache.delete(path);
-				this.cache.delete(`lsp:${path}`);
-				results.push({ path, state: "pending", findings: [], note: "Scan time budget reached" });
-				continue;
-			}
-			const key = `${lspOnly ? "lsp:" : this.source === "lint" ? "lint:" : ""}${path}`;
-			const cached = this.cache.get(key);
-			const identity = await analysisIdentity(this.root, [path], config, signal);
-			if (this.identities.has(path) && this.identities.get(path) !== identity) {
-				await this.close();
-				this.cache.clear();
-			}
-			this.identities.set(path, identity);
-			const absolute = await workspacePath(this.root, path);
-			if ((await stat(absolute)).size > 1024 * 1024) {
-				results.push({ path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
-				continue;
-			}
-			const content = hash(await readFile(absolute, { encoding: "utf8", signal }));
-			if (
-				snapshot.complete &&
-				cached?.version === snapshot.version &&
-				cached.identity === identity &&
-				cached.content === content &&
-				cached.result.state === "complete"
-			) {
-				results.push(cached.result);
-				continue;
-			}
-			this.lastChannels = undefined;
-			const result = await this.checker(path, signal, lspOnly);
+		}
+		const checked = await this.dependencies.checkBatch(
+			pending.map((entry) => entry.path),
+			config,
+			source,
+			signal,
+		);
+		for (const entry of pending) {
 			signal.throwIfAborted();
-			if (
-				hash(await readFile(await workspacePath(this.root, path), { encoding: "utf8", signal })) !== content ||
-				(await analysisIdentity(this.root, [path], await configuration(this.root), signal)) !== identity
-			) {
+			const channels = checked.find((item) => item.result.path === entry.path);
+			const result = channels?.result ?? {
+				path: entry.path,
+				state: "pending" as const,
+				findings: [],
+				note: "Checker returned no result",
+			};
+			try {
+				if (
+					hash(await readFile(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !==
+						entry.content ||
+					(await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal)) !==
+						entry.identity ||
+					this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !==
+						this.projectVersion(snapshot, entry.path, config)
+				) {
+					result.state = "stale";
+					result.note = "File/tool/configuration changed during diagnostics; retry";
+				}
+			} catch {
+				signal.throwIfAborted();
 				result.state = "stale";
-				result.note = "File changed during diagnostics; retry";
+				result.note = "File disappeared during diagnostics";
 			}
-			if (lspOnly) result.channels ??= { lsp: result.state, lint: "skipped" };
-			if (JSON.stringify(this.cache.get(key)?.result) !== JSON.stringify(result)) this.generation++;
-			this.cache.set(key, { version: snapshot.version, identity, content, result });
-			const channels = this.channelResults();
+			if (JSON.stringify(this.cache.get(entry.key)?.result) !== JSON.stringify(result)) this.generation++;
+			this.cache.set(entry.key, {
+				version: this.projectVersion(snapshot, entry.path, config),
+				identity: entry.identity,
+				content: entry.content,
+				result,
+			});
 			if (channels)
 				for (const channel of ["lsp", "lint"] as const) {
-					if ((channel === "lsp" && this.source === "lint") || (channel === "lint" && lspOnly)) continue;
-					const channelResult = { ...channels[channel] };
-					if (result.state === "stale") {
-						channelResult.state = "stale";
-						channelResult.note = result.note ?? "Stale diagnostics";
-					}
-					this.cache.set(`${channel}:${path}`, {
-						version: snapshot.version,
-						identity,
-						content,
-						result: channelResult,
+					if ((source === "lsp" && channel === "lint") || (source === "lint" && channel === "lsp")) continue;
+					this.cache.set(`${channel}:${entry.path}`, {
+						version: this.projectVersion(snapshot, entry.path, config),
+						identity: entry.identity,
+						content: entry.content,
+						result: result.state === "stale" ? { ...channels[channel], state: "stale" } : channels[channel],
 					});
 				}
-			results.push(result);
+			results.set(entry.path, result);
 		}
-		const after = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
-		after.version = hash(after.version + (await configuration(this.root)).version);
-		if (after.version !== snapshot.version) {
-			for (const entry of this.cache.values())
-				if (entry.version === snapshot.version) {
-					entry.result.state = "stale";
-					entry.result.note = "Workspace changed or snapshot incomplete; retry";
-				}
-			for (const result of results) {
-				result.state = "stale";
-				result.note = "Workspace changed or snapshot incomplete; retry";
-			}
-		}
-		if (paths.length > 200)
-			results.push({
-				path: ".",
-				state: "pending",
-				findings: [],
-				note: "File/snapshot budget exceeded; narrow paths",
-			});
-		this.lastResults = results;
-		return (
-			render(results, 50, 8192, offset) +
-			(!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "")
-		);
+		return [...results.values()];
 	}
 
-	dispatch(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+	dispatch(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput> {
 		const writes = operation === "lsp_format" || operation === "lsp_rename";
 		let started = false;
 		const task = this.queue.then(() => {
@@ -264,7 +288,6 @@ export class Engine {
 		return new Promise((resolve, reject) => {
 			const abort = () => {
 				if (!started || !writes) reject(new Error("Request cancelled while queued or executing"));
-				if (started) void this.close().catch(() => logEvent("cancel-cleanup-failure"));
 			};
 			signal.addEventListener("abort", abort, { once: true });
 			if (signal.aborted) abort();
@@ -287,7 +310,7 @@ export class Engine {
 			const absolute = await workspacePath(this.root, value);
 			if ((await stat(absolute)).isFile()) paths.add(relative(this.root, absolute));
 			else {
-				const scoped = await inventory(this.root, 10000, signal, config.exclude, absolute);
+				const scoped = await inventory(this.root, BUDGET.files, signal, config.exclude, absolute);
 				complete &&= scoped.complete;
 				for (const path of scoped.files.keys()) {
 					paths.add(path);
@@ -302,15 +325,16 @@ export class Engine {
 		return { paths: [...paths].sort().slice(0, 10000), complete };
 	}
 
-	private async execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+	private async execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput> {
 		if (operation === "release") {
 			await this.close();
 			this.cache.clear();
-			return "";
+			return { operation };
 		}
 		const config = await configuration(this.root);
 		if (this.configVersion !== config.version || args["refresh"] === true) {
-			await this.close();
+			if (args["refresh"] === true) await this.close();
+			else await this.language?.update(config);
 			this.cache.clear();
 			this.pages.clear();
 			this.configVersion = config.version;
@@ -329,7 +353,6 @@ export class Engine {
 			session.touched = new Set(state.touched);
 			session.current = new Set(state.current);
 		}
-		this.requestConfig = config;
 		if (operation === "lsp_status") {
 			this.language ??= new Languages(this.root, config);
 			const targets = args["path"]
@@ -337,7 +360,8 @@ export class Engine {
 				: Object.values(config.servers)
 						.filter((server) => !!server)
 						.map((server) => (server ? `status${server.extensions[0]}` : ""));
-			return JSON.stringify({
+			return {
+				operation,
 				workspace: this.root,
 				trusted: config.trusted,
 				configuration: config,
@@ -347,57 +371,70 @@ export class Engine {
 				timings: timings(),
 				cache: this.cache.size,
 				clients: this.language.statistics(),
+				index: indexStatistics(),
 				sessions: [...this.sessions.keys()],
-			});
+			};
 		}
 		if (operation === "automatic_batch") {
 			if (!config.trusted)
 				throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
-			this.source = "both";
 			const paths = Array.isArray(args["paths"])
 				? args["paths"].filter((path): path is string => typeof path === "string")
 				: [];
-			await this.check(paths.slice(0, 50), text(args["session"]), text(args["turn"]), false, signal);
-			return JSON.stringify(this.lastResults);
+			return {
+				operation,
+				results: await this.check(
+					paths.slice(0, BUDGET.batch),
+					text(args["session"]),
+					text(args["turn"]),
+					false,
+					signal,
+					0,
+					undefined,
+					config,
+				),
+			};
 		}
 		const id =
 			args["scope"] === "paths" || args["scope"] === undefined
 				? text(args["session"], "manual")
 				: this.id(args["session"]);
 		if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
+		if (
+			(operation === "lsp_rename" || operation === "lsp_format") &&
+			(config.automaticDiagnostics.postToolUse !== "off" || config.automaticDiagnostics.stop !== "off")
+		) {
+			const paths = operation === "lsp_rename" ? undefined : (await this.paths(args, signal)).paths;
+			const baseline = await this.projects.baseline(id, paths, executionEnvironment(), signal, BUDGET.stopWait);
+			if (baseline.pending.length || baseline.failures.length)
+				throw new Error(`Pre-edit baseline unavailable: ${[...baseline.pending, ...baseline.failures].join("; ")}`);
+		}
+
 		if (operation === "lsp_rename") args = { ...args, operation: "rename" };
 
 		if (operation === "lsp_navigation" || operation === "lsp_rename") {
 			const path = relative(this.root, await workspacePath(this.root, text(args["path"])));
 			const identity = await analysisIdentity(this.root, [path], config, signal);
 			if (this.identities.has(path) && this.identities.get(path) !== identity) {
-				await this.close();
-				this.cache.clear();
+				for (const key of this.cache.keys()) if (key.replace(/^(?:lsp|lint):/, "") === path) this.cache.delete(key);
 			}
 			this.identities.set(path, identity);
-			const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
+			const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, true);
 			snapshot.version = hash(snapshot.version + config.version);
 			await this.synchronize(snapshot);
 			this.language ??= new Languages(this.root, config);
-			const before = args["operation"] === "rename" ? await inventory(this.root, 10000, signal) : undefined;
-			let output: string;
+			const before = args["operation"] === "rename" ? await inventory(this.root, BUDGET.files, signal) : undefined;
+			let output: NavigationResult;
 			try {
 				output = await this.language.navigate(args, signal);
 			} finally {
 				if (before) this.cache.clear();
 			}
 			if (before) {
-				let modifiedPaths: string[] = [];
-				try {
-					const result: unknown = JSON.parse(output);
-					if (record(result) && Array.isArray(result["modifiedPaths"]))
-						modifiedPaths = result["modifiedPaths"].filter((path): path is string => typeof path === "string");
-				} catch {
-					/* No rename edits. */
-				}
+				const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
 				this.cache.clear();
-				const after = await inventory(this.root, 10000, signal).catch((error: unknown) => {
-					throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
+				const after = await inventory(this.root, BUDGET.files, signal).catch((error: unknown) => {
+					throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
 				});
 				const changed = [...after.files]
 					.filter(([path, version]) => before.files.get(path) !== version)
@@ -411,10 +448,10 @@ export class Engine {
 						signal,
 					);
 				} catch (error) {
-					throw new WriteFailure(`${message(error)}; ${output}`, modifiedPaths);
+					throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
 				}
 			}
-			return output;
+			return { ...output, operation };
 		}
 		const scope = await this.paths(args, signal);
 		const paths = scope.paths;
@@ -426,24 +463,24 @@ export class Engine {
 				const runner = await preflightRunner(this.root, path, config, signal);
 				await this.language.preflight(path, signal, runner ? undefined : "format");
 			}
-			const lines: string[] = [];
+			const writes: FormatResult[] = [];
 			const modifiedPaths: string[] = [];
 			try {
 				for (const path of paths) {
 					signal.throwIfAborted();
-					lines.push(
+					writes.push(
 						(await formatWithRunner(this.root, path, signal, config)) ??
 							(await this.language.format(path, signal)),
 					);
-					if (lines.at(-1)?.startsWith("Formatted:")) modifiedPaths.push(path);
+					if (writes.at(-1)?.status === "formatted") modifiedPaths.push(path);
 				}
 				await this.check(paths, id, "manual", false, signal);
 			} catch (error) {
-				throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(lines)}`, modifiedPaths);
+				throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(writes)}`, modifiedPaths);
 			} finally {
 				this.cache.clear();
 			}
-			return JSON.stringify({ text: lines.join("\n").slice(0, 8000) || "No files", modifiedPaths, results: lines });
+			return { operation, modifiedPaths, results: writes };
 		}
 		throw new Error("Unknown tool");
 	}
@@ -454,11 +491,20 @@ export class Engine {
 		signal: AbortSignal,
 		config: Config,
 		store: Metadata,
-	): Promise<string> {
+	): Promise<ToolOutput> {
 		for (const key of ["mode", "start", "offset", "revision"])
 			if (args[key] !== undefined)
-				throw new Error("Migration required: use scope/source/run/cursor; see docs/migration-0.5.md");
+				throw new Error("Migration required: use scope/source/run/cursor; see docs/usage.md#upgrade");
 		const scope = text(args["scope"], "paths");
+		if (
+			scope === "paths" &&
+			((!args["path"] && !args["paths"]) ||
+				args["path"] === "." ||
+				(Array.isArray(args["paths"]) && args["paths"].includes(".")))
+		)
+			throw new Error(
+				"Migration required: use check_project for workspace checks; check_diagnostics requires specific paths or turn/session scope",
+			);
 		const source = text(args["source"], "both");
 		const run = text(args["run"], "active");
 		if (
@@ -467,8 +513,7 @@ export class Engine {
 			!["active", "cached"].includes(run)
 		)
 			throw new Error("Invalid scope/source/run");
-		this.source = source;
-		const snapshot = await inventory(this.root, 10000, signal, config.exclude, this.root, true);
+		const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, true);
 		snapshot.version = hash(snapshot.version + config.version);
 		const token = text(args["cursor"]);
 		let results: FileResult[];
@@ -506,9 +551,9 @@ export class Engine {
 			results = [...page.results];
 			index = page.index;
 			if (run === "active") {
-				const pending = results.slice(index, index + 50);
-				if (pending.some((result) => result.note === "Continue cursor for active analysis")) {
-					await this.check(
+				const pending = results.slice(index, index + BUDGET.batch);
+				if (pending.some((result) => result.analysisRequired)) {
+					const checked = await this.check(
 						pending.map((result) => result.path),
 						id,
 						this.session(id).turn,
@@ -516,8 +561,10 @@ export class Engine {
 						signal,
 						0,
 						snapshot,
+						config,
+						source,
 					);
-					results.splice(index, pending.length, ...this.lastResults);
+					results.splice(index, pending.length, ...checked);
 				}
 			}
 		} else {
@@ -530,12 +577,12 @@ export class Engine {
 					const absolute = await workspacePath(this.root, value);
 					const path = relative(this.root, absolute);
 					if ((await stat(absolute)).isFile()) {
-						if (!languageFor(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
+						if (!codeLanguage(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
 						selected.add(path);
 					} else
 						for (const candidate of (snapshot.complete
 							? snapshot
-							: await inventory(this.root, 10000, signal, config.exclude, absolute)
+							: await inventory(this.root, BUDGET.files, signal, config.exclude, absolute)
 						).files.keys())
 							if ((!path || candidate.startsWith(`${path}/`)) && codeLanguage(config, candidate))
 								selected.add(candidate);
@@ -553,7 +600,7 @@ export class Engine {
 					results.push(
 						!entry
 							? { path, state: "pending", findings: [] }
-							: entry.version === snapshot.version &&
+							: entry.version === this.projectVersion(snapshot, path, config) &&
 									entry.content === (await this.contentIdentity(path, snapshot, signal)) &&
 									snapshot.complete &&
 									entry.identity === (await analysisIdentity(this.root, [path], config, signal))
@@ -566,13 +613,24 @@ export class Engine {
 					state.touched.push(...paths);
 					state.current.push(...paths);
 				});
-				await this.check(paths.slice(0, 50), id, this.session(id).turn, source === "lsp", signal, 0, snapshot);
+				const checked = await this.check(
+					paths.slice(0, BUDGET.batch),
+					id,
+					this.session(id).turn,
+					source === "lsp",
+					signal,
+					0,
+					snapshot,
+					config,
+					source,
+				);
 				results = [
-					...this.lastResults,
-					...paths.slice(50).map((path) => ({
+					...checked,
+					...paths.slice(BUDGET.batch).map((path) => ({
 						path,
 						state: "pending" as const,
 						findings: [],
+						analysisRequired: true,
 						note: "Continue cursor for active analysis",
 					})),
 				];
@@ -582,7 +640,7 @@ export class Engine {
 		let size = 0;
 		for (const result of results.slice(index)) {
 			const bytes = JSON.stringify(result).length;
-			if (selected.length && (size + bytes > 24000 || selected.length >= 50)) break;
+			if (selected.length && (size + bytes > 24000 || selected.length >= BUDGET.batch)) break;
 			selected.push(result);
 			size += bytes;
 		}
@@ -601,12 +659,9 @@ export class Engine {
 			next = { ...args, refresh: undefined, workspace: this.root, cursor };
 		}
 		const partial = !snapshot.complete || results.some((result) => result.state !== "complete");
-		return JSON.stringify({
-			text: (
-				(partial ? render(selected).replace(/^complete;/, "partial;") : render(selected)) +
-				(next ? "\nMore results: follow the structured next arguments." : "") +
-				(!snapshot.complete ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : "")
-			).replace(/\n.*omitted; next offset=.*$/, ""),
+		return {
+			operation: "check_diagnostics",
+			inventoryComplete: snapshot.complete,
 			scope,
 			source,
 			run,
@@ -647,7 +702,31 @@ export class Engine {
 						result.channels?.lsp !== "complete" &&
 						result.channels?.lint !== "complete",
 				),
-		});
+		};
+	}
+
+	private projectVersion(snapshot: Inventory, path: string, config: Config): string {
+		const language = codeLanguage(config, path);
+		let owner = dirname(path);
+		while (
+			owner !== "." &&
+			![...snapshot.files.keys()].some(
+				(candidate) => dirname(candidate) === owner && configurationLanguages(candidate).includes(language ?? ""),
+			)
+		)
+			owner = dirname(owner);
+		const prefix = owner === "." ? "" : `${owner}/`;
+		return hash(
+			JSON.stringify(
+				[...snapshot.files].filter(
+					([candidate]) =>
+						candidate.startsWith(prefix) &&
+						(codeLanguage(config, candidate) === language ||
+							(configurationImpact(candidate).some((impact) => impact === "types" || impact === "lint") &&
+								configurationLanguages(candidate).includes(language ?? ""))),
+				),
+			),
+		);
 	}
 
 	private async contentIdentity(path: string, snapshot: Inventory, signal: AbortSignal): Promise<string> {
@@ -656,7 +735,7 @@ export class Engine {
 		try {
 			const absolute = await workspacePath(this.root, path);
 			const info = await stat(absolute);
-			if (info.size > 1024 * 1024) return "oversized";
+			if (info.size > BUDGET.fileBytes) return "oversized";
 			return hash(await readFile(absolute, { encoding: "utf8", signal }));
 		} catch {
 			signal.throwIfAborted();

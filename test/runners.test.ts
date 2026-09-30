@@ -31,7 +31,10 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 	expect(result?.state).toBe("complete");
 	expect(result?.findings.some((item) => item.line === 2 && item.source.includes("noUnusedVariables"))).toBe(true);
 	expect(await readFile(join(root, "a.js"), "utf8")).toBe(before);
-	expect(await formatWithRunner(root, "a.js", new AbortController().signal)).toContain("Formatted");
+	expect(await formatWithRunner(root, "a.js", new AbortController().signal)).toMatchObject({
+		status: "formatted",
+		modifiedPaths: ["a.js"],
+	});
 	expect(await readFile(join(root, "a.js"), "utf8")).not.toBe(before);
 });
 it("does not execute repository tools unless trusted by the user", async () => {

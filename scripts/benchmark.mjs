@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bundleClient } from "../test/bundle-client.mjs";
 
+await mkdir(resolve("docs/history"), { recursive: true });
 const dir = await mkdtemp(join(tmpdir(), "codex-bench-"));
 try {
 	const baseline = join(dir, "baseline.mjs");
@@ -48,5 +49,5 @@ try {
 			} finally { await client.close(); }
 		}
 	}
-	await writeFile(resolve("docs/performance-0.5.json"), JSON.stringify(report, null, 2) + "\n");
+	await writeFile(resolve("docs/history/performance-0.5.json"), JSON.stringify(report, null, 2) + "\n");
 } finally { await rm(dir, { recursive: true, force: true }); }

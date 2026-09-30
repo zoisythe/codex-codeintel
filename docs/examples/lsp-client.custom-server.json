@@ -1,0 +1,13 @@
+{
+	"schemaVersion": 1,
+	"lsp": {
+		"python": {
+			"command": ["/absolute/path/to/.venv/bin/ty", "server"],
+			"extensions": [".py", ".pyi"],
+			"env": {},
+			"initialization": {}
+		},
+		"typescript": "tsc",
+		"rust": false
+	}
+}

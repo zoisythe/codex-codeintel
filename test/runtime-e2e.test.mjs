@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, writeFile, rm, cp, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -20,7 +20,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	const log = join(dir, "spawns");
 	const config = join(home, "lsp-client.json");
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	await writeFile(config, JSON.stringify({ schemaVersion: 1, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
+	await writeFile(config, JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") };
 	const children = [];
@@ -46,7 +46,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
-		assert.equal(init.serverInfo.version, "0.6.0");
+		assert.equal(init.serverInfo.version, "0.7.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
@@ -58,7 +58,8 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "initialize is lazy");
 	assert.equal(hook("SessionStart"), "");
 	await writeFile(join(root, "main.fake"), "broken again\n");
-	assert.match(hook("PostToolUse"), /fake\/E1/);
+	assert.equal(hook("PostToolUse"), "");
+	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1, "Hook owns a shared LSP through the service");
 	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
 	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
@@ -77,9 +78,9 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	await first.call("check_diagnostics", {path: "main.fake", refresh: true});
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, count + 1);
 	await Promise.all(Array.from({length: 201}, (_,i) => writeFile(join(root, `page-${i}.fake`), "x")));
-	const page = await first.call("check_diagnostics", {path: "."});
+	const page = await first.call("check_diagnostics", {paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)});
 	assert.match(page, /checked=/);
-	const paged = await first.request("tools/call", {name: "check_diagnostics", arguments: {workspace: root, session: "test", path: "."}});
+	const paged = await first.request("tools/call", {name: "check_diagnostics", arguments: {workspace: root, session: "test", paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)}});
 	assert(paged.structuredContent.next?.cursor);
 	assert(!(await first.request("tools/call", {name: "check_diagnostics", arguments: paged.structuredContent.next})).isError);
 	await first.close();
@@ -93,7 +94,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const log = join(dir, "spawns");
 	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config = join(dir, "lsp-client.json");
-	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
+	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"off",stop:"off"},lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
 	await configure("slow");
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(root, "b.fake"), "broken\n");
@@ -124,7 +125,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert(alive((await pids())[0]),"queued cancellation cannot kill the active LSP");
 	cancel(first);
 	assert.equal((await result(first)).isError,true);
-	await until(async ()=>(await pids()).every(pid=>!alive(pid)));
+	assert((await pids()).every(alive), "executing request cancellation preserves the service clients");
 	assert.equal((await pids()).length,1,"cancelled queued request never starts a client");
 
 	await configure("slow-second");
@@ -133,7 +134,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	cancel(formatting);
 	const partial=await result(formatting);
 	assert.equal(partial.isError,true);
-	assert.match(partial.content[0].text,/Formatted: a.fake/);
+	assert.match(partial.content[0].text,/formatted.*a.fake/);
 	assert.deepEqual(partial.structuredContent.modifiedPaths, ["a.fake"]);
 	assert.equal(await readFile(join(root,"b.fake"),"utf8"),"broken\n");
 
@@ -156,63 +157,15 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert(alive((await pids()).at(-1)),"EOF preserves shared analysis process");
 });
 
-test("short Hook budget, pending recovery, Stop deduplication and concurrent metadata", {timeout: 30000}, async (t) => {
-	const dir=await mkdtemp(join(tmpdir(),"codex-hook-e2e-"));
-	t.after(()=>rm(dir,{recursive:true,force:true}));
-	const root=join(dir,"project");await mkdir(root);
-	const cli=join(dir,"cli.mjs");await cp(resolve("dist/cli.js"),cli);
-	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	const config=join(dir,"lsp-client.json");
-	await writeFile(config,JSON.stringify({schemaVersion:1, lsp:{typescript:{command:[process.execPath,resolve("test/fixtures/fake-lsp.mjs")],extensions:[".js"]}, json:false},lint:{javascript:"biome"}}));
-	await writeFile(join(root,"biome.json"),"{}");
-	const bin=join(root,"node_modules/@biomejs/biome/bin");await mkdir(bin,{recursive:true});
-	const log=join(dir,"runners");
-	await writeFile(join(bin,"biome"),`const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(log)},process.pid+"\\n");const content=fs.readFileSync(process.argv.at(-1),"utf8");if(content==="slow")setInterval(()=>{},1000);else console.log(JSON.stringify({diagnostics:[{severity:content==="error"?"error":"warning",description:"fixture finding",category:"fixture"}]}));`);
-	await writeFile(join(root,"main.js"),"baseline");
-	const cache=join(dir,"cache");
-	const env={...process.env,CODEX_HOME:dir,CODEX_LSP_CACHE:cache};
-	const hook=(event,extra={},imports=[])=>new Promise((resolve,reject)=>{
-		const child=spawn(process.execPath,[...imports,cli,"hook"],{cwd:root,env,stdio:["pipe","pipe","pipe"]});
-		let output="";let error="";
-		child.stdout.setEncoding("utf8").on("data",chunk=>{output+=chunk;});
-		child.stderr.setEncoding("utf8").on("data",chunk=>{error+=chunk;});
-		child.once("error",reject);
-		child.once("exit",code=>{if(code!==0)reject(new Error(error));else resolve(output);});
-		child.stdin.end(JSON.stringify({cwd:root,session_id:"s",hook_event_name:event,...extra}));
-	});
-	const metadata=async()=>{
-		const files=(await readdir(cache,{recursive:true})).filter(file=>file.endsWith(".json"));
-		assert.equal(files.length,1);
-		const raw=await readFile(join(cache,files[0]),"utf8");
-		assert(!raw.includes("fixture finding"),"findings cannot be persisted");
-		return JSON.parse(raw);
-	};
-	assert.equal(await hook("SessionStart"),"");
-	await writeFile(join(root,"main.js"),"slow");
-	const started=performance.now();
-	assert.match(await hook("PostToolUse"),/budget|pending/i);
-	assert(performance.now()-started<8000,"Hook total execution stays below host timeout");
-	assert((await metadata()).pending.includes("main.js"));
-	const backgroundPid = Number((await readFile(log,"utf8")).trim().split("\n").at(-1));
-	assert.doesNotThrow(()=>process.kill(backgroundPid,0), "Hook wait expiry leaves background runner alive");
-	await writeFile(join(root,"main.js"),"warning");
-	assert.match(await hook("PostToolUse"),/fixture finding/);
-	assert.deepEqual((await metadata()).pending,[]);
-	assert.equal(JSON.parse(await hook("Stop")).decision,undefined,"warning never blocks");
-	await writeFile(join(root,"main.js"),"error");
-	assert.equal(JSON.parse(await hook("Stop")).decision,undefined);
-	assert.equal(await hook("Stop"),"","fresh error blocks only once");
-	await writeFile(join(root,"a.js"),"warning");await writeFile(join(root,"b.js"),"warning");
-	await Promise.all([hook("PostToolUse"),hook("PostToolUse"),hook("PostToolUse")]);
-	const state=await metadata();
-	assert(state.touched.includes("a.js")&&state.touched.includes("b.js"));
-	assert.match(await hook("PostToolUse",{session_id:undefined}),/session_id/);
-	const crash=join(dir,"crash-update.mjs");
-	await writeFile(crash, 'import fs from "node:fs/promises";import {syncBuiltinESMExports} from "node:module";const original=fs.rename;fs.rename=async(from,to)=>{if(String(to).endsWith(".json")){process.kill(process.pid,"SIGKILL");await new Promise(()=>{});}return original(from,to);};syncBuiltinESMExports();');
-	await writeFile(join(root,"main.js"),"warning");
-	await assert.rejects(hook("PostToolUse",{},["--import",pathToFileURL(crash).href]));
-	await Promise.all([hook("PostToolUse"),hook("PostToolUse")]);
-	assert.deepEqual((await metadata()).pending,[],"dead writer locks recover without losing state");
-	await hook("SessionEnd");assert.deepEqual((await metadata()).touched,[]);
-	await hook("SessionStart");assert.notEqual((await metadata()).turn,"__ended__");
+test("disabled automatic diagnostics establish no baseline and full mode requires migration", {timeout: 10000}, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "codeintel-disabled-"));
+	t.after(() => rm(dir, {recursive: true, force: true}));
+	await writeFile(join(dir,"lsp-client.json"), JSON.stringify({schemaVersion:1, automaticDiagnostics:{postToolUse:"off",stop:"off"}}));
+	for (const event of ["SessionStart","PreToolUse","PostToolUse","Stop"]) {
+		const child=spawnSync(process.execPath,[resolve("dist/cli.js"),"hook"],{cwd:dir,env:{...process.env,CODEX_HOME:dir,CODEX_LSP_CACHE:join(dir,"cache")},encoding:"utf8",input:JSON.stringify({cwd:dir,session_id:"s",hook_event_name:event,tool_name:"Write",tool_input:{path:"missing.ts"}})});
+		assert.equal(child.status,0,child.stderr);assert.equal(child.stdout,"");
+	}
+	await writeFile(join(dir,"lsp-client.json"),JSON.stringify({schemaVersion:1,automaticDiagnostics:{stop:"full"}}));
+	const child=spawnSync(process.execPath,[resolve("dist/cli.js"),"hook"],{cwd:dir,env:{...process.env,CODEX_HOME:dir,CODEX_LSP_CACHE:join(dir,"cache")},encoding:"utf8",input:JSON.stringify({cwd:dir,session_id:"s",hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{path:"new.ts"}})});
+	const output=JSON.parse(child.stdout);assert.equal(output.hookSpecificOutput.permissionDecision,"deny");assert.match(output.hookSpecificOutput.permissionDecisionReason,/Migration required/);
 });

@@ -11,7 +11,7 @@ test("native TypeScript 7 through delivered MCP: diagnostics, navigation, rename
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	await symlink(resolve("node_modules"), join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { typescript: "tsc" }, lint: { javascript: "off" } }));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { typescript: "tsc" }, lint: { javascript: "off" } }));
 	await writeFile(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", types: [] }, include: ["*.ts"] }));
 	const defs = 'export interface Shape { value: number; }\nexport function greet(name: string): string { return name; }\n';
 	const main = type => `import { greet, type Shape } from "./defs.js";\nexport const answer: ${type} = greet("world");\nexport const shape: Shape = { value: 1 };\n`;
@@ -31,7 +31,7 @@ test("native TypeScript 7 through delivered MCP: diagnostics, navigation, rename
 	const broken = await check(); assert.equal(broken.errors, 1); assert.match(JSON.stringify(broken.results), /2322/);
 	await writeFile(join(root, "main.ts"), main("string"));
 	assert.equal((await check()).errors, 0);
-	const nav = async (operation, path = "main.ts", line = 2, column = main("string").split("\n")[1].indexOf("greet") + 1) => JSON.parse((await call("lsp_navigation", { path, operation, line, column })).content[0].text);
+	const nav = async (operation, path = "main.ts", line = 2, column = main("string").split("\n")[1].indexOf("greet") + 1) => (await call("lsp_navigation", { path, operation, line, column })).structuredContent.result;
 	assert.match(JSON.stringify(await nav("definition")), /defs\.ts/);
 	assert.match(JSON.stringify(await nav("references")), /main\.ts/);
 	assert((await nav("hover")).contents);

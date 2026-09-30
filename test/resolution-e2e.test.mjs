@@ -21,7 +21,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	const configure = async value => {
 		const { workspaces = [root], ...settings } = value;
 		await writeFile(join(home, "config.toml"), workspaces.map(path => `[projects.${JSON.stringify(path)}]\ntrust_level = "trusted"\n`).join("\n"));
-		await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, ...settings }));
+		await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, ...settings }));
 	};
 	await configure({});
 	const client = bundleClient(root, home, { PATH: bin, CODEX_LSP_CACHE: join(dir, "cache") });
@@ -103,7 +103,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	await configure({ workspaces: [root, second], lsp: { python: false, rust: false, fake: { command: [process.execPath, fake], extensions: [".fake"] } } });
 	await writeFile(join(root, "main.fake"), "broken\n"); await writeFile(join(second, "main.fake"), "clean\n");
 	await writeFile(join(root, "unavailable.rs"), "fn main() {}\n"); await writeFile(join(root, "note.txt"), "ordinary text\n");
-	const mixed = await client.call("check_diagnostics", { path: ".", source: "lsp" });
+	const mixed = await client.call("check_diagnostics", { paths: ["main.fake", "unavailable.rs"], source: "lsp" });
 	assert(!mixed.isError); assert(mixed.structuredContent.partial); assert(mixed.structuredContent.unavailable.rust);
 	assert(!mixed.structuredContent.results.some(entry => entry.path === "note.txt"));
 	assert.equal((await client.call("check_diagnostics", { workspace: second, path: "main.fake", source: "lsp" })).structuredContent.errors, 0);
