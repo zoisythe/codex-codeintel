@@ -4,6 +4,7 @@ import { BUDGET } from "./budgets.js";
 import { type HookOutput, renderHook } from "./hook-engine.js";
 import { message, record, text } from "./results.js";
 import { Runtime } from "./runtime.js";
+import { isShellTool, writeIntent } from "./write-intent.js";
 
 export async function runHookCli(): Promise<void> {
 	stdin.setEncoding("utf8");
@@ -21,17 +22,42 @@ export async function runHookCli(): Promise<void> {
 	}
 	if (!record(parsed)) throw new Error("Hook input must be an object");
 	const event = text(parsed["hook_event_name"], "PostToolUse");
+	const cwd = text(parsed["cwd"], process.cwd());
+	const shell = isShellTool(parsed);
 	const budget =
-		event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? BUDGET.stop : BUDGET.hook;
-	const signal = AbortSignal.timeout(budget);
+		event === "SessionEnd"
+			? 1600
+			: event === "Stop" || event === "SubagentStop"
+				? BUDGET.stop
+				: event === "SessionStart" || (event === "PostToolUse" && shell)
+					? BUDGET.quickHook
+					: BUDGET.hook;
+	let signal = AbortSignal.timeout(budget);
 	// The session workspace is the trust boundary, including inside a Git repo.
-	const root = await realpath(text(parsed["cwd"], process.cwd()));
 	try {
+		const intent = shell ? undefined : writeIntent(cwd, parsed);
+		if (event === "PreToolUse" && (shell || intent?.kind !== "write")) return;
+		if (event === "PostToolUse" && intent?.kind === "read") signal = AbortSignal.timeout(BUDGET.quickHook);
+		const root = await realpath(cwd);
 		const runtime = new Runtime();
 		try {
 			const result = await runtime.request(root, "hook", parsed, signal);
 			const output = renderHook(result["output"] as HookOutput);
-			if (output) process.stdout.write(`${JSON.stringify(output)}\n`);
+			if (output) {
+				await new Promise<void>((resolve, reject) =>
+					process.stdout.write(`${JSON.stringify(output)}\n`, (error) => (error ? reject(error) : resolve())),
+				);
+				if (typeof result["deliveryId"] === "string") {
+					await runtime
+						.request(
+							root,
+							"hook_ack",
+							{ session: text(parsed["session_id"]), deliveryId: result["deliveryId"] },
+							AbortSignal.any([signal, AbortSignal.timeout(100)]),
+						)
+						.catch(() => undefined);
+				}
+			}
 		} finally {
 			await runtime.close();
 		}

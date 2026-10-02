@@ -394,7 +394,7 @@ export class Languages {
 		private config: Config,
 	) {
 		this.manager = new LspManager({
-			idleTimeoutMs: 120000,
+			idleTimeoutMs: BUDGET.idle,
 			clientFactory: (root, server) => {
 				if (!inside(this.root, root))
 					throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
@@ -405,12 +405,15 @@ export class Languages {
 			},
 		});
 	}
-	private failures = new Map<string, { identity: string; at: number; reason: string }>();
+	private failures = new Map<
+		string,
+		{ identity: string; root: string; attempts: number; retryAt: number; reason: string }
+	>();
 	async status(path: string): Promise<unknown> {
 		const resolved = await resolveServer(this.root, path, this.config);
-		const failure = this.failures.get(
-			`${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`,
-		);
+		const failure = [...this.failures.values()]
+			.filter((entry) => entry.identity === resolved.tool.identity && inside(entry.root, resolve(this.root, path)))
+			.sort((a, b) => b.root.length - a.root.length)[0];
 		return {
 			...resolved,
 			lint: this.config.trusted
@@ -424,12 +427,10 @@ export class Languages {
 					client.serverIdentity() ===
 						`${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`,
 			),
-			failure:
-				failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 30000
-					? failure.reason
-					: undefined,
+			failure: failure && Date.now() < failure.retryAt ? failure.reason : undefined,
+			retryAt: failure?.retryAt,
 			recovery:
-				"Install or repair the selected local tool, then lsp_status refresh=true; failures retry after 30 seconds",
+				"Install or repair the local tool, then lsp_status refresh=true; failure cooldown is 30/60/120 seconds, capped at 300 seconds",
 		};
 	}
 	async preflight(path: string, signal: AbortSignal, operation?: string): Promise<void> {
@@ -456,10 +457,6 @@ export class Languages {
 		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
 		if (resolved.tool.source === "temporary" && !this.config.trusted)
 			throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
-		const failureKey = `${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`;
-		const failed = this.failures.get(failureKey);
-		if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 30000)
-			throw new Error(failed.reason);
 		let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
 		if (!inside(this.root, root)) root = this.root;
 		if (
@@ -468,6 +465,9 @@ export class Languages {
 			resolved.tool.command[0]?.includes(".venv")
 		)
 			root = dirname(dirname(dirname(resolved.tool.command[0])));
+		const failureKey = hash(JSON.stringify([root, resolved.server, resolved.tool.identity]));
+		const failed = this.failures.get(failureKey);
+		if (failed && Date.now() < failed.retryAt) throw new Error(failed.reason);
 		resolved.server.id += `:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`;
 		for (const managed of options.manager.getSnapshot())
 			if (
@@ -483,10 +483,12 @@ export class Languages {
 			);
 		} catch (error) {
 			if (options.signal.aborted) throw error;
-			for (const [key, failure] of this.failures) if (Date.now() - failure.at >= 30000) this.failures.delete(key);
+			const attempts = (failed?.attempts ?? 0) + 1;
 			this.failures.set(failureKey, {
 				identity: resolved.tool.identity,
-				at: Date.now(),
+				root,
+				attempts,
+				retryAt: Date.now() + Math.min(300000, 30000 * 2 ** Math.min(attempts - 1, 4)),
 				reason:
 					(resolved.tool.source === "temporary"
 						? "Temporary launch/download or initialization failed: "

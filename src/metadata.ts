@@ -11,6 +11,8 @@ import { workspaceIdentity } from "./service-identity.js";
 
 export interface SessionState {
 	id: string;
+	epoch: string;
+	outbox: Record<string, string>;
 	version: number;
 	generation: number;
 	configuration: string;
@@ -30,6 +32,8 @@ export interface SessionState {
 }
 const empty = (id: string): SessionState => ({
 	id,
+	epoch: hash(`initial:${id}`),
+	outbox: {},
 	version: 0,
 	generation: 0,
 	configuration: "",
@@ -120,6 +124,14 @@ export class Metadata {
 				)
 			)
 				throw new Error("Invalid channel metadata");
+			data["epoch"] ??= "legacy";
+			data["outbox"] ??= {};
+			if (
+				typeof data["epoch"] !== "string" ||
+				!record(data["outbox"]) ||
+				!Object.values(data["outbox"]).every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))
+			)
+				throw new Error("Invalid delivery metadata");
 			return data as unknown as SessionState;
 		} catch (error) {
 			if (record(error) && error["code"] === "ENOENT") return empty(id);
@@ -172,7 +184,7 @@ export class Metadata {
 		try {
 			const state = await this.load(path, id);
 			signal.throwIfAborted();
-			if (change(state) === false) return state;
+			if ((await change(state)) === false) return state;
 			state.version++;
 			for (const key of ["touched", "current", "pending", "delivery", "blocked"] as const)
 				state[key] = [...new Set(state[key])];
@@ -188,6 +200,7 @@ export class Metadata {
 		// Retain a versioned tombstone until after competing old requests have failed their CAS.
 		await this.update(id, signal, (state) => {
 			Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
+			state.epoch = randomUUID();
 			state.turn = "__ended__";
 		});
 	}

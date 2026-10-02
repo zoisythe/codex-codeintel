@@ -24,7 +24,16 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") };
 	const children = [];
-	t.after(async () => { for (const child of children) if (child.exitCode === null) child.kill(); await delay(200); await rm(dir, { recursive: true, force: true }); });
+	let servicePid;
+	t.after(async () => {
+		for (const child of children) if (child.exitCode === null) child.kill();
+		if (servicePid) {
+			if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(servicePid), "/f", "/t"], { windowsHide: true, stdio: "ignore", timeout: 5000 });
+			else try { process.kill(servicePid, "SIGTERM"); } catch { /* The fixture service may already have exited. */ }
+		}
+		await delay(200);
+		await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+	});
 	const client = async () => {
 		const child = spawn(process.execPath, [cli, "mcp"], {cwd: root, env, stdio: ["pipe", "pipe", "pipe"]});
 		children.push(child);
@@ -46,7 +55,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
-		assert.equal(init.serverInfo.version, "0.7.0");
+		assert.equal(init.serverInfo.version, "0.8.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
@@ -60,6 +69,8 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	await writeFile(join(root, "main.fake"), "broken again\n");
 	assert.equal(hook("PostToolUse"), "");
 	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
+	const serviceStatus = await first.request("tools/call", {name: "lsp_status", arguments: {workspace: root, path: "main.fake"}});
+	servicePid = serviceStatus.structuredContent.service.pid;
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1, "Hook owns a shared LSP through the service");
 	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
 	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);

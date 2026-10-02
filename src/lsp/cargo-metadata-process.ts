@@ -3,6 +3,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { executionEnvironment, subprocessEnvironment } from "../environment.js";
+import { HIDDEN_PROCESS } from "../process-options.js";
 
 import { terminateProcessTree } from "./process.js";
 import { installProcessSignalCleanup } from "./process-signal-cleanup.js";
@@ -141,11 +142,11 @@ export async function defaultCargoMetadataLoader(
 				return nextBytes;
 			};
 			cargoProcess = spawn("cargo", commandArgs, {
+				...HIDDEN_PROCESS,
 				env: subprocessEnvironment(environment),
 				detached: process.platform !== "win32",
 				signal: controller.signal,
 				stdio: ["ignore", "pipe", "pipe"],
-				windowsHide: true,
 			});
 			cargoProcess.stdout?.setEncoding("utf8");
 			cargoProcess.stderr?.setEncoding("utf8");

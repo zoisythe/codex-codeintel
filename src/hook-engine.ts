@@ -5,11 +5,13 @@ import { configurationImpact } from "./config-files.js";
 import { addedFindings, diagnosticKey } from "./diagnostic-delta.js";
 import { executionEnvironment } from "./environment.js";
 import { hash, inventory, workspacePath } from "./files.js";
+import { queueDelivery } from "./hook-delivery.js";
+import { analysisIdentity } from "./identity.js";
 import { Metadata } from "./metadata.js";
 import type { ProjectChecks } from "./project-checks.js";
 import { type FileResult, type Finding, message, record, render, text } from "./results.js";
 import { codeLanguage } from "./tool-resolution.js";
-import { writeIntent } from "./write-intent.js";
+import { isShellTool, writeIntent } from "./write-intent.js";
 
 export type HookOutput =
 	| { kind: "silent" }
@@ -52,12 +54,37 @@ export class HookEngine {
 	) {
 		this.store = new Metadata(root);
 	}
-	hook(input: Record<string, unknown>, signal: AbortSignal): Promise<HookOutput> {
-		const task = this.queue.then(() => this.execute(input, signal));
-		this.queue = task.catch(() => undefined);
-		return task;
+	hook(input: Record<string, unknown>, signal: AbortSignal, background = false): Promise<HookOutput> {
+		const event = text(input["hook_event_name"], "PostToolUse");
+		if (event === "PreToolUse" && (isShellTool(input) || writeIntent(this.root, input).kind !== "write"))
+			return Promise.resolve({ kind: "silent" });
+		const task =
+			event === "SessionEnd"
+				? this.prepare(input, signal, background)
+				: this.queue.then(() => this.prepare(input, signal, background));
+		// Analysis awaits live outside this discovery/state queue.
+		this.queue = task.then(
+			() => undefined,
+			() => undefined,
+		);
+		return task.then(async (prepared) => {
+			if (typeof prepared === "function") return prepared();
+			if (prepared.kind === "context" && text(input["session_id"])) {
+				const config = await configuration(this.root);
+				await this.store.update(text(input["session_id"]), signal, async (state) => {
+					if (state.turn === "__ended__") return false;
+					await queueDelivery(this.store, state, prepared, {}, config.version, "");
+					return true;
+				});
+			}
+			return prepared;
+		});
 	}
-	private async execute(input: Record<string, unknown>, signal: AbortSignal): Promise<HookOutput> {
+	private async prepare(
+		input: Record<string, unknown>,
+		signal: AbortSignal,
+		background: boolean,
+	): Promise<HookOutput | (() => Promise<HookOutput>)> {
 		const began = Date.now();
 		signal.throwIfAborted();
 		const id = text(input["session_id"]);
@@ -81,12 +108,14 @@ export class HookEngine {
 			return { kind: "silent" };
 		const turn = text(input["turn_id"], initial.turn);
 		await this.store.update(id, signal, (state) => {
+			if (state.epoch !== initial.epoch || (state.turn === "__ended__" && event !== "SessionStart")) return false;
 			if (event === "SessionStart" && state.turn === "__ended__") state.turn = "";
 			if (turn !== state.turn) {
 				state.turn = turn;
 				state.current = [];
 				state.blocked = [];
 			}
+			return true;
 		});
 		if (event === "SessionStart" || event === "PreToolUse") {
 			const intent = event === "SessionStart" ? { kind: "read" as const } : writeIntent(this.root, input);
@@ -108,7 +137,9 @@ export class HookEngine {
 					const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude);
 					const reference = await this.store.shared(Object.fromEntries(snapshot.files));
 					await this.store.update(id, signal, (state) => {
+						if (state.epoch !== initial.epoch || state.turn === "__ended__") return false;
 						state.baseline ??= reference;
+						return true;
 					});
 				}
 				return { kind: "silent" };
@@ -120,7 +151,7 @@ export class HookEngine {
 		}
 		const stateBefore = await this.store.read(id);
 		if (!stateBefore.baseline || !stateBefore.diagnosticBaseline) {
-			if (event === "PostToolUse" && writeIntent(this.root, input).kind === "write")
+			if (event === "PostToolUse" && !isShellTool(input) && writeIntent(this.root, input).kind === "write")
 				await this.store.update(id, signal, (current) => {
 					current.edited = true;
 				});
@@ -140,7 +171,7 @@ export class HookEngine {
 		const sourcePaths = changed.filter((path) => codeLanguage(config, path) && !configurationImpact(path).length);
 		const snapshotReference = await this.store.shared(Object.fromEntries(snapshot.files));
 		const state = await this.store.update(id, signal, (current) => {
-			if (current.generation !== stateBefore.generation) return false;
+			if (current.generation !== stateBefore.generation || current.epoch !== stateBefore.epoch) return false;
 			if (changed.length || deleted.length) current.generation++;
 			if (sourcePaths.length || deleted.some((path) => codeLanguage(config, path))) current.edited = true;
 			current.baseline = snapshotReference;
@@ -173,108 +204,140 @@ export class HookEngine {
 			? [...new Set([...state.current, ...state.pending])]
 			: [...new Set([...state.pending, ...state.delivery])];
 		if (!paths.length) return { kind: "silent" };
-		const output = await this.dependencies.check(
-			paths,
-			id,
-			turn,
-			state.generation,
-			Math.max(1, (stopping ? BUDGET.stopWait : BUDGET.postWait) - (Date.now() - began)),
-			signal,
-		);
-		if (output.generation !== state.generation) return context("Stale diagnostic generation; pending retained");
-		const baselineData = await this.store.readShared(state.diagnosticBaseline ?? "");
-		const baseline: Finding[] =
-			record(baselineData) && Array.isArray(baselineData["results"])
-				? baselineData["results"].flatMap((item: unknown) =>
-						record(item) && Array.isArray(item["findings"]) ? (item["findings"] as Finding[]) : [],
-					)
-				: [];
-		const ledgerValue = state.shown["diagnosticCurrent"]
-			? await this.store.readShared(state.shown["diagnosticCurrent"])
-			: undefined;
-		const ledger = record(ledgerValue) ? (ledgerValue as Record<string, Finding[]>) : {};
-		for (const old of deleted) {
-			const moved = changed.find(
-				(path) => snapshot.files.get(path) === previous[old] && previous[path] === undefined,
+		const reliable = await this.dependencies.projects.baseline(id, paths, executionEnvironment(), signal, 0);
+		if (reliable.failures.length || reliable.pending.length) {
+			if (
+				isShellTool(input) &&
+				!stateBefore.edited &&
+				reliable.failures.some((failure) => failure.includes("Project changed while establishing baseline"))
+			) {
+				await this.store.update(id, signal, (current) => {
+					if (current.epoch !== state.epoch || current.generation !== state.generation) return false;
+					current.diagnosticBaseline = null;
+					delete current.shown["baselineJob"];
+					current.edited = false;
+					return true;
+				});
+			}
+			return context(
+				`Pre-edit diagnostic baseline is not reliable; introduced errors cannot be attributed. ${reliable.failures.join("; ")} Pending: ${reliable.pending.join(", ")}`,
 			);
-			if (moved)
-				ledger[moved] = (ledger[old] ?? baseline.filter((finding) => finding.path === old)).map((finding) => ({
-					...finding,
-					path: moved,
-				}));
-			delete ledger[old];
 		}
-		const valid: FileResult[] = [];
-		for (const result of output.results) {
-			try {
-				if (
-					hash(await readFile(await workspacePath(this.root, result.path), "utf8")) ===
-					snapshot.files.get(result.path)
-				)
-					valid.push(result);
-			} catch {
-				/* Deleted paths cannot deliver late results. */
-			}
-		}
-		let feedback: HookOutput = { kind: "silent" };
-		await this.store.update(id, AbortSignal.timeout(750), (current) => {
-			if (current.generation !== state.generation || current.turn !== turn) return false;
-			const fresh: FileResult[] = [];
-			const repaired: string[] = [];
-			for (const result of valid) {
-				const preceding = ledger[result.path] ?? baseline.filter((finding) => finding.path === result.path);
-				const added = addedFindings(preceding, result.findings);
-				const previousIssues = current.unresolved[result.path] ?? [];
-				if (result.state === "complete") {
-					// Remove already introduced occurrences from the previous complete snapshot.
-					// This also prevents a late channel counting the same partial finding twice.
-					const historical = addedFindings(previousIssues, preceding);
-					current.unresolved[result.path] = addedFindings(historical, result.findings);
-					ledger[result.path] = result.findings;
-					current.pending = current.pending.filter((path) => path !== result.path);
-					current.delivery = current.delivery.filter((path) => path !== result.path);
-					if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
-						repaired.push(
-							`${result.path}: ${previousIssues.length - (current.unresolved[result.path]?.length ?? 0)} introduced diagnostics repaired`,
-						);
-				} else {
-					// A late channel cannot clear confirmed errors from the other channel.
-					current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
-				}
-				const signature = hash(JSON.stringify(added.map(diagnosticKey)));
-				if ((added.length || result.state !== "complete") && current.shown[result.path] !== signature)
-					fresh.push({ ...result, findings: added });
-				current.shown[result.path] = signature;
-			}
-			const unresolved = Object.entries(current.unresolved)
-				.filter(([path]) => current.current.includes(path))
-				.flatMap(([, findings]) => findings)
-				.filter((finding) => finding.severity === "error");
-			const confirmed = unresolved.filter((finding) =>
-				valid.some(
-					(result) =>
-						result.path === finding.path &&
-						result.findings.some((item) => diagnosticKey(item) === diagnosticKey(finding)),
+		state.diagnosticBaseline = reliable.reference;
+		return async () => {
+			const output = await this.dependencies.check(
+				paths,
+				id,
+				turn,
+				state.generation,
+				Math.max(
+					1,
+					(background ? BUDGET.project : stopping ? BUDGET.stopWait : BUDGET.postWait) - (Date.now() - began),
 				),
+				signal,
 			);
-			if (stopping && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
-				current.blocked.push(turn || "__turn__");
-				feedback = {
-					kind: "block",
-					reason: `Codex CodeIntel: fix introduced errors before finishing.\n${render([{ path: ".", state: "complete", findings: confirmed }], 15, 3500)}`,
-				};
-			} else if (fresh.length || repaired.length || (stopping && current.pending.length))
-				feedback = context(
-					`Automatic delta: introduced=${fresh.flatMap((result) => result.findings).length}; pending=${current.pending.length}\n${fresh.length ? render(fresh, 15, 3500) : ""}${repaired.join("\n")}${output.note ? `\n${output.note}` : ""}`,
+			if (output.generation !== state.generation) return context("Stale diagnostic generation; pending retained");
+			const baselineData = await this.store.readShared(state.diagnosticBaseline ?? "");
+			const baseline: Finding[] =
+				record(baselineData) && Array.isArray(baselineData["results"])
+					? baselineData["results"].flatMap((item: unknown) =>
+							record(item) && Array.isArray(item["findings"]) ? (item["findings"] as Finding[]) : [],
+						)
+					: [];
+			const ledgerValue = state.shown["diagnosticCurrent"]
+				? await this.store.readShared(state.shown["diagnosticCurrent"])
+				: undefined;
+			const ledger = record(ledgerValue) ? (ledgerValue as Record<string, Finding[]>) : {};
+			for (const old of deleted) {
+				const moved = changed.find(
+					(path) => snapshot.files.get(path) === previous[old] && previous[path] === undefined,
 				);
-			return true;
-		});
-		const ledgerReference = await this.store.shared(ledger);
-		await this.store.update(id, AbortSignal.timeout(750), (current) => {
-			if (current.generation !== state.generation || current.turn !== turn) return false;
-			current.shown["diagnosticCurrent"] = ledgerReference;
-			return true;
-		});
-		return feedback;
+				if (moved)
+					ledger[moved] = (ledger[old] ?? baseline.filter((finding) => finding.path === old)).map((finding) => ({
+						...finding,
+						path: moved,
+					}));
+				delete ledger[old];
+			}
+			const valid: FileResult[] = [];
+			for (const result of output.results) {
+				try {
+					if (
+						hash(await readFile(await workspacePath(this.root, result.path), "utf8")) ===
+						snapshot.files.get(result.path)
+					)
+						valid.push(result);
+				} catch {
+					/* Deleted paths cannot deliver late results. */
+				}
+			}
+			let feedback: HookOutput = { kind: "silent" };
+			const bindings = Object.fromEntries(
+				valid.map((result) => [result.path, snapshot.files.get(result.path) ?? ""]),
+			);
+			const analysis = valid.length
+				? await analysisIdentity(
+						this.root,
+						valid.map((result) => result.path),
+						config,
+						signal,
+					)
+				: "";
+			await this.store.update(id, signal, async (current) => {
+				if (current.generation !== state.generation || current.epoch !== state.epoch) return false;
+				const fresh: FileResult[] = [];
+				const repaired: string[] = [];
+				for (const result of valid) {
+					const preceding = ledger[result.path] ?? baseline.filter((finding) => finding.path === result.path);
+					const added = addedFindings(preceding, result.findings);
+					const previousIssues = current.unresolved[result.path] ?? [];
+					if (result.state === "complete") {
+						// Remove already introduced occurrences from the previous complete snapshot.
+						// This also prevents a late channel counting the same partial finding twice.
+						const historical = addedFindings(previousIssues, preceding);
+						current.unresolved[result.path] = addedFindings(historical, result.findings);
+						ledger[result.path] = result.findings;
+						current.pending = current.pending.filter((path) => path !== result.path);
+						current.delivery = current.delivery.filter((path) => path !== result.path);
+						if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
+							repaired.push(
+								`${result.path}: ${previousIssues.length - (current.unresolved[result.path]?.length ?? 0)} introduced diagnostics repaired`,
+							);
+					} else {
+						// A late channel cannot clear confirmed errors from the other channel.
+						current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
+					}
+					const signature = hash(JSON.stringify(added.map(diagnosticKey)));
+					if ((added.length || result.state !== "complete") && current.shown[result.path] !== signature)
+						fresh.push({ ...result, findings: added });
+					current.shown[result.path] = signature;
+				}
+				const unresolved = Object.entries(current.unresolved)
+					.filter(([path]) => current.current.includes(path))
+					.flatMap(([, findings]) => findings)
+					.filter((finding) => finding.severity === "error");
+				const confirmed = unresolved.filter((finding) =>
+					valid.some(
+						(result) =>
+							result.path === finding.path &&
+							result.findings.some((item) => diagnosticKey(item) === diagnosticKey(finding)),
+					),
+				);
+				if (stopping && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
+					current.blocked.push(turn || "__turn__");
+					feedback = {
+						kind: "block",
+						reason: `Codex CodeIntel: fix introduced errors before finishing.\n${render([{ path: ".", state: "complete", findings: confirmed }], 100000, BUDGET.outputBytes)}`,
+					};
+				} else if (fresh.length || repaired.length || (stopping && current.pending.length))
+					feedback = context(
+						`Automatic delta: introduced=${fresh.flatMap((result) => result.findings).length}; pending=${current.pending.length}\n${fresh.length ? render(fresh, 100000, BUDGET.outputBytes) : ""}${repaired.join("\n")}${output.note ? `\n${output.note}` : ""}`,
+					);
+				current.shown["diagnosticCurrent"] = await this.store.shared(ledger);
+				await queueDelivery(this.store, { ...current, turn }, feedback, bindings, config.version, analysis);
+				return true;
+			});
+			return feedback;
+		};
 	}
 }

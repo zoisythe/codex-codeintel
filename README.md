@@ -26,7 +26,7 @@ See the [detailed usage guide](docs/usage.md) for setup, all tools, Hook behavio
 
 Pass the absolute user project as `workspace`. Positions are 1-based. Keep write calls sequential; inspect `modifiedPaths` after errors or cancellation before retrying.
 
-SessionStart starts project checks in the background. The first source write waits for its project's reliable baseline. Historical errors are allowed so they can be repaired. Missing checkers, failures, timeouts or insufficient coverage deny the write; reads and edits to checker configuration remain available. PostToolUse reports introduced errors/warnings and repairs. Stop asks the model to fix confirmed unresolved introduced errors once per turn. Pending results remain pending.
+SessionStart registers background project checks without waiting for scanning or LSP initialization. All shell commands pass PreToolUse immediately; file editing tools and MCP writes still require a reliable project baseline. Historical errors are allowed so they can be repaired. Missing checkers, failures, timeouts or insufficient coverage deny those explicit writes; reads and checker configuration repairs remain available. Shell/read PostToolUse has a 500 ms foreground budget. Analysis continues independently and completed results are delivered by later PostToolUse or Stop hooks, with content binding and delivery identifiers. Stop asks the model to fix confirmed unresolved introduced errors once per turn. Pending results remain pending; shell changes without a prior baseline cannot be attributed as introduced errors.
 
 ## Configure
 

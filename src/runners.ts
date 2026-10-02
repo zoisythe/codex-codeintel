@@ -14,6 +14,7 @@ import { parseLint } from "./lint-output.js";
 import { logEvent } from "./log.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
+import { HIDDEN_PROCESS } from "./process-options.js";
 import { type FileResult, type FormatResult, message, record } from "./results.js";
 import { languageFor, resolveTool } from "./tool-resolution.js";
 
@@ -30,11 +31,11 @@ export async function run(
 	return new Promise((resolve, reject) => {
 		const prepared = createSpawnCommand([command, ...args], process.platform, environment["ComSpec"], environment);
 		const child = spawn(prepared.command, prepared.args, {
+			...HIDDEN_PROCESS,
 			cwd,
 			env: environment,
 			shell: prepared.shell,
 			detached: process.platform !== "win32",
-			windowsHide: true,
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		const cancel = () => terminateProcessTree(child, "SIGKILL");

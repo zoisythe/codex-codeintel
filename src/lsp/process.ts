@@ -4,8 +4,9 @@ import type { ChildProcess } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
-
+import { BUDGET } from "../budgets.js";
 import { executionEnvironment, subprocessEnvironment } from "../environment.js";
+import { HIDDEN_PROCESS } from "../process-options.js";
 
 import { reportBestEffortCleanupError } from "./cleanup-errors.js";
 import { LspInvalidPathError, LspProcessSpawnError } from "./errors.js";
@@ -34,12 +35,9 @@ export interface PreparedSpawnCommand {
 
 export interface ProcessTreeTerminationOptions {
 	readonly platform?: NodeJS.Platform;
-	readonly spawnSync?: (
-		command: string,
-		args: string[],
-		options: { readonly stdio: "ignore"; readonly env: NodeJS.ProcessEnv },
-	) => { readonly error?: Error; readonly status: number | null };
 }
+
+const terminating = new WeakSet<ChildProcess>();
 
 function isMissingProcessError(error: unknown): boolean {
 	if (!(error instanceof Error) || !("code" in error)) return false;
@@ -107,13 +105,31 @@ export function terminateProcessTree(
 ): void {
 	const platform = options.platform ?? process.platform;
 	if (platform === "win32" && proc.pid) {
+		if (terminating.has(proc)) return;
+		terminating.add(proc);
 		const args = ["/pid", String(proc.pid), "/f", "/t"];
-		const result =
-			options.spawnSync === undefined
-				? childProcess.spawnSync("taskkill", args, { stdio: "ignore", env: executionEnvironment() })
-				: options.spawnSync("taskkill", args, { stdio: "ignore", env: executionEnvironment() });
-		if (!result.error && result.status === 0) return;
-		if (result.error) reportKillError("windows process tree kill", result.error);
+		childProcess.execFile(
+			"taskkill",
+			args,
+			{
+				...HIDDEN_PROCESS,
+				env: executionEnvironment(),
+				timeout: BUDGET.cleanup,
+				maxBuffer: 64 * 1024,
+			},
+			(error) => {
+				if (!error) return;
+				terminating.delete(proc);
+				if (proc.exitCode !== null) return;
+				reportKillError("windows process tree kill", error);
+				try {
+					proc.kill(signal);
+				} catch (fallback) {
+					reportKillError("process kill", fallback);
+				}
+			},
+		);
+		return;
 	}
 
 	if (platform !== "win32" && proc.pid) {
@@ -265,10 +281,10 @@ export function spawnProcess(command: string[], options: SpawnOptions): SpawnedP
 		environment,
 	);
 	const proc = childProcess.spawn(preparedCommand.command, preparedCommand.args, {
+		...HIDDEN_PROCESS,
 		cwd: options.cwd,
 		env: environment,
 		stdio: ["pipe", "pipe", "pipe"],
-		windowsHide: true,
 		shell: preparedCommand.shell,
 		detached: process.platform !== "win32",
 	});

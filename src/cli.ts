@@ -5,6 +5,7 @@ if (major < 22 || (major === 22 && minor < 12)) {
 	const reason = `Codex CodeIntel requires Node >=22.12.0; found ${process.versions.node}.`;
 	if (process.argv[2] === "hook") {
 		let event = "";
+		let passthrough = false;
 		let input = "";
 		for await (const chunk of process.stdin) {
 			input += String(chunk);
@@ -17,14 +18,21 @@ if (major < 22 || (major === 22 && minor < 12)) {
 				typeof parsed === "object" &&
 				"hook_event_name" in parsed &&
 				typeof parsed.hook_event_name === "string"
-			)
+			) {
 				event = parsed.hook_event_name;
+				const tool = "tool_name" in parsed && typeof parsed.tool_name === "string" ? parsed.tool_name : "";
+				passthrough =
+					event === "PreToolUse" &&
+					(/^(?:bash|shell|exec_command|unified_exec)$/i.test(tool.split(".").at(-1) ?? "") ||
+						/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool));
+			}
 		} catch {
 			/* Runtime message remains useful for invalid input. */
 		}
-		process.stdout.write(
-			`${JSON.stringify({ systemMessage: reason, ...(event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {}) })}\n`,
-		);
+		if (!passthrough)
+			process.stdout.write(
+				`${JSON.stringify({ systemMessage: reason, ...(event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {}) })}\n`,
+			);
 	} else {
 		process.stderr.write(`${reason}\n`);
 		process.exitCode = 1;

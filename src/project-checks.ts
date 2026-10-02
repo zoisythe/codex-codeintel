@@ -62,6 +62,12 @@ export function covers(
 }
 export class ProjectChecks {
 	private readonly jobs = new Map<string, Job>();
+	private readonly sessionJobs = new Map<string, string>();
+	cancelSession(session: string): void {
+		const id = this.sessionJobs.get(session);
+		if (id) this.jobs.get(id)?.controller.abort();
+		this.sessionJobs.delete(session);
+	}
 	private latest: string | undefined;
 	constructor(private readonly root: string) {}
 	get active(): boolean {
@@ -413,8 +419,11 @@ export class ProjectChecks {
 				const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude);
 				if (!snapshot.complete) throw new Error("Baseline inventory incomplete");
 				job = await this.start(checks, config, environment, identity, snapshot.version);
+				this.sessionJobs.set(session, job.id);
 				await store.update(session, signal, (current) => {
+					if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
 					current.shown["baselineJob"] = job?.id ?? "";
+					return true;
 				});
 			}
 			const selected = job.checks
@@ -429,8 +438,10 @@ export class ProjectChecks {
 		const results = recovered.results;
 		const reference = await store.shared(recovered);
 		await store.update(session, signal, (current) => {
+			if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
 			current.diagnosticBaseline = reference;
 			current.configuration = config.version;
+			return true;
 		});
 		const snapshot = paths ? undefined : await inventory(this.root, BUDGET.files, signal, config.exclude);
 		const targets =

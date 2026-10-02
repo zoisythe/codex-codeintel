@@ -1,5 +1,9 @@
 // Wait < IPC/Hook budget < hooks.json timeout (10s ordinary, 50s Stop).
 export const BUDGET = {
+	quickHook: 500,
+	warmupDelay: 2000,
+	idle: 300000,
+	cleanup: 1000,
 	postWait: 3500,
 	hook: 4400,
 	stopWait: 42500,

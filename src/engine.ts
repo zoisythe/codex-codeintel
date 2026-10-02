@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { dirname, relative } from "node:path";
+import { dirname, relative, sep } from "node:path";
 import type { AutomaticResult } from "./automatic.js";
 import { BUDGET } from "./budgets.js";
 import { type Config, configuration } from "./config.js";
@@ -36,7 +36,7 @@ export interface EngineDependencies {
 }
 export type ToolOutput = Record<string, unknown> &
 	(
-		| { operation: "release" | "session_end" }
+		| { operation: "release" | "session_end" | "hook_ack" }
 		| { operation: "handshake"; protocol: number; identity: string; pid: number }
 		| { operation: "hook"; output: HookOutput }
 		| ({ operation: "automatic" } & AutomaticResult)
@@ -68,6 +68,31 @@ export class Engine {
 	private previousSnapshot: Inventory | undefined;
 	private queue: Promise<unknown> = Promise.resolve();
 	private generation = 0;
+	async warmup(signal: AbortSignal): Promise<void> {
+		const config = await configuration(this.root);
+		if (
+			!config.trusted ||
+			(config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+		)
+			return;
+		const snapshot = latestInventory(this.root);
+		if (!snapshot?.complete) return;
+		const representatives = new Map<string, { path: string; count: number }>();
+		for (const path of snapshot.files.keys()) {
+			const language = codeLanguage(config, path);
+			if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
+				continue;
+			const entry = representatives.get(language);
+			if (entry) entry.count++;
+			else representatives.set(language, { path, count: 1 });
+		}
+		this.language ??= new Languages(this.root, config);
+		await this.language.update(config);
+		for (const entry of [...representatives.values()].sort((a, b) => b.count - a.count).slice(0, 2)) {
+			signal.throwIfAborted();
+			await this.language.preflight(entry.path, signal).catch(() => undefined);
+		}
+	}
 	private pages = new Map<
 		string,
 		{
@@ -584,7 +609,7 @@ export class Engine {
 							? snapshot
 							: await inventory(this.root, BUDGET.files, signal, config.exclude, absolute)
 						).files.keys())
-							if ((!path || candidate.startsWith(`${path}/`)) && codeLanguage(config, candidate))
+							if ((!path || candidate.startsWith(`${path}${sep}`)) && codeLanguage(config, candidate))
 								selected.add(candidate);
 				}
 				paths = [...selected].sort();

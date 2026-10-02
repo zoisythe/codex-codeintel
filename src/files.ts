@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 import { BUDGET } from "./budgets.js";
 import { executionEnvironment } from "./environment.js";
 import type { TextEdit } from "./lsp/types.js";
-
 import { measured } from "./metrics.js";
+import { HIDDEN_PROCESS } from "./process-options.js";
 
 const exec = promisify(execFile);
 const SKIP = new Set([
@@ -84,6 +84,7 @@ async function scanInventory(
 			"git",
 			["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
 			{
+				...HIDDEN_PROCESS,
 				cwd: scope,
 				env: executionEnvironment(),
 				timeout: 5000,

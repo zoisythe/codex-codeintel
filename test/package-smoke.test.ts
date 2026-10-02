@@ -77,7 +77,7 @@ describe("plugin package metadata", () => {
 		const sessionStart = hooksJson.hooks["SessionStart"]?.[0]?.hooks[0]?.command;
 
 		expect(pluginJson.version).toBe(packageJson.version);
-		expect(packageJson.version).toBe("0.7.0");
+		expect(packageJson.version).toBe("0.8.0");
 		expect(packageJson.type).toBe("module");
 		expect(packageJson.packageManager).toBe("npm@11.12.1");
 		expect(packageJson.dependencies).toBeUndefined();

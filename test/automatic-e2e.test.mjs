@@ -57,7 +57,7 @@ test("failed/missing checker denies edits; reads and configuration repair pass; 
 	assert.equal((await f.pre()).value.hookSpecificOutput.permissionDecision,"deny");
 	assert.equal((await f.hook("PreToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"git status --short"}})).text,"");
 	assert.equal((await f.hook("PreToolUse","s",{tool_name:"Write",tool_input:{path:"tsconfig.json"}})).text,"");
-	assert.equal((await f.hook("PreToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"echo x > main.fake"}})).value.hookSpecificOutput.permissionDecision,"deny");
+	assert.equal((await f.hook("PreToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"echo x > main.fake"}})).text,"");
 	await f.configure({...f.config,automaticDiagnostics:{postToolUse:"off",stop:"off"}}); assert.equal((await f.pre()).text,""); assert.equal((await f.hook()).text,"");
 });
 test("parallel project failures are isolated and uncovered files are denied",{timeout:15000},async t=>{

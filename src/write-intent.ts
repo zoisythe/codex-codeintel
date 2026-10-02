@@ -7,6 +7,11 @@ export type WriteIntent =
 	| { kind: "read" }
 	| { kind: "configuration"; paths: string[] }
 	| { kind: "write"; paths?: string[] };
+export function isShellTool(input: Record<string, unknown>): boolean {
+	return /^(?:bash|shell|exec_command|unified_exec)$/.test(
+		text(input["tool_name"]).split(".").at(-1)?.toLowerCase() ?? "",
+	);
+}
 export function writeIntent(root: string, input: Record<string, unknown>): WriteIntent {
 	const tool = text(input["tool_name"]);
 	const args = record(input["tool_input"]) ? input["tool_input"] : {};
@@ -25,11 +30,11 @@ export function writeIntent(root: string, input: Record<string, unknown>): Write
 				(path): path is string => typeof path === "string",
 			),
 		);
-	} else if (/Bash|shell|exec_command|unified_exec/.test(tool)) {
+	} else if (isShellTool(input)) {
 		const command = text(args["command"], text(args["cmd"])).trim();
 		if (
-			!/[<>;|&`\n]|\$\(|\$\{|\\/.test(command) &&
-			/^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|wc(?:\s|$)|git (?:status|diff|log|show|ls-files|rev-parse)(?:\s|$))/.test(
+			!/[<>;|&`\n]|\$\(|\$\{/.test(command) &&
+			/^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|wc(?:\s|$)|Get-(?:Content|ChildItem|Location|Item)(?:\s|$)|Select-String(?:\s|$)|git (?:status|diff|log|show|ls-files|rev-parse)(?:\s|$))/i.test(
 				command,
 			) &&
 			!/--(?:output|ext-diff|textconv|pre)|--exec/.test(command)

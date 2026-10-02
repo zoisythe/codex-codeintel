@@ -124,7 +124,7 @@ it("keeps pending on timeout and checks it on the next PostToolUse", async () =>
 	});
 	await hook.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal());
 	await writeFile(join(root, "a.js"), "changed");
-	await hook.hook({ session_id: "s" }, cancellation.signal);
+	await expect(hook.hook({ session_id: "s" }, cancellation.signal)).rejects.toThrow();
 	expect((await new Metadata(root).read("s")).pending).toContain("a.js");
 	slow = false;
 	await hook.hook({ session_id: "s" }, signal());

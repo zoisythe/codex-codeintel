@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { alive, directoryLock } from "./directory-lock.js";
+import { alive } from "./directory-lock.js";
 
 export { alive } from "./directory-lock.js";
 
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import type { ToolOutput } from "./engine.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
+import { HIDDEN_PROCESS } from "./process-options.js";
 import { record, WriteFailure } from "./results.js";
 import { SERVICE_PROTOCOL, workspaceIdentity } from "./service-identity.js";
 
@@ -172,45 +173,39 @@ export async function existingService(root: string, signal: AbortSignal): Promis
 }
 export async function ensureService(root: string, signal: AbortSignal): Promise<Endpoint> {
 	const location = await serviceLocation(root);
-	const lock = `${location.endpoint}.lock`;
-	const release = await directoryLock(lock, signal, 8000);
-	try {
-		const connected = await existingService(root, signal);
-		if (connected) return connected;
-		const previous = await readEndpoint(location);
-		if (previous && alive(previous.pid))
-			throw new Error("Service process alive but handshake unavailable; retry later");
-		await rm(location.endpoint, { force: true });
-		if (process.platform !== "win32") await rm(location.address, { force: true });
-		const token = randomUUID();
-		const cli = fileURLToPath(import.meta.url);
-		const child = spawn(process.execPath, [...process.execArgv, cli, "service", root, location.identity, token], {
+	signal.throwIfAborted();
+	const connected = await existingService(root, signal);
+	if (connected) return connected;
+	const previous = await readEndpoint(location);
+	if (previous && alive(previous.pid)) throw new Error("Service process alive but handshake unavailable; retry later");
+	const child = spawn(
+		process.execPath,
+		[...process.execArgv, fileURLToPath(import.meta.url), "service", root, location.identity, randomUUID()],
+		{
+			...HIDDEN_PROCESS,
 			cwd: root,
 			env: executionEnvironment(),
 			detached: true,
 			stdio: "ignore",
-			windowsHide: true,
-		});
-		let startupError: Error | undefined;
-		child.once("error", (error) => {
-			startupError = error;
-		});
-		child.unref();
-		// Keep the published startup owner alive after a short Hook disconnects.
-		const startup = AbortSignal.timeout(8000);
-		while (!startup.aborted) {
-			if (startupError) throw startupError;
-			const endpoint = await readEndpoint(location);
-			if (endpoint) {
-				await exchange(endpoint, "handshake", {}, startup);
-				return endpoint;
-			}
-			if (child.exitCode !== null) throw new Error("Shared service failed to start");
-			await delay(25);
+		},
+	);
+	let startupError: Error | undefined;
+	child.once("error", (error) => {
+		startupError = error;
+	});
+	child.unref();
+	// The child owns the startup lock. This waiter can exit without killing it.
+	const startup = AbortSignal.any([signal, AbortSignal.timeout(8000)]);
+	while (true) {
+		startup.throwIfAborted();
+		if (startupError) throw startupError;
+		const endpoint = await readEndpoint(location);
+		if (endpoint && alive(endpoint.pid)) {
+			await exchange(endpoint, "handshake", {}, startup);
+			return endpoint;
 		}
-		throw new Error("Shared service startup timeout");
-	} finally {
-		await release();
+		if (child.exitCode !== null) throw new Error("Shared service failed to start");
+		await delay(25, undefined, { signal: startup });
 	}
 }
 export async function publishEndpoint(location: ServiceLocation, token: string): Promise<void> {

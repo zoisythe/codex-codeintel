@@ -20,6 +20,10 @@ var init_budgets = __esm({
   "src/budgets.ts"() {
     "use strict";
     BUDGET = {
+      quickHook: 500,
+      warmupDelay: 2e3,
+      idle: 3e5,
+      cleanup: 1e3,
       postWait: 3500,
       hook: 4400,
       stopWait: 42500,
@@ -58,7 +62,9 @@ function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
   }
 }
 function executionEnvironment() {
-  return executions.getStore()?.environment ?? process.env;
+  return Object.fromEntries(
+    Object.entries(executions.getStore()?.environment ?? process.env).sort(([a], [b]) => a.localeCompare(b))
+  );
 }
 function automaticExecution() {
   return executions.getStore()?.automatic ?? false;
@@ -118,6 +124,15 @@ var init_metrics = __esm({
   }
 });
 
+// src/process-options.ts
+var HIDDEN_PROCESS;
+var init_process_options = __esm({
+  "src/process-options.ts"() {
+    "use strict";
+    HIDDEN_PROCESS = { windowsHide: true, shell: false };
+  }
+});
+
 // src/files.ts
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -155,6 +170,7 @@ async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 
       "git",
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
       {
+        ...HIDDEN_PROCESS,
         cwd: scope2,
         env: executionEnvironment(),
         timeout: 5e3,
@@ -270,6 +286,7 @@ var init_files = __esm({
     init_budgets();
     init_environment();
     init_metrics();
+    init_process_options();
     exec = promisify(execFile);
     SKIP = /* @__PURE__ */ new Set([
       ".git",
@@ -902,7 +919,7 @@ function skipVoid(str, ptr, banNewLines, banComments) {
   }
   return ptr;
 }
-function skipUntil(str, ptr, sep3, end, banNewLines = false) {
+function skipUntil(str, ptr, sep4, end, banNewLines = false) {
   if (!end) {
     ptr = indexOfNewline(str, ptr);
     return ptr < 0 ? str.length : ptr;
@@ -911,7 +928,7 @@ function skipUntil(str, ptr, sep3, end, banNewLines = false) {
     let c = str[i];
     if (c === "#") {
       i = indexOfNewline(str, i);
-    } else if (c === sep3) {
+    } else if (c === sep4) {
       return i + 1;
     } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
       return i;
@@ -1809,252 +1826,419 @@ var init_diagnostic_delta = __esm({
   }
 });
 
-// src/directory-lock.ts
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { mkdir, readFile as readFile4, rename, rm, writeFile } from "node:fs/promises";
-import { join as join3 } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    if (process.platform === "linux") {
-      const state = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)?.split(" ")[0];
-      if (state === "Z" || state === "X") return false;
-    }
-    return true;
-  } catch (error) {
-    return !(record(error) && ["ESRCH", "ENOENT"].includes(String(error["code"])));
-  }
+// src/lsp/cleanup-errors.ts
+function reportBestEffortCleanupError(operation, error) {
+  if (process.env["CODEX_LSP_DEBUG_CLEANUP"] !== "1") return;
+  const message2 = error instanceof Error ? error.message : String(error);
+  console.error(`[codex-lsp] ignored ${operation} failure during cleanup: ${message2}`);
 }
-async function directoryLock(lock, signal, budget = BUDGET.lock) {
-  const nonce = randomUUID();
-  const candidate = `${lock}.claim-${nonce}`;
-  await mkdir(candidate, { mode: 448 });
-  await writeFile(join3(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
-  const deadline = Date.now() + budget;
-  try {
-    while (true) {
-      signal.throwIfAborted();
-      try {
-        await rename(candidate, lock);
-        break;
-      } catch (error) {
-        if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
-        const raw = await readFile4(join3(lock, "owner"), "utf8").catch(() => "{}");
-        const owner = JSON.parse(raw);
-        if (record(owner) && typeof owner["pid"] === "number" && typeof owner["nonce"] === "string" && !alive(owner["pid"]) && await readFile4(join3(lock, "owner"), "utf8").catch(() => "") === raw)
-          await rename(lock, `${lock}.abandoned-${owner["nonce"]}`).catch(() => void 0);
-        if (Date.now() >= deadline) throw new Error("Directory lock busy; retry");
-        await delay(10, void 0, { signal });
-      }
-    }
-  } finally {
-    await rm(candidate, { recursive: true, force: true });
-  }
-  return async () => {
-    const released = `${lock}.released-${nonce}`;
-    await rename(lock, released);
-    await rm(released, { recursive: true, force: true });
-  };
-}
-var init_directory_lock = __esm({
-  "src/directory-lock.ts"() {
+var init_cleanup_errors = __esm({
+  "src/lsp/cleanup-errors.ts"() {
     "use strict";
-    init_budgets();
-    init_results();
   }
 });
 
-// src/service-identity.ts
-import { readFile as readFile5, realpath as realpath3 } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
-import { resolve as resolve2 } from "node:path";
-function bundleIdentity() {
-  bundle ??= readFile5(new URL(import.meta.url), "utf8").then(hash);
-  return bundle;
-}
-async function workspaceIdentity(root) {
-  const home = resolve2(executionEnvironment()["CODEX_HOME"] ?? resolve2(homedir2(), ".codex"));
-  return hash(
-    JSON.stringify([
-      process.getuid?.() ?? homedir2(),
-      await realpath3(root),
-      await realpath3(home).catch(() => home),
-      await bundleIdentity(),
-      SERVICE_PROTOCOL
-    ])
-  );
-}
-var SERVICE_PROTOCOL, bundle;
-var init_service_identity = __esm({
-  "src/service-identity.ts"() {
+// src/lsp/errors.ts
+var LspConnectionClosedError, LspProcessExitedError, LspInvalidPathError, LspProcessSpawnError;
+var init_errors = __esm({
+  "src/lsp/errors.ts"() {
     "use strict";
-    init_environment();
-    init_files();
-    SERVICE_PROTOCOL = 1;
-  }
-});
-
-// src/metadata.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { lstat as lstat2, mkdir as mkdir2, readdir as readdir2, readFile as readFile6, realpath as realpath4, rename as rename2, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
-import { homedir as homedir3, tmpdir } from "node:os";
-import { join as join4 } from "node:path";
-var empty, Metadata;
-var init_metadata = __esm({
-  "src/metadata.ts"() {
-    "use strict";
-    init_directory_lock();
-    init_environment();
-    init_files();
-    init_results();
-    init_service_identity();
-    empty = (id) => ({
-      id,
-      version: 0,
-      generation: 0,
-      configuration: "",
-      pendingChannels: { lsp: [], lint: [] },
-      automaticScope: "delta",
-      turn: "",
-      baseline: null,
-      diagnosticBaseline: null,
-      edited: false,
-      unresolved: {},
-      touched: [],
-      current: [],
-      pending: [],
-      delivery: [],
-      shown: {},
-      blocked: []
-    });
-    Metadata = class {
-      constructor(root) {
+    LspConnectionClosedError = class extends Error {
+      constructor(serverId, root, message2) {
+        super(message2 ?? `LSP connection closed for ${serverId} at ${root}`);
+        this.serverId = serverId;
         this.root = root;
+        this.name = "LspConnectionClosedError";
       }
-      async dir() {
-        const user = process.getuid?.() ?? hash(homedir3()).slice(0, 10);
-        const base = join4(
-          executionEnvironment()["CODEX_LSP_CACHE"] ?? join4(tmpdir(), `codex-lsp-${user}`),
-          `metadata-v7-${user}`
-        );
-        await mkdir2(base, { recursive: true, mode: 448 });
-        const info = await lstat2(base);
-        if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
-          throw new Error("Unsafe metadata permissions");
-        const dir = join4(base, await workspaceIdentity(await realpath4(this.root)));
-        await mkdir2(dir, { recursive: true, mode: 448 });
-        if ((await lstat2(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
-        return dir;
+    };
+    LspProcessExitedError = class extends Error {
+      constructor(serverId, root, exitCode, stderrTail) {
+        const stderrSuffix = stderrTail ? `
+stderr tail: ${stderrTail}` : "";
+        super(`LSP server ${serverId} at ${root} exited with code ${exitCode ?? "null"}${stderrSuffix}`);
+        this.serverId = serverId;
+        this.root = root;
+        this.exitCode = exitCode;
+        this.stderrTail = stderrTail;
+        this.name = "LspProcessExitedError";
       }
-      async load(path, id) {
-        try {
-          const data = JSON.parse(await readFile6(path, "utf8"));
-          if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string" || typeof data["generation"] !== "number" || typeof data["configuration"] !== "string" || !record(data["pendingChannels"]) || typeof data["edited"] !== "boolean" || !["delta", "full"].includes(String(data["automaticScope"])))
-            throw new Error("Invalid metadata");
-          for (const key of ["touched", "current", "pending", "delivery", "blocked"])
-            if (!Array.isArray(data[key]) || !data[key].every((item) => typeof item === "string"))
-              throw new Error("Invalid metadata");
-          for (const key of ["baseline", "diagnosticBaseline"])
-            if (data[key] !== null && (typeof data[key] !== "string" || !/^[a-f0-9]{64}$/.test(String(data[key]))))
-              throw new Error("Invalid baseline reference");
-          if (!record(data["unresolved"]) || !Object.values(data["unresolved"]).every(
-            (items2) => Array.isArray(items2) && items2.every(
-              (item) => record(item) && typeof item["path"] === "string" && typeof item["source"] === "string" && typeof item["message"] === "string" && typeof item["line"] === "number" && typeof item["column"] === "number" && ["error", "warning", "information", "hint"].includes(String(item["severity"]))
-            )
-          ))
-            throw new Error("Invalid unresolved diagnostics");
-          for (const key of ["shown"])
-            if (!(key === "baseline" && data[key] === null) && (!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string")))
-              throw new Error("Invalid metadata");
-          const channels = data["pendingChannels"];
-          if (!record(channels) || ![channels["lsp"], channels["lint"]].every(
-            (paths) => Array.isArray(paths) && paths.every((path2) => typeof path2 === "string")
-          ))
-            throw new Error("Invalid channel metadata");
-          return data;
-        } catch (error) {
-          if (record(error) && error["code"] === "ENOENT") return empty(id);
-          throw error;
-        }
+    };
+    LspInvalidPathError = class extends Error {
+      constructor() {
+        super(...arguments);
+        this.name = "LspInvalidPathError";
       }
-      async read(id) {
-        return this.load(join4(await this.dir(), `${hash(id)}.json`), id);
-      }
-      async ids() {
-        const dir = await this.dir();
-        const ids = [];
-        for (const file of await readdir2(dir))
-          if (file.endsWith(".json")) {
-            try {
-              const value = JSON.parse(await readFile6(join4(dir, file), "utf8"));
-              if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
-                ids.push(value["id"]);
-            } catch {
-            }
-          }
-        return ids.sort();
-      }
-      async shared(value) {
-        const content = JSON.stringify(value);
-        const reference = hash(content);
-        const dir = join4(await this.dir(), "shared");
-        await mkdir2(dir, { recursive: true, mode: 448 });
-        const path = join4(dir, `${reference}.json`);
-        await writeFile2(path, content, { mode: 384, flag: "wx" }).catch((error) => {
-          if (!record(error) || error["code"] !== "EEXIST") throw error;
-        });
-        return reference;
-      }
-      async readShared(reference) {
-        if (!/^[a-f0-9]{64}$/.test(reference)) throw new Error("Invalid shared reference");
-        const content = await readFile6(join4(await this.dir(), "shared", `${reference}.json`), "utf8");
-        if (hash(content) !== reference) throw new Error("Shared snapshot integrity mismatch");
-        return JSON.parse(content);
-      }
-      async update(id, signal, change) {
-        signal.throwIfAborted();
-        const dir = await this.dir();
-        const path = join4(dir, `${hash(id)}.json`);
-        const lock = `${path}.lock`;
-        const nonce = randomUUID2();
-        const temp = `${path}.${nonce}.tmp`;
-        const release = await directoryLock(lock, signal);
-        try {
-          const state = await this.load(path, id);
-          signal.throwIfAborted();
-          if (change(state) === false) return state;
-          state.version++;
-          for (const key of ["touched", "current", "pending", "delivery", "blocked"])
-            state[key] = [...new Set(state[key])];
-          await writeFile2(temp, JSON.stringify(state), { mode: 384 });
-          await rename2(temp, path);
-          return state;
-        } finally {
-          await rm2(temp, { force: true });
-          await release();
-        }
-      }
-      async end(id, signal) {
-        await this.update(id, signal, (state) => {
-          Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
-          state.turn = "__ended__";
-        });
+    };
+    LspProcessSpawnError = class extends Error {
+      constructor() {
+        super(...arguments);
+        this.name = "LspProcessSpawnError";
       }
     };
   }
 });
 
+// src/lsp/process.ts
+import * as childProcess from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { delimiter, join as join3 } from "node:path";
+function isMissingProcessError(error) {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return error.code === "ESRCH";
+}
+function reportKillError(context, error) {
+  if (!isMissingProcessError(error)) {
+    reportBestEffortCleanupError(context, error);
+  }
+}
+function validateCwd(cwd) {
+  try {
+    if (!existsSync(cwd)) {
+      return { valid: false, error: `Working directory does not exist: ${cwd}` };
+    }
+    const stats = statSync(cwd);
+    if (!stats.isDirectory()) {
+      return { valid: false, error: `Path is not a directory: ${cwd}` };
+    }
+    return { valid: true };
+  } catch (err) {
+    return {
+      valid: false,
+      error: `Cannot access working directory: ${cwd} (${err instanceof Error ? err.message : String(err)})`
+    };
+  }
+}
+function wrap(proc) {
+  const exitedPromise = new Promise((resolve12) => {
+    proc.once("close", (code) => resolve12(code ?? 0));
+    proc.once("error", () => resolve12(1));
+  });
+  if (!proc.stdin || !proc.stdout || !proc.stderr) {
+    throw new LspProcessSpawnError("Spawned process is missing one of stdin/stdout/stderr pipes");
+  }
+  return {
+    stdin: proc.stdin,
+    stdout: proc.stdout,
+    stderr: proc.stderr,
+    get pid() {
+      return proc.pid ?? void 0;
+    },
+    get exitCode() {
+      return proc.exitCode;
+    },
+    get killed() {
+      return proc.killed;
+    },
+    exited: exitedPromise,
+    kill(signal) {
+      terminateProcessTree(proc, signal ?? "SIGTERM");
+    }
+  };
+}
+function terminateProcessTree(proc, signal = "SIGTERM", options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32" && proc.pid) {
+    if (terminating.has(proc)) return;
+    terminating.add(proc);
+    const args = ["/pid", String(proc.pid), "/f", "/t"];
+    childProcess.execFile(
+      "taskkill",
+      args,
+      {
+        ...HIDDEN_PROCESS,
+        env: executionEnvironment(),
+        timeout: BUDGET.cleanup,
+        maxBuffer: 64 * 1024
+      },
+      (error) => {
+        if (!error) return;
+        terminating.delete(proc);
+        if (proc.exitCode !== null) return;
+        reportKillError("windows process tree kill", error);
+        try {
+          proc.kill(signal);
+        } catch (fallback) {
+          reportKillError("process kill", fallback);
+        }
+      }
+    );
+    return;
+  }
+  if (platform !== "win32" && proc.pid) {
+    try {
+      process.kill(-proc.pid, signal);
+      return;
+    } catch (error) {
+      reportKillError("process group kill", error);
+    }
+    const descendants = findDescendantProcessIds(proc.pid);
+    try {
+      proc.kill(signal);
+    } catch (error) {
+      reportKillError("process kill", error);
+    }
+    for (const pid of descendants) {
+      try {
+        process.kill(pid, signal);
+      } catch (error) {
+        reportKillError("descendant process kill", error);
+      }
+    }
+    return;
+  }
+  try {
+    proc.kill(signal);
+  } catch (error) {
+    reportKillError("process kill", error);
+  }
+}
+function findDescendantProcessIds(rootPid) {
+  const result = childProcess.spawnSync("ps", ["-A", "-o", "pid=,ppid="], {
+    encoding: "utf8",
+    env: executionEnvironment()
+  });
+  if (result.error) {
+    reportKillError("process tree inspection", result.error);
+    return [];
+  }
+  if (result.status !== 0 || typeof result.stdout !== "string") return [];
+  const childrenByParent = /* @__PURE__ */ new Map();
+  for (const line of result.stdout.split("\n")) {
+    const [pidText, parentPidText] = line.trim().split(/\s+/, 2);
+    if (pidText === void 0 || parentPidText === void 0) continue;
+    const pid = Number(pidText);
+    const parentPid = Number(parentPidText);
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) continue;
+    const children = childrenByParent.get(parentPid) ?? [];
+    children.push(pid);
+    childrenByParent.set(parentPid, children);
+  }
+  const descendants = [];
+  const pendingParents = [rootPid];
+  while (pendingParents.length > 0) {
+    const parentPid = pendingParents.pop();
+    if (parentPid === void 0) break;
+    for (const childPid of childrenByParent.get(parentPid) ?? []) {
+      descendants.push(childPid);
+      pendingParents.push(childPid);
+    }
+  }
+  return descendants.reverse();
+}
+function isWindowsShellShim(command) {
+  const lowerCommand = command.toLowerCase();
+  return lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat");
+}
+function splitPath(pathValue, platform) {
+  const separator = platform === "win32" ? ";" : delimiter;
+  return pathValue.split(separator).filter(Boolean);
+}
+function getWindowsPathExtensions(env) {
+  const rawExtensions = env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
+  const extensions = rawExtensions.split(";").map((extension) => extension.trim()).filter(Boolean).map((extension) => extension.startsWith(".") ? extension : `.${extension}`);
+  return [.../* @__PURE__ */ new Set(["", ...extensions, ".exe", ".cmd", ".bat"])];
+}
+function resolveWindowsCommand(command, env) {
+  const hasPathSeparator = command.includes("/") || command.includes("\\");
+  const pathValue = env["PATH"] ?? env["Path"] ?? "";
+  const baseDirectories = hasPathSeparator ? [""] : splitPath(pathValue, "win32");
+  const extensions = getWindowsPathExtensions(env);
+  for (const baseDirectory of baseDirectories) {
+    for (const extension of extensions) {
+      const candidate = baseDirectory ? join3(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return command;
+}
+function createSpawnCommand(command, platform = process.platform, commandProcessor = process.env["ComSpec"] ?? "cmd.exe", env = process.env) {
+  const [cmd, ...args] = command;
+  if (!cmd) {
+    throw new LspProcessSpawnError("[lsp] empty command");
+  }
+  if (platform !== "win32") {
+    return { command: cmd, args, shell: false };
+  }
+  const resolvedCommand = resolveWindowsCommand(cmd, env);
+  if (!isWindowsShellShim(resolvedCommand)) {
+    return { command: resolvedCommand, args, shell: false };
+  }
+  return {
+    command: commandProcessor,
+    args: ["/d", "/s", "/c", resolvedCommand, ...args],
+    shell: false
+  };
+}
+function spawnProcess(command, options) {
+  const cwdValidation = validateCwd(options.cwd);
+  if (!cwdValidation.valid) {
+    throw new LspInvalidPathError(`[lsp] ${cwdValidation.error}`);
+  }
+  const [cmd] = command;
+  if (!cmd) {
+    throw new LspProcessSpawnError("[lsp] empty command");
+  }
+  const environment = subprocessEnvironment(options.env);
+  const preparedCommand = createSpawnCommand(
+    command,
+    process.platform,
+    environment["ComSpec"] ?? "cmd.exe",
+    environment
+  );
+  const proc = childProcess.spawn(preparedCommand.command, preparedCommand.args, {
+    ...HIDDEN_PROCESS,
+    cwd: options.cwd,
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+    shell: preparedCommand.shell,
+    detached: process.platform !== "win32"
+  });
+  return wrap(proc);
+}
+var terminating;
+var init_process = __esm({
+  "src/lsp/process.ts"() {
+    "use strict";
+    init_budgets();
+    init_environment();
+    init_process_options();
+    init_cleanup_errors();
+    init_errors();
+    terminating = /* @__PURE__ */ new WeakSet();
+  }
+});
+
+// src/lint-output.ts
+function position(value, content) {
+  const location = record(value["location"]) ? value["location"] : {};
+  const span = location["span"];
+  if (Array.isArray(span) && typeof span[0] === "number") {
+    const before = Buffer.from(content).subarray(0, span[0]).toString("utf8").split("\n");
+    return { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 };
+  }
+  const start = record(location["start"]) ? location["start"] : {};
+  const line = value["line"] ?? location["row"] ?? start["line"];
+  const column = value["column"] ?? location["column"] ?? start["column"];
+  return { line: typeof line === "number" ? line : 1, column: typeof column === "number" ? column : 1 };
+}
+function items(runner, data) {
+  if (runner === "eslint" && Array.isArray(data))
+    return data.flatMap((file) => record(file) && Array.isArray(file["messages"]) ? file["messages"] : []);
+  if (runner === "ruff" && Array.isArray(data)) return data;
+  if (runner === "biome" && record(data) && Array.isArray(data["diagnostics"])) {
+    const summary = data["summary"];
+    if (record(summary) && Number(summary["diagnosticsNotPrinted"]) > 0)
+      throw new Error("Lint result truncated; narrow file scope");
+    return data["diagnostics"];
+  }
+  throw new Error("Unexpected lint output");
+}
+function parseLint(runner, data, path, content) {
+  const findings = [];
+  for (const value of items(runner, data)) {
+    if (!record(value)) throw new Error("Malformed lint finding");
+    const severity = value["severity"];
+    if (severity !== void 0 && ![1, 2, "error", "warning", "fatal"].includes(severity))
+      continue;
+    findings.push({
+      path,
+      ...position(value, content),
+      severity: severity === 1 || severity === "warning" ? "warning" : "error",
+      source: `${runner}/${text(value["ruleId"], text(value["code"], text(value["category"], "lint")))}`,
+      message: text(value["description"], text(value["message"], "Lint finding"))
+    });
+  }
+  return findings;
+}
+var init_lint_output = __esm({
+  "src/lint-output.ts"() {
+    "use strict";
+    init_results();
+  }
+});
+
+// src/log.ts
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { homedir as homedir2, tmpdir } from "node:os";
+import { join as join4 } from "node:path";
+function logEvent(event) {
+  queue = queue.then(async () => {
+    const dir = join4(
+      executionEnvironment()["CODEX_LSP_CACHE"] ?? join4(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir2()).slice(0, 10)}`),
+      "logs-v5"
+    );
+    await mkdir(dir, { recursive: true, mode: 448 });
+    const path = join4(dir, `${instance}.log`);
+    if ((await stat(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
+      await rm(`${path}.1`, { force: true });
+      await rename(path, `${path}.1`);
+    }
+    await appendFile(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${event}
+`, { mode: 384 });
+  }).catch(() => void 0);
+  return queue;
+}
+var instance, queue;
+var init_log = __esm({
+  "src/log.ts"() {
+    "use strict";
+    init_environment();
+    init_files();
+    instance = `${process.pid}-${randomUUID()}`;
+    queue = Promise.resolve();
+  }
+});
+
+// src/prepared-tools.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { constants } from "node:fs";
+import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile4, rename as rename2, writeFile } from "node:fs/promises";
+import { homedir as homedir3 } from "node:os";
+import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
+function directory() {
+  return join5(executionEnvironment()["CODEX_HOME"] ?? join5(homedir3(), ".codex"), "cache", "codex-lsp-v5", "tools");
+}
+async function preparedRuff() {
+  try {
+    const value = JSON.parse(await readFile4(join5(directory(), "ruff.json"), "utf8"));
+    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute4(value["executable"]))
+      return void 0;
+    await access(value["executable"], constants.X_OK);
+    return value["executable"];
+  } catch {
+    return void 0;
+  }
+}
+async function rememberRuff(executable3) {
+  if (!isAbsolute4(executable3)) throw new Error("Invalid prepared Ruff path");
+  await access(executable3, constants.X_OK);
+  const dir = directory();
+  await mkdir2(dir, { recursive: true, mode: 448 });
+  const info = await lstat2(dir);
+  if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
+    throw new Error("Unsafe prepared-tool directory");
+  const temporary2 = join5(dir, `${randomUUID2()}.tmp`);
+  await writeFile(temporary2, JSON.stringify({ executable: executable3 }), { mode: 384 });
+  await rename2(temporary2, join5(dir, "ruff.json"));
+}
+var init_prepared_tools = __esm({
+  "src/prepared-tools.ts"() {
+    "use strict";
+    init_environment();
+    init_results();
+  }
+});
+
 // src/tool-resolution.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
-import { basename as basename3, delimiter, dirname as dirname2, extname, isAbsolute as isAbsolute4, join as join5, resolve as resolve3 } from "node:path";
+import { constants as constants2 } from "node:fs";
+import { access as access2, stat as stat2 } from "node:fs/promises";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname2, extname, isAbsolute as isAbsolute5, join as join6, resolve as resolve2 } from "node:path";
 async function executable(path) {
   try {
-    await access(path, constants.X_OK);
-    return (await stat(path)).isFile();
+    await access2(path, constants2.X_OK);
+    return (await stat2(path)).isFile();
   } catch {
     return false;
   }
@@ -2063,16 +2247,16 @@ function suffixes(name) {
   return process.platform === "win32" && !/\.(?:exe|com|cmd|bat)$/i.test(name) ? [".exe", ".com", ".cmd", ".bat", ""] : [""];
 }
 async function pathExecutable(name) {
-  for (const dir of (executionEnvironment()["PATH"] ?? "").split(delimiter).filter(Boolean)) {
+  for (const dir of (executionEnvironment()["PATH"] ?? "").split(delimiter2).filter(Boolean)) {
     for (const suffix of suffixes(name)) {
-      const path = resolve3(dir, name + suffix);
+      const path = resolve2(dir, name + suffix);
       if (await executable(path)) return path;
     }
   }
   return void 0;
 }
 async function resolution(command, source, note) {
-  const info = await stat(command[0] ?? "").catch(() => void 0);
+  const info = await stat2(command[0] ?? "").catch(() => void 0);
   return {
     command,
     source,
@@ -2085,7 +2269,7 @@ function withToolResolution(action) {
 }
 function resolveTool(...args) {
   const cache = requestTools.getStore();
-  const key = JSON.stringify([args[0], dirname2(resolve3(args[0], args[1])), ...args.slice(2)]);
+  const key = JSON.stringify([args[0], dirname2(resolve2(args[0], args[1])), ...args.slice(2)]);
   const existing = cache?.get(key);
   if (existing) return existing;
   const task = findTool(...args);
@@ -2103,20 +2287,20 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
       `Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`
     );
   if (explicit) {
-    const entry = isAbsolute4(name) || name.includes("/") || name.includes("\\") ? resolve3(root, name) : await pathExecutable(name);
+    const entry = isAbsolute5(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
     return resolution(
       [entry ?? name, ...command.slice(1)],
       entry && await executable(entry) ? "explicit" : "missing",
       entry && await executable(entry) ? void 0 : `Explicit command missing: ${name}; no fallback`
     );
   }
-  let dir = dirname2(resolve3(root, path));
+  let dir = dirname2(resolve2(root, path));
   while (inside(root, dir)) {
     for (const candidate of [
       ...suffixes(name).map(
-        (suffix) => join5(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", name + suffix)
+        (suffix) => join6(dir, ".venv", process.platform === "win32" ? "Scripts" : "bin", name + suffix)
       ),
-      ...suffixes(name).map((suffix) => join5(dir, "node_modules", ".bin", name + suffix))
+      ...suffixes(name).map((suffix) => join6(dir, "node_modules", ".bin", name + suffix))
     ])
       if (await executable(candidate)) return resolution([candidate, ...command.slice(1)], "project");
     if (dir === root) break;
@@ -2206,696 +2390,21 @@ var init_tool_resolution = __esm({
   }
 });
 
-// src/write-intent.ts
-import { isAbsolute as isAbsolute5, relative as relative2, resolve as resolve4 } from "node:path";
-function writeIntent(root, input) {
-  const tool2 = text(input["tool_name"]);
-  const args = record(input["tool_input"]) ? input["tool_input"] : {};
-  let paths = [];
-  if (/apply_patch|Edit|Write|write_file|lsp_format|lsp_rename/.test(tool2)) {
-    if (/lsp_rename/.test(tool2)) return { kind: "write" };
-    const command = typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
-    paths.push(
-      ...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
-        (match) => match[1] ?? ""
-      )
-    );
-    paths.push(
-      ...[args["path"], args["file_path"], ...Array.isArray(args["paths"]) ? args["paths"] : []].filter(
-        (path) => typeof path === "string"
-      )
-    );
-  } else if (/Bash|shell|exec_command|unified_exec/.test(tool2)) {
-    const command = text(args["command"], text(args["cmd"])).trim();
-    if (!/[<>;|&`\n]|\$\(|\$\{|\\/.test(command) && /^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|wc(?:\s|$)|git (?:status|diff|log|show|ls-files|rev-parse)(?:\s|$))/.test(
-      command
-    ) && !/--(?:output|ext-diff|textconv|pre)|--exec/.test(command))
-      return { kind: "read" };
-    return { kind: "write" };
-  } else if (/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool2))
-    return { kind: "read" };
-  else return { kind: "write" };
-  if (!paths.length) return { kind: "write" };
-  paths = [
-    ...new Set(
-      paths.map((path) => {
-        const absolute = isAbsolute5(path) ? path : resolve4(root, path);
-        if (!inside(root, absolute)) throw new Error("Write target outside workspace");
-        return relative2(root, absolute);
-      })
-    )
-  ];
-  return paths.every((path) => configurationImpact(path).length) ? { kind: "configuration", paths } : { kind: "write", paths };
-}
-var init_write_intent = __esm({
-  "src/write-intent.ts"() {
-    "use strict";
-    init_config_files();
-    init_files();
-    init_results();
-  }
-});
-
-// src/hook-engine.ts
-import { readFile as readFile7 } from "node:fs/promises";
-function renderHook(output) {
-  if (output.kind === "silent") return void 0;
-  if (output.kind === "block") return { decision: "block", reason: output.reason };
-  if (output.kind === "deny")
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: output.reason
-      }
-    };
-  return output.event === "Stop" || output.event === "SubagentStop" || output.event === "SessionStart" ? { systemMessage: output.context } : { hookSpecificOutput: { hookEventName: output.event, additionalContext: output.context } };
-}
-var HookEngine;
-var init_hook_engine = __esm({
-  "src/hook-engine.ts"() {
-    "use strict";
-    init_budgets();
-    init_config();
-    init_config_files();
-    init_diagnostic_delta();
-    init_environment();
-    init_files();
-    init_metadata();
-    init_results();
-    init_tool_resolution();
-    init_write_intent();
-    HookEngine = class {
-      constructor(root, dependencies) {
-        this.root = root;
-        this.dependencies = dependencies;
-        this.queue = Promise.resolve();
-        this.store = new Metadata(root);
-      }
-      hook(input, signal) {
-        const task = this.queue.then(() => this.execute(input, signal));
-        this.queue = task.catch(() => void 0);
-        return task;
-      }
-      async execute(input, signal) {
-        const began = Date.now();
-        signal.throwIfAborted();
-        const id = text(input["session_id"]);
-        const event = text(input["hook_event_name"], "PostToolUse");
-        const stopping = event === "Stop" || event === "SubagentStop";
-        const context = (value) => ({ kind: "context", event, context: `session=${id}
-${value}` });
-        if (!id)
-          return event === "PreToolUse" ? { kind: "deny", reason: "Codex CodeIntel: missing session_id; cannot establish a pre-edit baseline" } : context("Codex CodeIntel: missing session_id");
-        if (event === "SessionEnd") {
-          await this.store.end(id, signal);
-          this.dependencies.end(id);
-          return { kind: "silent" };
-        }
-        if (stopping && input["stop_hook_active"] === true) return { kind: "silent" };
-        const initial = await this.store.read(id);
-        if (initial.turn === "__ended__" && event !== "SessionStart") return { kind: "silent" };
-        const config = await configuration(this.root);
-        if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
-          return { kind: "silent" };
-        const turn = text(input["turn_id"], initial.turn);
-        await this.store.update(id, signal, (state2) => {
-          if (event === "SessionStart" && state2.turn === "__ended__") state2.turn = "";
-          if (turn !== state2.turn) {
-            state2.turn = turn;
-            state2.current = [];
-            state2.blocked = [];
-          }
-        });
-        if (event === "SessionStart" || event === "PreToolUse") {
-          const intent2 = event === "SessionStart" ? { kind: "read" } : writeIntent(this.root, input);
-          if (intent2.kind === "configuration") return { kind: "silent" };
-          try {
-            const baseline2 = await this.dependencies.projects.baseline(
-              id,
-              intent2.kind === "write" ? intent2.paths : [],
-              executionEnvironment(),
-              signal,
-              intent2.kind === "write" ? Math.max(1, BUDGET.postWait - (Date.now() - began)) : 0
-            );
-            if (intent2.kind === "write" && (baseline2.failures.length || baseline2.pending.length))
-              return {
-                kind: "deny",
-                reason: `Codex CodeIntel: pre-edit baseline unavailable. ${baseline2.failures.join("; ")}${baseline2.pending.length ? ` Pending: ${baseline2.pending.join(", ")}; retry after check_project run=cached.` : ""} Repair checker configuration or set both automaticDiagnostics modes to off.`
-              };
-            if (!initial.baseline) {
-              const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
-              const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
-              await this.store.update(id, signal, (state2) => {
-                state2.baseline ??= reference;
-              });
-            }
-            return { kind: "silent" };
-          } catch (error) {
-            return intent2.kind === "write" ? { kind: "deny", reason: `Codex CodeIntel: pre-edit baseline unavailable: ${message(error)}` } : context(`Baseline pending: ${message(error)}`);
-          }
-        }
-        const stateBefore = await this.store.read(id);
-        if (!stateBefore.baseline || !stateBefore.diagnosticBaseline) {
-          if (event === "PostToolUse" && writeIntent(this.root, input).kind === "write")
-            await this.store.update(id, signal, (current) => {
-              current.edited = true;
-            });
-          return context(
-            "Pre-edit baseline missing; current diagnostics cannot be treated as an edit baseline. Run SessionStart/PreToolUse before editing, or disable automatic diagnostics."
-          );
-        }
-        const previous = await this.store.readShared(stateBefore.baseline);
-        if (!record(previous)) throw new Error("Invalid shared snapshot");
-        const intent = writeIntent(this.root, input);
-        const forced = intent.kind === "write" || intent.kind === "configuration" ? intent.paths ?? [] : [];
-        const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, forced);
-        if (!snapshot.complete)
-          return context("Change discovery incomplete; pending and unresolved diagnostics retained");
-        const changed = [...snapshot.files].filter(([path, content]) => previous[path] !== content).map(([path]) => path);
-        const deleted = Object.keys(previous).filter((path) => !snapshot.files.has(path));
-        const sourcePaths = changed.filter((path) => codeLanguage(config, path) && !configurationImpact(path).length);
-        const snapshotReference = await this.store.shared(Object.fromEntries(snapshot.files));
-        const state = await this.store.update(id, signal, (current) => {
-          if (current.generation !== stateBefore.generation) return false;
-          if (changed.length || deleted.length) current.generation++;
-          if (sourcePaths.length || deleted.some((path) => codeLanguage(config, path))) current.edited = true;
-          current.baseline = snapshotReference;
-          current.touched = [.../* @__PURE__ */ new Set([...current.touched, ...sourcePaths])].filter(
-            (path) => snapshot.files.has(path)
-          );
-          current.current = [.../* @__PURE__ */ new Set([...current.current, ...sourcePaths])].filter(
-            (path) => snapshot.files.has(path)
-          );
-          current.pending = [.../* @__PURE__ */ new Set([...current.pending, ...sourcePaths])].filter(
-            (path) => snapshot.files.has(path)
-          );
-          current.delivery = [.../* @__PURE__ */ new Set([...current.delivery, ...sourcePaths])].filter(
-            (path) => snapshot.files.has(path)
-          );
-          for (const path of deleted) {
-            const moved = changed.find(
-              (next) => snapshot.files.get(next) === previous[path] && previous[next] === void 0
-            );
-            if (moved && current.unresolved[path])
-              current.unresolved[moved] = current.unresolved[path].map((finding) => ({ ...finding, path: moved }));
-            delete current.unresolved[path];
-            delete current.shown[path];
-          }
-          return true;
-        });
-        if ((stopping ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
-          return { kind: "silent" };
-        const paths = stopping ? [.../* @__PURE__ */ new Set([...state.current, ...state.pending])] : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
-        if (!paths.length) return { kind: "silent" };
-        const output = await this.dependencies.check(
-          paths,
-          id,
-          turn,
-          state.generation,
-          Math.max(1, (stopping ? BUDGET.stopWait : BUDGET.postWait) - (Date.now() - began)),
-          signal
-        );
-        if (output.generation !== state.generation) return context("Stale diagnostic generation; pending retained");
-        const baselineData = await this.store.readShared(state.diagnosticBaseline ?? "");
-        const baseline = record(baselineData) && Array.isArray(baselineData["results"]) ? baselineData["results"].flatMap(
-          (item) => record(item) && Array.isArray(item["findings"]) ? item["findings"] : []
-        ) : [];
-        const ledgerValue = state.shown["diagnosticCurrent"] ? await this.store.readShared(state.shown["diagnosticCurrent"]) : void 0;
-        const ledger = record(ledgerValue) ? ledgerValue : {};
-        for (const old of deleted) {
-          const moved = changed.find(
-            (path) => snapshot.files.get(path) === previous[old] && previous[path] === void 0
-          );
-          if (moved)
-            ledger[moved] = (ledger[old] ?? baseline.filter((finding) => finding.path === old)).map((finding) => ({
-              ...finding,
-              path: moved
-            }));
-          delete ledger[old];
-        }
-        const valid = [];
-        for (const result of output.results) {
-          try {
-            if (hash(await readFile7(await workspacePath(this.root, result.path), "utf8")) === snapshot.files.get(result.path))
-              valid.push(result);
-          } catch {
-          }
-        }
-        let feedback = { kind: "silent" };
-        await this.store.update(id, AbortSignal.timeout(750), (current) => {
-          if (current.generation !== state.generation || current.turn !== turn) return false;
-          const fresh = [];
-          const repaired = [];
-          for (const result of valid) {
-            const preceding = ledger[result.path] ?? baseline.filter((finding) => finding.path === result.path);
-            const added = addedFindings(preceding, result.findings);
-            const previousIssues = current.unresolved[result.path] ?? [];
-            if (result.state === "complete") {
-              const historical = addedFindings(previousIssues, preceding);
-              current.unresolved[result.path] = addedFindings(historical, result.findings);
-              ledger[result.path] = result.findings;
-              current.pending = current.pending.filter((path) => path !== result.path);
-              current.delivery = current.delivery.filter((path) => path !== result.path);
-              if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
-                repaired.push(
-                  `${result.path}: ${previousIssues.length - (current.unresolved[result.path]?.length ?? 0)} introduced diagnostics repaired`
-                );
-            } else {
-              current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
-            }
-            const signature = hash(JSON.stringify(added.map(diagnosticKey)));
-            if ((added.length || result.state !== "complete") && current.shown[result.path] !== signature)
-              fresh.push({ ...result, findings: added });
-            current.shown[result.path] = signature;
-          }
-          const unresolved = Object.entries(current.unresolved).filter(([path]) => current.current.includes(path)).flatMap(([, findings]) => findings).filter((finding) => finding.severity === "error");
-          const confirmed = unresolved.filter(
-            (finding) => valid.some(
-              (result) => result.path === finding.path && result.findings.some((item) => diagnosticKey(item) === diagnosticKey(finding))
-            )
-          );
-          if (stopping && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
-            current.blocked.push(turn || "__turn__");
-            feedback = {
-              kind: "block",
-              reason: `Codex CodeIntel: fix introduced errors before finishing.
-${render([{ path: ".", state: "complete", findings: confirmed }], 15, 3500)}`
-            };
-          } else if (fresh.length || repaired.length || stopping && current.pending.length)
-            feedback = context(
-              `Automatic delta: introduced=${fresh.flatMap((result) => result.findings).length}; pending=${current.pending.length}
-${fresh.length ? render(fresh, 15, 3500) : ""}${repaired.join("\n")}${output.note ? `
-${output.note}` : ""}`
-            );
-          return true;
-        });
-        const ledgerReference = await this.store.shared(ledger);
-        await this.store.update(id, AbortSignal.timeout(750), (current) => {
-          if (current.generation !== state.generation || current.turn !== turn) return false;
-          current.shown["diagnosticCurrent"] = ledgerReference;
-          return true;
-        });
-        return feedback;
-      }
-    };
-  }
-});
-
-// src/lsp/cleanup-errors.ts
-function reportBestEffortCleanupError(operation, error) {
-  if (process.env["CODEX_LSP_DEBUG_CLEANUP"] !== "1") return;
-  const message2 = error instanceof Error ? error.message : String(error);
-  console.error(`[codex-lsp] ignored ${operation} failure during cleanup: ${message2}`);
-}
-var init_cleanup_errors = __esm({
-  "src/lsp/cleanup-errors.ts"() {
-    "use strict";
-  }
-});
-
-// src/lsp/errors.ts
-var LspConnectionClosedError, LspProcessExitedError, LspInvalidPathError, LspProcessSpawnError;
-var init_errors = __esm({
-  "src/lsp/errors.ts"() {
-    "use strict";
-    LspConnectionClosedError = class extends Error {
-      constructor(serverId, root, message2) {
-        super(message2 ?? `LSP connection closed for ${serverId} at ${root}`);
-        this.serverId = serverId;
-        this.root = root;
-        this.name = "LspConnectionClosedError";
-      }
-    };
-    LspProcessExitedError = class extends Error {
-      constructor(serverId, root, exitCode, stderrTail) {
-        const stderrSuffix = stderrTail ? `
-stderr tail: ${stderrTail}` : "";
-        super(`LSP server ${serverId} at ${root} exited with code ${exitCode ?? "null"}${stderrSuffix}`);
-        this.serverId = serverId;
-        this.root = root;
-        this.exitCode = exitCode;
-        this.stderrTail = stderrTail;
-        this.name = "LspProcessExitedError";
-      }
-    };
-    LspInvalidPathError = class extends Error {
-      constructor() {
-        super(...arguments);
-        this.name = "LspInvalidPathError";
-      }
-    };
-    LspProcessSpawnError = class extends Error {
-      constructor() {
-        super(...arguments);
-        this.name = "LspProcessSpawnError";
-      }
-    };
-  }
-});
-
-// src/lsp/process.ts
-import * as childProcess from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { delimiter as delimiter2, join as join6 } from "node:path";
-function isMissingProcessError(error) {
-  if (!(error instanceof Error) || !("code" in error)) return false;
-  return error.code === "ESRCH";
-}
-function reportKillError(context, error) {
-  if (!isMissingProcessError(error)) {
-    reportBestEffortCleanupError(context, error);
-  }
-}
-function validateCwd(cwd) {
-  try {
-    if (!existsSync(cwd)) {
-      return { valid: false, error: `Working directory does not exist: ${cwd}` };
-    }
-    const stats = statSync(cwd);
-    if (!stats.isDirectory()) {
-      return { valid: false, error: `Path is not a directory: ${cwd}` };
-    }
-    return { valid: true };
-  } catch (err) {
-    return {
-      valid: false,
-      error: `Cannot access working directory: ${cwd} (${err instanceof Error ? err.message : String(err)})`
-    };
-  }
-}
-function wrap(proc) {
-  const exitedPromise = new Promise((resolve12) => {
-    proc.once("close", (code) => resolve12(code ?? 0));
-    proc.once("error", () => resolve12(1));
-  });
-  if (!proc.stdin || !proc.stdout || !proc.stderr) {
-    throw new LspProcessSpawnError("Spawned process is missing one of stdin/stdout/stderr pipes");
-  }
-  return {
-    stdin: proc.stdin,
-    stdout: proc.stdout,
-    stderr: proc.stderr,
-    get pid() {
-      return proc.pid ?? void 0;
-    },
-    get exitCode() {
-      return proc.exitCode;
-    },
-    get killed() {
-      return proc.killed;
-    },
-    exited: exitedPromise,
-    kill(signal) {
-      terminateProcessTree(proc, signal ?? "SIGTERM");
-    }
-  };
-}
-function terminateProcessTree(proc, signal = "SIGTERM", options = {}) {
-  const platform = options.platform ?? process.platform;
-  if (platform === "win32" && proc.pid) {
-    const args = ["/pid", String(proc.pid), "/f", "/t"];
-    const result = options.spawnSync === void 0 ? childProcess.spawnSync("taskkill", args, { stdio: "ignore", env: executionEnvironment() }) : options.spawnSync("taskkill", args, { stdio: "ignore", env: executionEnvironment() });
-    if (!result.error && result.status === 0) return;
-    if (result.error) reportKillError("windows process tree kill", result.error);
-  }
-  if (platform !== "win32" && proc.pid) {
-    try {
-      process.kill(-proc.pid, signal);
-      return;
-    } catch (error) {
-      reportKillError("process group kill", error);
-    }
-    const descendants = findDescendantProcessIds(proc.pid);
-    try {
-      proc.kill(signal);
-    } catch (error) {
-      reportKillError("process kill", error);
-    }
-    for (const pid of descendants) {
-      try {
-        process.kill(pid, signal);
-      } catch (error) {
-        reportKillError("descendant process kill", error);
-      }
-    }
-    return;
-  }
-  try {
-    proc.kill(signal);
-  } catch (error) {
-    reportKillError("process kill", error);
-  }
-}
-function findDescendantProcessIds(rootPid) {
-  const result = childProcess.spawnSync("ps", ["-A", "-o", "pid=,ppid="], {
-    encoding: "utf8",
-    env: executionEnvironment()
-  });
-  if (result.error) {
-    reportKillError("process tree inspection", result.error);
-    return [];
-  }
-  if (result.status !== 0 || typeof result.stdout !== "string") return [];
-  const childrenByParent = /* @__PURE__ */ new Map();
-  for (const line of result.stdout.split("\n")) {
-    const [pidText, parentPidText] = line.trim().split(/\s+/, 2);
-    if (pidText === void 0 || parentPidText === void 0) continue;
-    const pid = Number(pidText);
-    const parentPid = Number(parentPidText);
-    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) continue;
-    const children = childrenByParent.get(parentPid) ?? [];
-    children.push(pid);
-    childrenByParent.set(parentPid, children);
-  }
-  const descendants = [];
-  const pendingParents = [rootPid];
-  while (pendingParents.length > 0) {
-    const parentPid = pendingParents.pop();
-    if (parentPid === void 0) break;
-    for (const childPid of childrenByParent.get(parentPid) ?? []) {
-      descendants.push(childPid);
-      pendingParents.push(childPid);
-    }
-  }
-  return descendants.reverse();
-}
-function isWindowsShellShim(command) {
-  const lowerCommand = command.toLowerCase();
-  return lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat");
-}
-function splitPath(pathValue, platform) {
-  const separator = platform === "win32" ? ";" : delimiter2;
-  return pathValue.split(separator).filter(Boolean);
-}
-function getWindowsPathExtensions(env) {
-  const rawExtensions = env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
-  const extensions = rawExtensions.split(";").map((extension) => extension.trim()).filter(Boolean).map((extension) => extension.startsWith(".") ? extension : `.${extension}`);
-  return [.../* @__PURE__ */ new Set(["", ...extensions, ".exe", ".cmd", ".bat"])];
-}
-function resolveWindowsCommand(command, env) {
-  const hasPathSeparator = command.includes("/") || command.includes("\\");
-  const pathValue = env["PATH"] ?? env["Path"] ?? "";
-  const baseDirectories = hasPathSeparator ? [""] : splitPath(pathValue, "win32");
-  const extensions = getWindowsPathExtensions(env);
-  for (const baseDirectory of baseDirectories) {
-    for (const extension of extensions) {
-      const candidate = baseDirectory ? join6(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return command;
-}
-function createSpawnCommand(command, platform = process.platform, commandProcessor = process.env["ComSpec"] ?? "cmd.exe", env = process.env) {
-  const [cmd, ...args] = command;
-  if (!cmd) {
-    throw new LspProcessSpawnError("[lsp] empty command");
-  }
-  if (platform !== "win32") {
-    return { command: cmd, args, shell: false };
-  }
-  const resolvedCommand = resolveWindowsCommand(cmd, env);
-  if (!isWindowsShellShim(resolvedCommand)) {
-    return { command: resolvedCommand, args, shell: false };
-  }
-  return {
-    command: commandProcessor,
-    args: ["/d", "/s", "/c", resolvedCommand, ...args],
-    shell: false
-  };
-}
-function spawnProcess(command, options) {
-  const cwdValidation = validateCwd(options.cwd);
-  if (!cwdValidation.valid) {
-    throw new LspInvalidPathError(`[lsp] ${cwdValidation.error}`);
-  }
-  const [cmd] = command;
-  if (!cmd) {
-    throw new LspProcessSpawnError("[lsp] empty command");
-  }
-  const environment = subprocessEnvironment(options.env);
-  const preparedCommand = createSpawnCommand(
-    command,
-    process.platform,
-    environment["ComSpec"] ?? "cmd.exe",
-    environment
-  );
-  const proc = childProcess.spawn(preparedCommand.command, preparedCommand.args, {
-    cwd: options.cwd,
-    env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    shell: preparedCommand.shell,
-    detached: process.platform !== "win32"
-  });
-  return wrap(proc);
-}
-var init_process = __esm({
-  "src/lsp/process.ts"() {
-    "use strict";
-    init_environment();
-    init_cleanup_errors();
-    init_errors();
-  }
-});
-
-// src/lint-output.ts
-function position(value, content) {
-  const location = record(value["location"]) ? value["location"] : {};
-  const span = location["span"];
-  if (Array.isArray(span) && typeof span[0] === "number") {
-    const before = Buffer.from(content).subarray(0, span[0]).toString("utf8").split("\n");
-    return { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 };
-  }
-  const start = record(location["start"]) ? location["start"] : {};
-  const line = value["line"] ?? location["row"] ?? start["line"];
-  const column = value["column"] ?? location["column"] ?? start["column"];
-  return { line: typeof line === "number" ? line : 1, column: typeof column === "number" ? column : 1 };
-}
-function items(runner, data) {
-  if (runner === "eslint" && Array.isArray(data))
-    return data.flatMap((file) => record(file) && Array.isArray(file["messages"]) ? file["messages"] : []);
-  if (runner === "ruff" && Array.isArray(data)) return data;
-  if (runner === "biome" && record(data) && Array.isArray(data["diagnostics"])) {
-    const summary = data["summary"];
-    if (record(summary) && Number(summary["diagnosticsNotPrinted"]) > 0)
-      throw new Error("Lint result truncated; narrow file scope");
-    return data["diagnostics"];
-  }
-  throw new Error("Unexpected lint output");
-}
-function parseLint(runner, data, path, content) {
-  const findings = [];
-  for (const value of items(runner, data)) {
-    if (!record(value)) throw new Error("Malformed lint finding");
-    const severity = value["severity"];
-    if (severity !== void 0 && ![1, 2, "error", "warning", "fatal"].includes(severity))
-      continue;
-    findings.push({
-      path,
-      ...position(value, content),
-      severity: severity === 1 || severity === "warning" ? "warning" : "error",
-      source: `${runner}/${text(value["ruleId"], text(value["code"], text(value["category"], "lint")))}`,
-      message: text(value["description"], text(value["message"], "Lint finding"))
-    });
-  }
-  return findings;
-}
-var init_lint_output = __esm({
-  "src/lint-output.ts"() {
-    "use strict";
-    init_results();
-  }
-});
-
-// src/log.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { appendFile, mkdir as mkdir3, rename as rename3, rm as rm3, stat as stat2 } from "node:fs/promises";
-import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
-import { join as join7 } from "node:path";
-function logEvent(event) {
-  queue = queue.then(async () => {
-    const dir = join7(
-      executionEnvironment()["CODEX_LSP_CACHE"] ?? join7(tmpdir2(), `codex-lsp-${process.getuid?.() ?? hash(homedir4()).slice(0, 10)}`),
-      "logs-v5"
-    );
-    await mkdir3(dir, { recursive: true, mode: 448 });
-    const path = join7(dir, `${instance}.log`);
-    if ((await stat2(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
-      await rm3(`${path}.1`, { force: true });
-      await rename3(path, `${path}.1`);
-    }
-    await appendFile(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${event}
-`, { mode: 384 });
-  }).catch(() => void 0);
-  return queue;
-}
-var instance, queue;
-var init_log = __esm({
-  "src/log.ts"() {
-    "use strict";
-    init_environment();
-    init_files();
-    instance = `${process.pid}-${randomUUID3()}`;
-    queue = Promise.resolve();
-  }
-});
-
-// src/prepared-tools.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
-import { constants as constants2 } from "node:fs";
-import { access as access2, lstat as lstat3, mkdir as mkdir4, readFile as readFile8, rename as rename4, writeFile as writeFile3 } from "node:fs/promises";
-import { homedir as homedir5 } from "node:os";
-import { isAbsolute as isAbsolute6, join as join8 } from "node:path";
-function directory() {
-  return join8(executionEnvironment()["CODEX_HOME"] ?? join8(homedir5(), ".codex"), "cache", "codex-lsp-v5", "tools");
-}
-async function preparedRuff() {
-  try {
-    const value = JSON.parse(await readFile8(join8(directory(), "ruff.json"), "utf8"));
-    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute6(value["executable"]))
-      return void 0;
-    await access2(value["executable"], constants2.X_OK);
-    return value["executable"];
-  } catch {
-    return void 0;
-  }
-}
-async function rememberRuff(executable3) {
-  if (!isAbsolute6(executable3)) throw new Error("Invalid prepared Ruff path");
-  await access2(executable3, constants2.X_OK);
-  const dir = directory();
-  await mkdir4(dir, { recursive: true, mode: 448 });
-  const info = await lstat3(dir);
-  if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
-    throw new Error("Unsafe prepared-tool directory");
-  const temporary2 = join8(dir, `${randomUUID4()}.tmp`);
-  await writeFile3(temporary2, JSON.stringify({ executable: executable3 }), { mode: 384 });
-  await rename4(temporary2, join8(dir, "ruff.json"));
-}
-var init_prepared_tools = __esm({
-  "src/prepared-tools.ts"() {
-    "use strict";
-    init_environment();
-    init_results();
-  }
-});
-
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access as access3, readFile as readFile9, realpath as realpath5, stat as stat3, writeFile as writeFile4 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname3, extname as extname2, join as join9, relative as relative3, resolve as resolve5 } from "node:path";
+import { access as access3, readFile as readFile5, realpath as realpath3, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
+import { basename as basename4, dirname as dirname3, extname as extname2, join as join7, relative as relative2, resolve as resolve3 } from "node:path";
 async function run(command, args, cwd, signal, input, options = {}) {
   signal.throwIfAborted();
   const environment = subprocessEnvironment(options.environment ?? executionEnvironment());
   return new Promise((resolve12, reject) => {
     const prepared = createSpawnCommand([command, ...args], process.platform, environment["ComSpec"], environment);
     const child = spawn2(prepared.command, prepared.args, {
+      ...HIDDEN_PROCESS,
       cwd,
       env: environment,
       shell: prepared.shell,
       detached: process.platform !== "win32",
-      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
     const cancel = () => terminateProcessTree(child, "SIGKILL");
@@ -2949,7 +2458,7 @@ async function exists(path) {
 async function configured(root, path, names) {
   let dir = dirname3(path);
   while (inside(root, dir)) {
-    for (const name of names) if (await exists(join9(dir, name))) return true;
+    for (const name of names) if (await exists(join7(dir, name))) return true;
     if (dir === root) break;
     dir = dirname3(dir);
   }
@@ -2958,8 +2467,8 @@ async function configured(root, path, names) {
 async function executable2(root, target, packageName, entry) {
   let dir = dirname3(target);
   while (inside(root, dir)) {
-    const path = join9(dir, "node_modules", packageName, entry);
-    if (await exists(path)) return realpath5(path);
+    const path = join7(dir, "node_modules", packageName, entry);
+    if (await exists(path)) return realpath3(path);
     const parent = dirname3(dir);
     if (dir === root) break;
     dir = parent;
@@ -3080,7 +2589,7 @@ async function lintBatch(root, paths, signal, provided, active = false) {
     let batch = [];
     let bytes = 0;
     for (const path of members) {
-      const size = Buffer.byteLength(resolve5(root, path)) + 3;
+      const size = Buffer.byteLength(resolve3(root, path)) + 3;
       if (batch.length && bytes + size > BUDGET.argvBytes) {
         batches.push(batch);
         batch = [];
@@ -3097,7 +2606,7 @@ async function lintBatch(root, paths, signal, provided, active = false) {
           "lint",
           () => run(
             runner.command,
-            [...runner.prefix, ...args, ...paths2.map((path) => resolve5(root, path))],
+            [...runner.prefix, ...args, ...paths2.map((path) => resolve3(root, path))],
             cwd,
             signal
           )
@@ -3113,7 +2622,7 @@ async function lintBatch(root, paths, signal, provided, active = false) {
               runner.name,
               split.get(path) ?? (runner.name === "biome" ? { diagnostics: [] } : []),
               path,
-              await readFile9(resolve5(root, path), "utf8")
+              await readFile5(resolve3(root, path), "utf8")
             )
           });
       } catch (error) {
@@ -3141,8 +2650,8 @@ function splitLint(runner, data, root, cwd) {
     const biomePath = record(location["path"]) ? location["path"]["file"] : location["path"];
     const file = runner === "eslint" ? item["filePath"] : runner === "ruff" ? item["filename"] : biomePath;
     if (typeof file !== "string") throw new Error("Lint result has no file path");
-    const path = relative3(root, resolve5(cwd, file));
-    if (!inside(root, resolve5(root, path))) throw new Error("Lint result outside workspace");
+    const path = relative2(root, resolve3(cwd, file));
+    if (!inside(root, resolve3(root, path))) throw new Error("Lint result outside workspace");
     const values = grouped.get(path) ?? [];
     values.push(item);
     grouped.set(path, values);
@@ -3155,14 +2664,14 @@ async function formatWithRunner(root, path, signal, provided) {
   const absolute = await workspacePath(root, path);
   const runner = await select(root, absolute, true, config, true, signal);
   if (!runner || runner.name === "eslint") return void 0;
-  const before = await readFile9(absolute, "utf8");
+  const before = await readFile5(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
   const result = await run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
-  if (await readFile9(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
+  if (await readFile5(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   if (before === result.stdout) return { status: "unchanged", path, modifiedPaths: [] };
   signal.throwIfAborted();
-  await writeFile4(absolute, result.stdout);
+  await writeFile2(absolute, result.stdout);
   return { status: "formatted", path, modifiedPaths: [path] };
 }
 async function preflightRunner(root, path, config, signal) {
@@ -3190,20 +2699,21 @@ var init_runners = __esm({
     init_log();
     init_metrics();
     init_prepared_tools();
+    init_process_options();
     init_results();
     init_tool_resolution();
   }
 });
 
 // src/identity.ts
-import { readdir as readdir3, readFile as readFile10, stat as stat4 } from "node:fs/promises";
-import { dirname as dirname4, extname as extname3, join as join10, resolve as resolve6 } from "node:path";
+import { readdir as readdir2, readFile as readFile6, stat as stat4 } from "node:fs/promises";
+import { dirname as dirname4, extname as extname3, join as join8, resolve as resolve4 } from "node:path";
 async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const dirs = /* @__PURE__ */ new Set();
   const runners = /* @__PURE__ */ new Map();
   for (const path of paths) {
     signal.throwIfAborted();
-    const absolute = resolve6(root, path);
+    const absolute = resolve4(root, path);
     const key = `${dirname4(absolute)}:${extname3(path)}`;
     if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute, config));
     let dir = dirname4(absolute);
@@ -3218,17 +2728,17 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const scoped = languages.every((language) => ["typescript", "python", "cpp", "rust", "go"].includes(language ?? ""));
   for (const dir of [...dirs].sort()) {
     const names = [
-      .../* @__PURE__ */ new Set([...configNames(), ...(await readdir3(dir)).filter((name) => configurationImpact(name).length)])
+      .../* @__PURE__ */ new Set([...configNames(), ...(await readdir2(dir)).filter((name) => configurationImpact(name).length)])
     ];
     for (const name of names) {
       if (!configurationImpact(name).some((impact) => impact === "types" || impact === "lint")) continue;
       const affected = configurationLanguages(name);
       if (scoped && affected.length && !affected.some((language) => languages.includes(language))) continue;
       signal.throwIfAborted();
-      const path = join10(dir, name);
+      const path = join8(dir, name);
       try {
         if ((await stat4(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
-        contents.push(path, hash(await readFile10(path, { encoding: "utf8", signal })));
+        contents.push(path, hash(await readFile6(path, { encoding: "utf8", signal })));
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
@@ -3248,6 +2758,705 @@ var init_identity = __esm({
     init_files();
     init_runners();
     init_tool_resolution();
+  }
+});
+
+// src/directory-lock.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { mkdir as mkdir3, readFile as readFile7, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join9 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    if (process.platform === "linux") {
+      const state = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)?.split(" ")[0];
+      if (state === "Z" || state === "X") return false;
+    }
+    return true;
+  } catch (error) {
+    return !(record(error) && ["ESRCH", "ENOENT"].includes(String(error["code"])));
+  }
+}
+async function directoryLock(lock, signal, budget = BUDGET.lock) {
+  const nonce = randomUUID3();
+  const candidate = `${lock}.claim-${nonce}`;
+  await mkdir3(candidate, { mode: 448 });
+  await writeFile3(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
+  const deadline = Date.now() + budget;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      try {
+        await rename3(candidate, lock);
+        break;
+      } catch (error) {
+        if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
+        const raw = await readFile7(join9(lock, "owner"), "utf8").catch(() => "{}");
+        const owner = JSON.parse(raw);
+        if (record(owner) && typeof owner["pid"] === "number" && typeof owner["nonce"] === "string" && !alive(owner["pid"]) && await readFile7(join9(lock, "owner"), "utf8").catch(() => "") === raw)
+          await rename3(lock, `${lock}.abandoned-${owner["nonce"]}`).catch(() => void 0);
+        if (Date.now() >= deadline) throw new Error("Directory lock busy; retry");
+        await delay(10, void 0, { signal });
+      }
+    }
+  } finally {
+    await rm2(candidate, { recursive: true, force: true });
+  }
+  return async () => {
+    const released = `${lock}.released-${nonce}`;
+    await rename3(lock, released);
+    await rm2(released, { recursive: true, force: true });
+  };
+}
+var init_directory_lock = __esm({
+  "src/directory-lock.ts"() {
+    "use strict";
+    init_budgets();
+    init_results();
+  }
+});
+
+// src/service-identity.ts
+import { readFile as readFile8, realpath as realpath4 } from "node:fs/promises";
+import { homedir as homedir4 } from "node:os";
+import { resolve as resolve5 } from "node:path";
+function bundleIdentity() {
+  bundle ??= readFile8(new URL(import.meta.url), "utf8").then(hash);
+  return bundle;
+}
+async function workspaceIdentity(root) {
+  const home = resolve5(executionEnvironment()["CODEX_HOME"] ?? resolve5(homedir4(), ".codex"));
+  return hash(
+    JSON.stringify([
+      process.getuid?.() ?? homedir4(),
+      await realpath4(root),
+      await realpath4(home).catch(() => home),
+      await bundleIdentity(),
+      SERVICE_PROTOCOL
+    ])
+  );
+}
+var SERVICE_PROTOCOL, bundle;
+var init_service_identity = __esm({
+  "src/service-identity.ts"() {
+    "use strict";
+    init_environment();
+    init_files();
+    SERVICE_PROTOCOL = 1;
+  }
+});
+
+// src/metadata.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile9, realpath as realpath5, rename as rename4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
+import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
+import { join as join10 } from "node:path";
+var empty, Metadata;
+var init_metadata = __esm({
+  "src/metadata.ts"() {
+    "use strict";
+    init_directory_lock();
+    init_environment();
+    init_files();
+    init_results();
+    init_service_identity();
+    empty = (id) => ({
+      id,
+      epoch: hash(`initial:${id}`),
+      outbox: {},
+      version: 0,
+      generation: 0,
+      configuration: "",
+      pendingChannels: { lsp: [], lint: [] },
+      automaticScope: "delta",
+      turn: "",
+      baseline: null,
+      diagnosticBaseline: null,
+      edited: false,
+      unresolved: {},
+      touched: [],
+      current: [],
+      pending: [],
+      delivery: [],
+      shown: {},
+      blocked: []
+    });
+    Metadata = class {
+      constructor(root) {
+        this.root = root;
+      }
+      async dir() {
+        const user = process.getuid?.() ?? hash(homedir5()).slice(0, 10);
+        const base = join10(
+          executionEnvironment()["CODEX_LSP_CACHE"] ?? join10(tmpdir2(), `codex-lsp-${user}`),
+          `metadata-v7-${user}`
+        );
+        await mkdir4(base, { recursive: true, mode: 448 });
+        const info = await lstat3(base);
+        if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
+          throw new Error("Unsafe metadata permissions");
+        const dir = join10(base, await workspaceIdentity(await realpath5(this.root)));
+        await mkdir4(dir, { recursive: true, mode: 448 });
+        if ((await lstat3(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
+        return dir;
+      }
+      async load(path, id) {
+        try {
+          const data = JSON.parse(await readFile9(path, "utf8"));
+          if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string" || typeof data["generation"] !== "number" || typeof data["configuration"] !== "string" || !record(data["pendingChannels"]) || typeof data["edited"] !== "boolean" || !["delta", "full"].includes(String(data["automaticScope"])))
+            throw new Error("Invalid metadata");
+          for (const key of ["touched", "current", "pending", "delivery", "blocked"])
+            if (!Array.isArray(data[key]) || !data[key].every((item) => typeof item === "string"))
+              throw new Error("Invalid metadata");
+          for (const key of ["baseline", "diagnosticBaseline"])
+            if (data[key] !== null && (typeof data[key] !== "string" || !/^[a-f0-9]{64}$/.test(String(data[key]))))
+              throw new Error("Invalid baseline reference");
+          if (!record(data["unresolved"]) || !Object.values(data["unresolved"]).every(
+            (items2) => Array.isArray(items2) && items2.every(
+              (item) => record(item) && typeof item["path"] === "string" && typeof item["source"] === "string" && typeof item["message"] === "string" && typeof item["line"] === "number" && typeof item["column"] === "number" && ["error", "warning", "information", "hint"].includes(String(item["severity"]))
+            )
+          ))
+            throw new Error("Invalid unresolved diagnostics");
+          for (const key of ["shown"])
+            if (!(key === "baseline" && data[key] === null) && (!record(data[key]) || !Object.values(data[key]).every((item) => typeof item === "string")))
+              throw new Error("Invalid metadata");
+          const channels = data["pendingChannels"];
+          if (!record(channels) || ![channels["lsp"], channels["lint"]].every(
+            (paths) => Array.isArray(paths) && paths.every((path2) => typeof path2 === "string")
+          ))
+            throw new Error("Invalid channel metadata");
+          data["epoch"] ??= "legacy";
+          data["outbox"] ??= {};
+          if (typeof data["epoch"] !== "string" || !record(data["outbox"]) || !Object.values(data["outbox"]).every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)))
+            throw new Error("Invalid delivery metadata");
+          return data;
+        } catch (error) {
+          if (record(error) && error["code"] === "ENOENT") return empty(id);
+          throw error;
+        }
+      }
+      async read(id) {
+        return this.load(join10(await this.dir(), `${hash(id)}.json`), id);
+      }
+      async ids() {
+        const dir = await this.dir();
+        const ids = [];
+        for (const file of await readdir3(dir))
+          if (file.endsWith(".json")) {
+            try {
+              const value = JSON.parse(await readFile9(join10(dir, file), "utf8"));
+              if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
+                ids.push(value["id"]);
+            } catch {
+            }
+          }
+        return ids.sort();
+      }
+      async shared(value) {
+        const content = JSON.stringify(value);
+        const reference = hash(content);
+        const dir = join10(await this.dir(), "shared");
+        await mkdir4(dir, { recursive: true, mode: 448 });
+        const path = join10(dir, `${reference}.json`);
+        await writeFile4(path, content, { mode: 384, flag: "wx" }).catch((error) => {
+          if (!record(error) || error["code"] !== "EEXIST") throw error;
+        });
+        return reference;
+      }
+      async readShared(reference) {
+        if (!/^[a-f0-9]{64}$/.test(reference)) throw new Error("Invalid shared reference");
+        const content = await readFile9(join10(await this.dir(), "shared", `${reference}.json`), "utf8");
+        if (hash(content) !== reference) throw new Error("Shared snapshot integrity mismatch");
+        return JSON.parse(content);
+      }
+      async update(id, signal, change) {
+        signal.throwIfAborted();
+        const dir = await this.dir();
+        const path = join10(dir, `${hash(id)}.json`);
+        const lock = `${path}.lock`;
+        const nonce = randomUUID4();
+        const temp = `${path}.${nonce}.tmp`;
+        const release = await directoryLock(lock, signal);
+        try {
+          const state = await this.load(path, id);
+          signal.throwIfAborted();
+          if (await change(state) === false) return state;
+          state.version++;
+          for (const key of ["touched", "current", "pending", "delivery", "blocked"])
+            state[key] = [...new Set(state[key])];
+          await writeFile4(temp, JSON.stringify(state), { mode: 384 });
+          await rename4(temp, path);
+          return state;
+        } finally {
+          await rm3(temp, { force: true });
+          await release();
+        }
+      }
+      async end(id, signal) {
+        await this.update(id, signal, (state) => {
+          Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
+          state.epoch = randomUUID4();
+          state.turn = "__ended__";
+        });
+      }
+    };
+  }
+});
+
+// src/hook-delivery.ts
+import { readFile as readFile10 } from "node:fs/promises";
+async function queueDelivery(store, state, output, bindings, configuration2, analysis) {
+  if (output.kind !== "context" && output.kind !== "block") return;
+  const content = output.kind === "context" ? output.context : output.reason;
+  const pages = [];
+  let page = "";
+  for (const line of content.split("\n")) {
+    if (page && Buffer.byteLength(`${page}
+${line}`) > 3500) {
+      pages.push(page);
+      page = "";
+    }
+    page += `${page ? "\n" : ""}${line}`;
+  }
+  if (page) pages.push(page);
+  for (const [index, value] of pages.entries()) {
+    const delivery = {
+      epoch: state.epoch,
+      generation: state.generation,
+      turn: state.turn,
+      configuration: configuration2,
+      analysis,
+      bindings,
+      output: output.kind === "context" ? { ...output, context: value } : { ...output, reason: value }
+    };
+    const id = `${output.kind === "block" ? "block-" : ""}${hash(JSON.stringify([delivery, index])).slice(0, 24)}`;
+    state.outbox[id] = await store.shared(delivery);
+  }
+}
+async function consumeDelivery(root, session, event, signal) {
+  const store = new Metadata(root);
+  const state = await store.read(session);
+  const config = await configuration(root);
+  if (!config.trusted || state.turn === "__ended__" || (event === "Stop" || event === "SubagentStop" ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
+    return { output: { kind: "silent" } };
+  const entries = Object.entries(state.outbox);
+  if (event === "Stop" || event === "SubagentStop")
+    entries.sort(([a], [b]) => Number(!a.startsWith("block-")) - Number(!b.startsWith("block-")));
+  for (const [id, reference] of entries) {
+    signal.throwIfAborted();
+    const value = await store.readShared(reference);
+    if (!record(value) || !record(value["bindings"]) || !record(value["output"]))
+      throw new Error("Invalid diagnostic delivery");
+    const item = value;
+    const paths = Object.keys(item.bindings);
+    let fresh = item.epoch === state.epoch && item.generation === state.generation && item.configuration === config.version;
+    if (fresh && paths.length) {
+      for (const path of paths) {
+        signal.throwIfAborted();
+        try {
+          if (hash(await readFile10(await workspacePath(root, path), { encoding: "utf8", signal })) !== item.bindings[path])
+            fresh = false;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+          fresh = false;
+        }
+      }
+      if (fresh) fresh = item.analysis === await analysisIdentity(root, paths, config, signal);
+    }
+    if (!fresh) {
+      await store.update(session, signal, (current2) => {
+        if (current2.outbox[id] !== reference) return false;
+        delete current2.outbox[id];
+        if (current2.epoch === item.epoch && current2.turn !== "__ended__") current2.pending.push(...paths);
+        return true;
+      });
+      continue;
+    }
+    if (item.output.kind === "block" && state.turn !== item.turn) {
+      await acknowledgeDelivery(root, session, id, signal);
+      continue;
+    }
+    if (item.output.kind === "block" && event !== "Stop" && event !== "SubagentStop") continue;
+    const current = await store.read(session);
+    if (current.epoch !== state.epoch || current.generation !== state.generation || current.outbox[id] !== reference)
+      return { output: { kind: "silent" } };
+    const marker = `[Codex CodeIntel automatic diagnostics] deliveryId=${id}; sourceTurn=${item.turn || "unknown"}
+`;
+    return {
+      deliveryId: id,
+      output: item.output.kind === "block" ? { kind: "block", reason: marker + item.output.reason } : item.output.kind === "context" ? { kind: "context", event, context: marker + item.output.context } : item.output
+    };
+  }
+  return { output: { kind: "silent" } };
+}
+async function acknowledgeDelivery(root, session, id, signal) {
+  await new Metadata(root).update(session, signal, (state) => {
+    if (!state.outbox[id]) return false;
+    delete state.outbox[id];
+    return true;
+  });
+}
+var init_hook_delivery = __esm({
+  "src/hook-delivery.ts"() {
+    "use strict";
+    init_config();
+    init_files();
+    init_identity();
+    init_metadata();
+    init_results();
+  }
+});
+
+// src/write-intent.ts
+import { isAbsolute as isAbsolute6, relative as relative3, resolve as resolve6 } from "node:path";
+function isShellTool(input) {
+  return /^(?:bash|shell|exec_command|unified_exec)$/.test(
+    text(input["tool_name"]).split(".").at(-1)?.toLowerCase() ?? ""
+  );
+}
+function writeIntent(root, input) {
+  const tool2 = text(input["tool_name"]);
+  const args = record(input["tool_input"]) ? input["tool_input"] : {};
+  let paths = [];
+  if (/apply_patch|Edit|Write|write_file|lsp_format|lsp_rename/.test(tool2)) {
+    if (/lsp_rename/.test(tool2)) return { kind: "write" };
+    const command = typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
+    paths.push(
+      ...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
+        (match) => match[1] ?? ""
+      )
+    );
+    paths.push(
+      ...[args["path"], args["file_path"], ...Array.isArray(args["paths"]) ? args["paths"] : []].filter(
+        (path) => typeof path === "string"
+      )
+    );
+  } else if (isShellTool(input)) {
+    const command = text(args["command"], text(args["cmd"])).trim();
+    if (!/[<>;|&`\n]|\$\(|\$\{/.test(command) && /^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|wc(?:\s|$)|Get-(?:Content|ChildItem|Location|Item)(?:\s|$)|Select-String(?:\s|$)|git (?:status|diff|log|show|ls-files|rev-parse)(?:\s|$))/i.test(
+      command
+    ) && !/--(?:output|ext-diff|textconv|pre)|--exec/.test(command))
+      return { kind: "read" };
+    return { kind: "write" };
+  } else if (/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool2))
+    return { kind: "read" };
+  else return { kind: "write" };
+  if (!paths.length) return { kind: "write" };
+  paths = [
+    ...new Set(
+      paths.map((path) => {
+        const absolute = isAbsolute6(path) ? path : resolve6(root, path);
+        if (!inside(root, absolute)) throw new Error("Write target outside workspace");
+        return relative3(root, absolute);
+      })
+    )
+  ];
+  return paths.every((path) => configurationImpact(path).length) ? { kind: "configuration", paths } : { kind: "write", paths };
+}
+var init_write_intent = __esm({
+  "src/write-intent.ts"() {
+    "use strict";
+    init_config_files();
+    init_files();
+    init_results();
+  }
+});
+
+// src/hook-engine.ts
+import { readFile as readFile11 } from "node:fs/promises";
+function renderHook(output) {
+  if (output.kind === "silent") return void 0;
+  if (output.kind === "block") return { decision: "block", reason: output.reason };
+  if (output.kind === "deny")
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: output.reason
+      }
+    };
+  return output.event === "Stop" || output.event === "SubagentStop" || output.event === "SessionStart" ? { systemMessage: output.context } : { hookSpecificOutput: { hookEventName: output.event, additionalContext: output.context } };
+}
+var HookEngine;
+var init_hook_engine = __esm({
+  "src/hook-engine.ts"() {
+    "use strict";
+    init_budgets();
+    init_config();
+    init_config_files();
+    init_diagnostic_delta();
+    init_environment();
+    init_files();
+    init_hook_delivery();
+    init_identity();
+    init_metadata();
+    init_results();
+    init_tool_resolution();
+    init_write_intent();
+    HookEngine = class {
+      constructor(root, dependencies) {
+        this.root = root;
+        this.dependencies = dependencies;
+        this.queue = Promise.resolve();
+        this.store = new Metadata(root);
+      }
+      hook(input, signal, background = false) {
+        const event = text(input["hook_event_name"], "PostToolUse");
+        if (event === "PreToolUse" && (isShellTool(input) || writeIntent(this.root, input).kind !== "write"))
+          return Promise.resolve({ kind: "silent" });
+        const task = event === "SessionEnd" ? this.prepare(input, signal, background) : this.queue.then(() => this.prepare(input, signal, background));
+        this.queue = task.then(
+          () => void 0,
+          () => void 0
+        );
+        return task.then(async (prepared) => {
+          if (typeof prepared === "function") return prepared();
+          if (prepared.kind === "context" && text(input["session_id"])) {
+            const config = await configuration(this.root);
+            await this.store.update(text(input["session_id"]), signal, async (state) => {
+              if (state.turn === "__ended__") return false;
+              await queueDelivery(this.store, state, prepared, {}, config.version, "");
+              return true;
+            });
+          }
+          return prepared;
+        });
+      }
+      async prepare(input, signal, background) {
+        const began = Date.now();
+        signal.throwIfAborted();
+        const id = text(input["session_id"]);
+        const event = text(input["hook_event_name"], "PostToolUse");
+        const stopping = event === "Stop" || event === "SubagentStop";
+        const context = (value) => ({ kind: "context", event, context: `session=${id}
+${value}` });
+        if (!id)
+          return event === "PreToolUse" ? { kind: "deny", reason: "Codex CodeIntel: missing session_id; cannot establish a pre-edit baseline" } : context("Codex CodeIntel: missing session_id");
+        if (event === "SessionEnd") {
+          await this.store.end(id, signal);
+          this.dependencies.end(id);
+          return { kind: "silent" };
+        }
+        if (stopping && input["stop_hook_active"] === true) return { kind: "silent" };
+        const initial = await this.store.read(id);
+        if (initial.turn === "__ended__" && event !== "SessionStart") return { kind: "silent" };
+        const config = await configuration(this.root);
+        if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+          return { kind: "silent" };
+        const turn = text(input["turn_id"], initial.turn);
+        await this.store.update(id, signal, (state2) => {
+          if (state2.epoch !== initial.epoch || state2.turn === "__ended__" && event !== "SessionStart") return false;
+          if (event === "SessionStart" && state2.turn === "__ended__") state2.turn = "";
+          if (turn !== state2.turn) {
+            state2.turn = turn;
+            state2.current = [];
+            state2.blocked = [];
+          }
+          return true;
+        });
+        if (event === "SessionStart" || event === "PreToolUse") {
+          const intent2 = event === "SessionStart" ? { kind: "read" } : writeIntent(this.root, input);
+          if (intent2.kind === "configuration") return { kind: "silent" };
+          try {
+            const baseline = await this.dependencies.projects.baseline(
+              id,
+              intent2.kind === "write" ? intent2.paths : [],
+              executionEnvironment(),
+              signal,
+              intent2.kind === "write" ? Math.max(1, BUDGET.postWait - (Date.now() - began)) : 0
+            );
+            if (intent2.kind === "write" && (baseline.failures.length || baseline.pending.length))
+              return {
+                kind: "deny",
+                reason: `Codex CodeIntel: pre-edit baseline unavailable. ${baseline.failures.join("; ")}${baseline.pending.length ? ` Pending: ${baseline.pending.join(", ")}; retry after check_project run=cached.` : ""} Repair checker configuration or set both automaticDiagnostics modes to off.`
+              };
+            if (!initial.baseline) {
+              const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
+              const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
+              await this.store.update(id, signal, (state2) => {
+                if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
+                state2.baseline ??= reference;
+                return true;
+              });
+            }
+            return { kind: "silent" };
+          } catch (error) {
+            return intent2.kind === "write" ? { kind: "deny", reason: `Codex CodeIntel: pre-edit baseline unavailable: ${message(error)}` } : context(`Baseline pending: ${message(error)}`);
+          }
+        }
+        const stateBefore = await this.store.read(id);
+        if (!stateBefore.baseline || !stateBefore.diagnosticBaseline) {
+          if (event === "PostToolUse" && !isShellTool(input) && writeIntent(this.root, input).kind === "write")
+            await this.store.update(id, signal, (current) => {
+              current.edited = true;
+            });
+          return context(
+            "Pre-edit baseline missing; current diagnostics cannot be treated as an edit baseline. Run SessionStart/PreToolUse before editing, or disable automatic diagnostics."
+          );
+        }
+        const previous = await this.store.readShared(stateBefore.baseline);
+        if (!record(previous)) throw new Error("Invalid shared snapshot");
+        const intent = writeIntent(this.root, input);
+        const forced = intent.kind === "write" || intent.kind === "configuration" ? intent.paths ?? [] : [];
+        const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, forced);
+        if (!snapshot.complete)
+          return context("Change discovery incomplete; pending and unresolved diagnostics retained");
+        const changed = [...snapshot.files].filter(([path, content]) => previous[path] !== content).map(([path]) => path);
+        const deleted = Object.keys(previous).filter((path) => !snapshot.files.has(path));
+        const sourcePaths = changed.filter((path) => codeLanguage(config, path) && !configurationImpact(path).length);
+        const snapshotReference = await this.store.shared(Object.fromEntries(snapshot.files));
+        const state = await this.store.update(id, signal, (current) => {
+          if (current.generation !== stateBefore.generation || current.epoch !== stateBefore.epoch) return false;
+          if (changed.length || deleted.length) current.generation++;
+          if (sourcePaths.length || deleted.some((path) => codeLanguage(config, path))) current.edited = true;
+          current.baseline = snapshotReference;
+          current.touched = [.../* @__PURE__ */ new Set([...current.touched, ...sourcePaths])].filter(
+            (path) => snapshot.files.has(path)
+          );
+          current.current = [.../* @__PURE__ */ new Set([...current.current, ...sourcePaths])].filter(
+            (path) => snapshot.files.has(path)
+          );
+          current.pending = [.../* @__PURE__ */ new Set([...current.pending, ...sourcePaths])].filter(
+            (path) => snapshot.files.has(path)
+          );
+          current.delivery = [.../* @__PURE__ */ new Set([...current.delivery, ...sourcePaths])].filter(
+            (path) => snapshot.files.has(path)
+          );
+          for (const path of deleted) {
+            const moved = changed.find(
+              (next) => snapshot.files.get(next) === previous[path] && previous[next] === void 0
+            );
+            if (moved && current.unresolved[path])
+              current.unresolved[moved] = current.unresolved[path].map((finding) => ({ ...finding, path: moved }));
+            delete current.unresolved[path];
+            delete current.shown[path];
+          }
+          return true;
+        });
+        if ((stopping ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
+          return { kind: "silent" };
+        const paths = stopping ? [.../* @__PURE__ */ new Set([...state.current, ...state.pending])] : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
+        if (!paths.length) return { kind: "silent" };
+        const reliable = await this.dependencies.projects.baseline(id, paths, executionEnvironment(), signal, 0);
+        if (reliable.failures.length || reliable.pending.length) {
+          if (isShellTool(input) && !stateBefore.edited && reliable.failures.some((failure) => failure.includes("Project changed while establishing baseline"))) {
+            await this.store.update(id, signal, (current) => {
+              if (current.epoch !== state.epoch || current.generation !== state.generation) return false;
+              current.diagnosticBaseline = null;
+              delete current.shown["baselineJob"];
+              current.edited = false;
+              return true;
+            });
+          }
+          return context(
+            `Pre-edit diagnostic baseline is not reliable; introduced errors cannot be attributed. ${reliable.failures.join("; ")} Pending: ${reliable.pending.join(", ")}`
+          );
+        }
+        state.diagnosticBaseline = reliable.reference;
+        return async () => {
+          const output = await this.dependencies.check(
+            paths,
+            id,
+            turn,
+            state.generation,
+            Math.max(
+              1,
+              (background ? BUDGET.project : stopping ? BUDGET.stopWait : BUDGET.postWait) - (Date.now() - began)
+            ),
+            signal
+          );
+          if (output.generation !== state.generation) return context("Stale diagnostic generation; pending retained");
+          const baselineData = await this.store.readShared(state.diagnosticBaseline ?? "");
+          const baseline = record(baselineData) && Array.isArray(baselineData["results"]) ? baselineData["results"].flatMap(
+            (item) => record(item) && Array.isArray(item["findings"]) ? item["findings"] : []
+          ) : [];
+          const ledgerValue = state.shown["diagnosticCurrent"] ? await this.store.readShared(state.shown["diagnosticCurrent"]) : void 0;
+          const ledger = record(ledgerValue) ? ledgerValue : {};
+          for (const old of deleted) {
+            const moved = changed.find(
+              (path) => snapshot.files.get(path) === previous[old] && previous[path] === void 0
+            );
+            if (moved)
+              ledger[moved] = (ledger[old] ?? baseline.filter((finding) => finding.path === old)).map((finding) => ({
+                ...finding,
+                path: moved
+              }));
+            delete ledger[old];
+          }
+          const valid = [];
+          for (const result of output.results) {
+            try {
+              if (hash(await readFile11(await workspacePath(this.root, result.path), "utf8")) === snapshot.files.get(result.path))
+                valid.push(result);
+            } catch {
+            }
+          }
+          let feedback = { kind: "silent" };
+          const bindings = Object.fromEntries(
+            valid.map((result) => [result.path, snapshot.files.get(result.path) ?? ""])
+          );
+          const analysis = valid.length ? await analysisIdentity(
+            this.root,
+            valid.map((result) => result.path),
+            config,
+            signal
+          ) : "";
+          await this.store.update(id, signal, async (current) => {
+            if (current.generation !== state.generation || current.epoch !== state.epoch) return false;
+            const fresh = [];
+            const repaired = [];
+            for (const result of valid) {
+              const preceding = ledger[result.path] ?? baseline.filter((finding) => finding.path === result.path);
+              const added = addedFindings(preceding, result.findings);
+              const previousIssues = current.unresolved[result.path] ?? [];
+              if (result.state === "complete") {
+                const historical = addedFindings(previousIssues, preceding);
+                current.unresolved[result.path] = addedFindings(historical, result.findings);
+                ledger[result.path] = result.findings;
+                current.pending = current.pending.filter((path) => path !== result.path);
+                current.delivery = current.delivery.filter((path) => path !== result.path);
+                if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
+                  repaired.push(
+                    `${result.path}: ${previousIssues.length - (current.unresolved[result.path]?.length ?? 0)} introduced diagnostics repaired`
+                  );
+              } else {
+                current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
+              }
+              const signature = hash(JSON.stringify(added.map(diagnosticKey)));
+              if ((added.length || result.state !== "complete") && current.shown[result.path] !== signature)
+                fresh.push({ ...result, findings: added });
+              current.shown[result.path] = signature;
+            }
+            const unresolved = Object.entries(current.unresolved).filter(([path]) => current.current.includes(path)).flatMap(([, findings]) => findings).filter((finding) => finding.severity === "error");
+            const confirmed = unresolved.filter(
+              (finding) => valid.some(
+                (result) => result.path === finding.path && result.findings.some((item) => diagnosticKey(item) === diagnosticKey(finding))
+              )
+            );
+            if (stopping && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
+              current.blocked.push(turn || "__turn__");
+              feedback = {
+                kind: "block",
+                reason: `Codex CodeIntel: fix introduced errors before finishing.
+${render([{ path: ".", state: "complete", findings: confirmed }], 1e5, BUDGET.outputBytes)}`
+              };
+            } else if (fresh.length || repaired.length || stopping && current.pending.length)
+              feedback = context(
+                `Automatic delta: introduced=${fresh.flatMap((result) => result.findings).length}; pending=${current.pending.length}
+${fresh.length ? render(fresh, 1e5, BUDGET.outputBytes) : ""}${repaired.join("\n")}${output.note ? `
+${output.note}` : ""}`
+              );
+            current.shown["diagnosticCurrent"] = await this.store.shared(ledger);
+            await queueDelivery(this.store, { ...current, turn }, feedback, bindings, config.version, analysis);
+            return true;
+          });
+          return feedback;
+        };
+      }
+    };
   }
 });
 
@@ -4596,7 +4805,7 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile11(path) {
+function readFile12(path) {
   try {
     return readFileSync4(path, "utf8");
   } catch {
@@ -4604,7 +4813,7 @@ function readFile11(path) {
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile11(path);
+  const content = readFile12(path);
   if (content === void 0) return void 0;
   try {
     return Object.hasOwn(parse(content), "workspace") ? "workspace" : "ordinary";
@@ -4799,11 +5008,11 @@ async function defaultCargoMetadataLoader(manifestPath, signal, environment = ex
         return nextBytes;
       };
       cargoProcess = spawn3("cargo", commandArgs, {
+        ...HIDDEN_PROCESS,
         env: subprocessEnvironment(environment),
         detached: process.platform !== "win32",
         signal: controller.signal,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true
+        stdio: ["ignore", "pipe", "pipe"]
       });
       cargoProcess.stdout?.setEncoding("utf8");
       cargoProcess.stderr?.setEncoding("utf8");
@@ -4862,6 +5071,7 @@ var init_cargo_metadata_process = __esm({
   "src/lsp/cargo-metadata-process.ts"() {
     "use strict";
     init_environment();
+    init_process_options();
     init_process();
     init_process_signal_cleanup();
     CARGO_METADATA_MAX_BUFFER = 64 * 1024 * 1024;
@@ -5093,7 +5303,7 @@ var init_workspace_root = __esm({
 });
 
 // src/language.ts
-import { readFile as readFile12, writeFile as writeFile5 } from "node:fs/promises";
+import { readFile as readFile13, writeFile as writeFile5 } from "node:fs/promises";
 import { dirname as dirname8, extname as extname5, relative as relative5, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
 function diagnosticUriKey(uri) {
@@ -5271,7 +5481,7 @@ var init_language = __esm({
       }
       async openFile(path) {
         const uri = pathToFileURL3(path).href;
-        const content = await readFile12(path, "utf8");
+        const content = await readFile13(path, "utf8");
         const previous = this.versions.get(uri);
         if (previous?.content === content && !this.dirty.has(uri)) return;
         this.dirty.delete(uri);
@@ -5388,7 +5598,7 @@ var init_language = __esm({
         this.snapshot = /* @__PURE__ */ new Map();
         this.failures = /* @__PURE__ */ new Map();
         this.manager = new LspManager({
-          idleTimeoutMs: 12e4,
+          idleTimeoutMs: BUDGET.idle,
           clientFactory: (root2, server2) => {
             if (!inside(this.root, root2))
               throw new Error("LSP root outside workspace; choose the enclosing project as workspace");
@@ -5446,9 +5656,7 @@ var init_language = __esm({
       }
       async status(path) {
         const resolved = await resolveServer(this.root, path, this.config);
-        const failure = this.failures.get(
-          `${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`
-        );
+        const failure = [...this.failures.values()].filter((entry) => entry.identity === resolved.tool.identity && inside(entry.root, resolve9(this.root, path))).sort((a, b) => b.root.length - a.root.length)[0];
         return {
           ...resolved,
           lint: this.config.trusted ? await select(this.root, resolve9(this.root, path), false, this.config).catch((error) => ({
@@ -5457,8 +5665,9 @@ var init_language = __esm({
           running: [...this.clients].some(
             (client) => client.isAlive() && client.serverIdentity() === `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`
           ),
-          failure: failure && failure.identity === resolved.tool.identity && Date.now() - failure.at < 3e4 ? failure.reason : void 0,
-          recovery: "Install or repair the selected local tool, then lsp_status refresh=true; failures retry after 30 seconds"
+          failure: failure && Date.now() < failure.retryAt ? failure.reason : void 0,
+          retryAt: failure?.retryAt,
+          recovery: "Install or repair the local tool, then lsp_status refresh=true; failure cooldown is 30/60/120 seconds, capped at 300 seconds"
         };
       }
       async preflight(path, signal, operation) {
@@ -5480,14 +5689,13 @@ var init_language = __esm({
         if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
         if (resolved.tool.source === "temporary" && !this.config.trusted)
           throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
-        const failureKey = `${resolved.language}:${hash(JSON.stringify([resolved.server, resolved.tool.identity]))}`;
-        const failed = this.failures.get(failureKey);
-        if (failed && failed.identity === resolved.tool.identity && Date.now() - failed.at < 3e4)
-          throw new Error(failed.reason);
         let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
         if (!inside(this.root, root)) root = this.root;
         if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
           root = dirname8(dirname8(dirname8(resolved.tool.command[0])));
+        const failureKey = hash(JSON.stringify([root, resolved.server, resolved.tool.identity]));
+        const failed = this.failures.get(failureKey);
+        if (failed && Date.now() < failed.retryAt) throw new Error(failed.reason);
         resolved.server.id += `:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`;
         for (const managed of options.manager.getSnapshot())
           if (managed.root === root && managed.serverId.startsWith(`${resolved.server.id.split(":")[0]}:`) && managed.serverId !== resolved.server.id)
@@ -5500,10 +5708,12 @@ var init_language = __esm({
           );
         } catch (error) {
           if (options.signal.aborted) throw error;
-          for (const [key, failure] of this.failures) if (Date.now() - failure.at >= 3e4) this.failures.delete(key);
+          const attempts = (failed?.attempts ?? 0) + 1;
           this.failures.set(failureKey, {
             identity: resolved.tool.identity,
-            at: Date.now(),
+            root,
+            attempts,
+            retryAt: Date.now() + Math.min(3e5, 3e4 * 2 ** Math.min(attempts - 1, 4)),
             reason: (resolved.tool.source === "temporary" ? "Temporary launch/download or initialization failed: " : "Local initialization failed (no fallback): ") + message(error)
           });
           const reason = this.failures.get(failureKey)?.reason;
@@ -5627,13 +5837,13 @@ var init_language = __esm({
         for (const [uri, edits] of changes) {
           const path = await workspacePath(this.root, fileURLToPath2(uri));
           await this.preflight(path, signal);
-          const before = await readFile12(path, "utf8");
+          const before = await readFile13(path, "utf8");
           pending.push({ path, before, after: applyTextChanges(before, edits) });
         }
         if ((await inventory(this.root, 1e4, signal)).version !== version)
           throw new Error("Workspace changed during rename; retry");
         for (const item of pending)
-          if (await readFile12(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
+          if (await readFile13(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
         signal.throwIfAborted();
         const modified = [];
         try {
@@ -5649,7 +5859,7 @@ var init_language = __esm({
       }
       async format(path, signal) {
         const absolute = await workspacePath(this.root, path);
-        const before = await readFile12(absolute, "utf8");
+        const before = await readFile13(absolute, "utf8");
         const edits = await this.withLspClient(
           absolute,
           async (client) => {
@@ -5660,7 +5870,7 @@ var init_language = __esm({
           { manager: this.manager, signal }
         );
         const after = applyTextChanges(before, edits);
-        if (await readFile12(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
+        if (await readFile13(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
         if (after === before) return { status: "unchanged", path, modifiedPaths: [] };
         signal.throwIfAborted();
         await writeFile5(absolute, after);
@@ -5674,7 +5884,7 @@ var init_language = __esm({
 });
 
 // src/project-output.ts
-import { readFile as readFile13 } from "node:fs/promises";
+import { readFile as readFile14 } from "node:fs/promises";
 import { relative as relative6, resolve as resolve10 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 async function projectOutput(check, output, root, cwd) {
@@ -5715,7 +5925,7 @@ async function projectOutput(check, output, root, cwd) {
     const split = splitLint(check.parser, JSON.parse(output), root, cwd);
     const findings2 = [];
     for (const [path, data] of split)
-      findings2.push(...parseLint(check.parser, data, path, await readFile13(resolve10(root, path), "utf8")));
+      findings2.push(...parseLint(check.parser, data, path, await readFile14(resolve10(root, path), "utf8")));
     return findings2;
   }
   if (check.parser === "json") {
@@ -5785,7 +5995,7 @@ var init_project_output = __esm({
 
 // src/project-checks.ts
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readdir as readdir4, readFile as readFile14, stat as stat5 } from "node:fs/promises";
+import { readdir as readdir4, readFile as readFile15, stat as stat5 } from "node:fs/promises";
 import * as nodePath2 from "node:path";
 import { join as join15, relative as relative7, resolve as resolve11 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
@@ -5828,6 +6038,12 @@ var init_project_checks = __esm({
       constructor(root) {
         this.root = root;
         this.jobs = /* @__PURE__ */ new Map();
+        this.sessionJobs = /* @__PURE__ */ new Map();
+      }
+      cancelSession(session) {
+        const id = this.sessionJobs.get(session);
+        if (id) this.jobs.get(id)?.controller.abort();
+        this.sessionJobs.delete(session);
       }
       get active() {
         return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
@@ -6019,7 +6235,7 @@ var init_project_checks = __esm({
                   if (shown.code !== 0 || !record(data))
                     throw new Error("TypeScript effective configuration unavailable");
                   const pkg = JSON.parse(
-                    await readFile14(join15(cwd, "package.json"), "utf8").catch(() => "{}")
+                    await readFile15(join15(cwd, "package.json"), "utf8").catch(() => "{}")
                   );
                   if (Array.isArray(data["references"]) && data["references"].length || record(pkg) && pkg["workspaces"])
                     throw new Error("TypeScript references/multi-package projects require explicit projectChecks");
@@ -6033,8 +6249,8 @@ var init_project_checks = __esm({
                     result.excluded.push("**/*.{js,jsx,mjs,cjs}");
                 }
                 if (config.projectChecks === "auto" && check.parser === "ty") {
-                  const content = await readFile14(join15(cwd, "ty.toml"), "utf8").catch(() => void 0);
-                  const data = content ? parse(content) : parse(await readFile14(join15(cwd, "pyproject.toml"), "utf8").catch(() => ""));
+                  const content = await readFile15(join15(cwd, "ty.toml"), "utf8").catch(() => void 0);
+                  const data = content ? parse(content) : parse(await readFile15(join15(cwd, "pyproject.toml"), "utf8").catch(() => ""));
                   const toolConfig = content ? data : record(data["tool"]) && record(data["tool"]["ty"]) ? data["tool"]["ty"] : {};
                   const src = record(toolConfig["src"]) ? toolConfig["src"] : {};
                   if (Array.isArray(src["include"]))
@@ -6105,8 +6321,11 @@ var init_project_checks = __esm({
             const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
             if (!snapshot2.complete) throw new Error("Baseline inventory incomplete");
             job = await this.start(checks, config, environment, identity, snapshot2.version);
+            this.sessionJobs.set(session, job.id);
             await store.update(session, signal, (current) => {
+              if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
               current.shown["baselineJob"] = job?.id ?? "";
+              return true;
             });
           }
           const selected = job.checks.map((check, index) => ({ check, index })).filter(({ check }) => !paths || paths.some((path) => covers(check, path)));
@@ -6119,8 +6338,10 @@ var init_project_checks = __esm({
         const results = recovered.results;
         const reference = await store.shared(recovered);
         await store.update(session, signal, (current) => {
+          if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
           current.diagnosticBaseline = reference;
           current.configuration = config.version;
+          return true;
         });
         const snapshot = paths ? void 0 : await inventory(this.root, BUDGET.files, signal, config.exclude);
         const targets = paths ?? [...snapshot?.files.keys() ?? []].filter(
@@ -6158,8 +6379,8 @@ var init_project_checks = __esm({
 
 // src/engine.ts
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { readFile as readFile15, stat as stat6 } from "node:fs/promises";
-import { dirname as dirname9, relative as relative8 } from "node:path";
+import { readFile as readFile16, stat as stat6 } from "node:fs/promises";
+import { dirname as dirname9, relative as relative8, sep as sep3 } from "node:path";
 var Engine;
 var init_engine = __esm({
   "src/engine.ts"() {
@@ -6216,6 +6437,28 @@ var init_engine = __esm({
         this.queue = Promise.resolve();
         this.generation = 0;
         this.pages = /* @__PURE__ */ new Map();
+      }
+      async warmup(signal) {
+        const config = await configuration(this.root);
+        if (!config.trusted || config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+          return;
+        const snapshot = latestInventory(this.root);
+        if (!snapshot?.complete) return;
+        const representatives = /* @__PURE__ */ new Map();
+        for (const path of snapshot.files.keys()) {
+          const language = codeLanguage(config, path);
+          if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
+            continue;
+          const entry = representatives.get(language);
+          if (entry) entry.count++;
+          else representatives.set(language, { path, count: 1 });
+        }
+        this.language ??= new Languages(this.root, config);
+        await this.language.update(config);
+        for (const entry of [...representatives.values()].sort((a, b) => b.count - a.count).slice(0, 2)) {
+          signal.throwIfAborted();
+          await this.language.preflight(entry.path, signal).catch(() => void 0);
+        }
       }
       session(id, turn) {
         let session = this.sessions.get(id);
@@ -6279,7 +6522,7 @@ var init_engine = __esm({
             }
             const identity = await analysisIdentity(this.root, [path], config, signal);
             this.identities.set(path, identity);
-            const content = hash(await readFile15(absolute, { encoding: "utf8", signal }));
+            const content = hash(await readFile16(absolute, { encoding: "utf8", signal }));
             const key = `${source === "both" ? "" : `${source}:`}${path}`;
             const cached = this.cache.get(key);
             if (snapshot.complete && cached?.version === this.projectVersion(snapshot, path, config) && cached.identity === identity && cached.content === content && cached.result.state === "complete")
@@ -6306,7 +6549,7 @@ var init_engine = __esm({
             note: "Checker returned no result"
           };
           try {
-            if (hash(await readFile15(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
+            if (hash(await readFile16(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
               result.state = "stale";
               result.note = "File/tool/configuration changed during diagnostics; retry";
             }
@@ -6594,7 +6837,7 @@ var init_engine = __esm({
                 selected2.add(path);
               } else
                 for (const candidate of (snapshot.complete ? snapshot : await inventory(this.root, BUDGET.files, signal, config.exclude, absolute)).files.keys())
-                  if ((!path || candidate.startsWith(`${path}/`)) && codeLanguage(config, candidate))
+                  if ((!path || candidate.startsWith(`${path}${sep3}`)) && codeLanguage(config, candidate))
                     selected2.add(candidate);
             }
             paths = [...selected2].sort();
@@ -6715,7 +6958,7 @@ var init_engine = __esm({
           const absolute = await workspacePath(this.root, path);
           const info = await stat6(absolute);
           if (info.size > BUDGET.fileBytes) return "oversized";
-          return hash(await readFile15(absolute, { encoding: "utf8", signal }));
+          return hash(await readFile16(absolute, { encoding: "utf8", signal }));
         } catch {
           signal.throwIfAborted();
           return "unavailable";
@@ -6743,7 +6986,7 @@ var init_engine = __esm({
 // src/ipc.ts
 import { spawn as spawn4 } from "node:child_process";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { chmod, lstat as lstat4, mkdir as mkdir5, readFile as readFile16, rename as rename5, rm as rm4, writeFile as writeFile6 } from "node:fs/promises";
+import { chmod, lstat as lstat4, mkdir as mkdir5, readFile as readFile17, rename as rename5, writeFile as writeFile6 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
 import { join as join16 } from "node:path";
@@ -6765,7 +7008,7 @@ async function readEndpoint(location) {
     const info = await lstat4(location.endpoint);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
       throw new Error("Unsafe service endpoint permissions");
-    const value = JSON.parse(await readFile16(location.endpoint, "utf8"));
+    const value = JSON.parse(await readFile17(location.endpoint, "utf8"));
     if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["pid"] !== "number" || typeof value["token"] !== "string" || value["address"] !== location.address)
       throw new Error("Invalid service endpoint");
     return value;
@@ -6864,44 +7107,38 @@ async function existingService(root, signal) {
 }
 async function ensureService(root, signal) {
   const location = await serviceLocation(root);
-  const lock = `${location.endpoint}.lock`;
-  const release = await directoryLock(lock, signal, 8e3);
-  try {
-    const connected = await existingService(root, signal);
-    if (connected) return connected;
-    const previous = await readEndpoint(location);
-    if (previous && alive(previous.pid))
-      throw new Error("Service process alive but handshake unavailable; retry later");
-    await rm4(location.endpoint, { force: true });
-    if (process.platform !== "win32") await rm4(location.address, { force: true });
-    const token = randomUUID7();
-    const cli = fileURLToPath4(import.meta.url);
-    const child = spawn4(process.execPath, [...process.execArgv, cli, "service", root, location.identity, token], {
+  signal.throwIfAborted();
+  const connected = await existingService(root, signal);
+  if (connected) return connected;
+  const previous = await readEndpoint(location);
+  if (previous && alive(previous.pid)) throw new Error("Service process alive but handshake unavailable; retry later");
+  const child = spawn4(
+    process.execPath,
+    [...process.execArgv, fileURLToPath4(import.meta.url), "service", root, location.identity, randomUUID7()],
+    {
+      ...HIDDEN_PROCESS,
       cwd: root,
       env: executionEnvironment(),
       detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    });
-    let startupError;
-    child.once("error", (error) => {
-      startupError = error;
-    });
-    child.unref();
-    const startup = AbortSignal.timeout(8e3);
-    while (!startup.aborted) {
-      if (startupError) throw startupError;
-      const endpoint = await readEndpoint(location);
-      if (endpoint) {
-        await exchange(endpoint, "handshake", {}, startup);
-        return endpoint;
-      }
-      if (child.exitCode !== null) throw new Error("Shared service failed to start");
-      await delay3(25);
+      stdio: "ignore"
     }
-    throw new Error("Shared service startup timeout");
-  } finally {
-    await release();
+  );
+  let startupError;
+  child.once("error", (error) => {
+    startupError = error;
+  });
+  child.unref();
+  const startup = AbortSignal.any([signal, AbortSignal.timeout(8e3)]);
+  while (true) {
+    startup.throwIfAborted();
+    if (startupError) throw startupError;
+    const endpoint = await readEndpoint(location);
+    if (endpoint && alive(endpoint.pid)) {
+      await exchange(endpoint, "handshake", {}, startup);
+      return endpoint;
+    }
+    if (child.exitCode !== null) throw new Error("Shared service failed to start");
+    await delay3(25, void 0, { signal: startup });
   }
 }
 async function publishEndpoint(location, token) {
@@ -6927,6 +7164,64 @@ var init_ipc = __esm({
     init_directory_lock();
     init_environment();
     init_files();
+    init_process_options();
+    init_results();
+    init_service_identity();
+  }
+});
+
+// src/hook-inbox.ts
+import { randomUUID as randomUUID8 } from "node:crypto";
+import { lstat as lstat5, readdir as readdir5, readFile as readFile18, rm as rm4, writeFile as writeFile7 } from "node:fs/promises";
+import { join as join17 } from "node:path";
+async function registerHook(root, input, signal) {
+  const location = await serviceLocation(root);
+  const session = text(input["session_id"]);
+  const state = await new Metadata(root).update(session, signal, () => void 0);
+  const path = join17(location.directory, `${location.identity}.${Date.now()}.${randomUUID8()}.hook`);
+  await writeFile7(
+    path,
+    JSON.stringify({
+      protocol: SERVICE_PROTOCOL,
+      identity: location.identity,
+      epoch: state.epoch,
+      input,
+      environment: executionEnvironment()
+    }),
+    { mode: 384, flag: "wx", signal }
+  );
+}
+async function registeredHooks(root) {
+  const location = await serviceLocation(root);
+  const result = [];
+  for (const name of (await readdir5(location.directory)).sort()) {
+    if (!name.startsWith(`${location.identity}.`) || !name.endsWith(".hook")) continue;
+    const path = join17(location.directory, name);
+    try {
+      const info = await lstat5(path);
+      if (info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
+        throw new Error("Unsafe hook registration");
+      const value = JSON.parse(await readFile18(path, "utf8"));
+      if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["epoch"] !== "string" || !record(value["input"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string"))
+        throw new Error("Invalid hook registration");
+      result.push({
+        path,
+        epoch: value["epoch"],
+        input: value["input"],
+        environment: value["environment"]
+      });
+    } catch {
+      await rm4(path, { force: true });
+    }
+  }
+  return result;
+}
+var init_hook_inbox = __esm({
+  "src/hook-inbox.ts"() {
+    "use strict";
+    init_environment();
+    init_ipc();
+    init_metadata();
     init_results();
     init_service_identity();
   }
@@ -6941,21 +7236,36 @@ var init_runtime = __esm({
     "use strict";
     init_budgets();
     init_engine();
+    init_hook_inbox();
     init_ipc();
+    init_metadata();
+    init_results();
+    init_write_intent();
     Runtime = class {
       constructor() {
         this.active = /* @__PURE__ */ new Set();
       }
       async request(root, operation, args, signal) {
+        const event = operation === "hook" ? text(args["hook_event_name"], "PostToolUse") : "";
+        if (event === "PreToolUse" && (isShellTool(args) || writeIntent(root, args).kind !== "write"))
+          return { operation: "hook", output: { kind: "silent" } };
         if (!isAbsolute8(root)) throw new Error("workspace must be an absolute project directory");
         root = await realpath6(root);
         const controller = new AbortController();
         this.active.add(controller);
         signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(BUDGET.request)]);
         try {
+          const passiveHook = event === "PostToolUse" && writeIntent(root, args).kind === "read" || event === "SessionEnd";
+          if (operation === "hook" && !passiveHook && event !== "PreToolUse" && args["stop_hook_active"] !== true)
+            await registerHook(root, args, signal);
           const existing = await existingService(root, signal);
-          const passive = operation === "lsp_status" || operation === "check_diagnostics" && args["run"] === "cached" || operation === "session_end" || operation === "check_project" && args["run"] === "cached";
+          const passive = operation === "lsp_status" || passiveHook || operation === "hook_ack" || operation === "check_diagnostics" && args["run"] === "cached" || operation === "session_end" || operation === "check_project" && args["run"] === "cached";
           if (!existing && passive) {
+            if (operation === "hook_ack") return { operation };
+            if (operation === "hook") {
+              if (event === "SessionEnd") await new Metadata(root).end(text(args["session_id"]), signal);
+              return { operation, output: { kind: "silent" } };
+            }
             if (operation === "session_end") return { operation };
             if (operation === "check_project")
               return {
@@ -7008,16 +7318,33 @@ async function runHookCli() {
   }
   if (!record(parsed)) throw new Error("Hook input must be an object");
   const event = text(parsed["hook_event_name"], "PostToolUse");
-  const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? BUDGET.stop : BUDGET.hook;
-  const signal = AbortSignal.timeout(budget);
-  const root = await realpath7(text(parsed["cwd"], process.cwd()));
+  const cwd = text(parsed["cwd"], process.cwd());
+  const shell = isShellTool(parsed);
+  const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? BUDGET.stop : event === "SessionStart" || event === "PostToolUse" && shell ? BUDGET.quickHook : BUDGET.hook;
+  let signal = AbortSignal.timeout(budget);
   try {
+    const intent = shell ? void 0 : writeIntent(cwd, parsed);
+    if (event === "PreToolUse" && (shell || intent?.kind !== "write")) return;
+    if (event === "PostToolUse" && intent?.kind === "read") signal = AbortSignal.timeout(BUDGET.quickHook);
+    const root = await realpath7(cwd);
     const runtime = new Runtime();
     try {
       const result = await runtime.request(root, "hook", parsed, signal);
       const output = renderHook(result["output"]);
-      if (output) process.stdout.write(`${JSON.stringify(output)}
-`);
+      if (output) {
+        await new Promise(
+          (resolve12, reject) => process.stdout.write(`${JSON.stringify(output)}
+`, (error) => error ? reject(error) : resolve12())
+        );
+        if (typeof result["deliveryId"] === "string") {
+          await runtime.request(
+            root,
+            "hook_ack",
+            { session: text(parsed["session_id"]), deliveryId: result["deliveryId"] },
+            AbortSignal.any([signal, AbortSignal.timeout(100)])
+          ).catch(() => void 0);
+        }
+      }
     } finally {
       await runtime.close();
     }
@@ -7036,6 +7363,7 @@ var init_codex_hook = __esm({
     init_hook_engine();
     init_results();
     init_runtime();
+    init_write_intent();
   }
 });
 
@@ -7100,7 +7428,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-codeintel", version: "0.7.0" },
+        serverInfo: { name: "codex-codeintel", version: "0.8.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -7305,6 +7633,7 @@ var init_automatic = __esm({
     init_config();
     init_environment();
     init_files();
+    init_identity();
     init_metadata();
     init_results();
     Automatic = class {
@@ -7362,18 +7691,28 @@ var init_automatic = __esm({
           this.cancel();
           throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
         }
+        const requested = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : state.pending;
+        const analysis = await analysisIdentity(this.root, requested, config, signal);
         let job = this.jobs.get(session);
-        if (job && (job.generation !== state.generation || job.configuration !== config.version || hash(JSON.stringify(job.environment)) !== hash(JSON.stringify(environment)))) {
+        if (job && (job.epoch !== state.epoch || job.generation !== state.generation || job.configuration !== config.version || job.analysis !== analysis || hash(JSON.stringify(job.environment)) !== hash(JSON.stringify(environment)))) {
           this.cancel(session);
           job = void 0;
         }
-        if (job?.state !== "running") {
+        const knownPaths = job?.paths ?? [];
+        if (job && requested.some((path) => !knownPaths.includes(path))) {
+          this.cancel(session);
+          job = void 0;
+        }
+        if (!job) {
           const paths = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : state.pending;
           job = {
             session,
+            epoch: state.epoch,
+            turn: text(args["turn"], state.turn),
             generation: state.generation,
             scope: text(args["scope"], state.automaticScope),
             configuration: config.version,
+            analysis,
             environment,
             paths: [...new Set(paths)],
             results: /* @__PURE__ */ new Map(),
@@ -7388,7 +7727,8 @@ var init_automatic = __esm({
           job.done = withExecution(environment, true, () => this.run(target2));
         }
         const target = job;
-        const wait = typeof args["waitMs"] === "number" ? Math.max(0, Math.min(BUDGET.stopWait, args["waitMs"])) : BUDGET.postWait;
+        const wait = typeof args["waitMs"] === "number" ? Math.max(0, Math.min(BUDGET.project, args["waitMs"])) : BUDGET.postWait;
+        if (wait === 0) return this.result(target);
         const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait))]);
         await Promise.race([target.done, delay4(wait, void 0, { signal: waiting }).catch(() => void 0)]);
         return this.result(target);
@@ -7406,7 +7746,7 @@ var init_automatic = __esm({
               signal.throwIfAborted();
               const state = await store.read(job.session);
               const config = await configuration(this.root);
-              if (state.turn === "__ended__" || state.generation !== job.generation || config.version !== job.configuration || !config.trusted) {
+              if (state.turn === "__ended__" || state.epoch !== job.epoch || state.generation !== job.generation || config.version !== job.configuration || await analysisIdentity(this.root, job.paths, config, signal) !== job.analysis || !config.trusted) {
                 job.state = "cancelled";
                 job.note = "Generation/configuration/trust changed; results stale";
                 return;
@@ -7414,12 +7754,18 @@ var init_automatic = __esm({
               const paths = remaining.slice(start, start + BUDGET.batch);
               const output = await this.engine.dispatch(
                 "automatic_batch",
-                { paths, session: job.session, turn: state.turn },
+                { paths, session: job.session, turn: job.turn },
                 signal
               );
               const results = output["results"];
+              if (await analysisIdentity(this.root, job.paths, await configuration(this.root), signal) !== job.analysis) {
+                job.state = "cancelled";
+                job.note = "Analysis identity changed; results stale";
+                return;
+              }
               await store.update(job.session, signal, (current) => {
-                if (current.generation !== job.generation || current.turn === "__ended__") return false;
+                if (current.generation !== job.generation || current.epoch !== job.epoch || current.turn === "__ended__")
+                  return false;
                 for (const result of results) {
                   job.results.set(result.path, result);
                   const channels = result.channels ?? { lsp: result.state, lint: result.state };
@@ -7454,7 +7800,7 @@ var init_automatic = __esm({
             try {
               const config = await configuration(this.root);
               const state = await new Metadata(this.root).read(job.session);
-              if (!config.trusted || config.version !== job.configuration || state.generation !== job.generation || state.turn === "__ended__")
+              if (!config.trusted || config.version !== job.configuration || state.generation !== job.generation || state.epoch !== job.epoch || state.turn === "__ended__")
                 this.cancel(job.session);
             } catch {
               this.cancel(job.session);
@@ -7471,12 +7817,173 @@ var init_automatic = __esm({
   }
 });
 
-// src/service.ts
+// src/deadline.ts
+function waitWithSignal(task, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve12, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    task.then(resolve12, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+var init_deadline = __esm({
+  "src/deadline.ts"() {
+    "use strict";
+  }
+});
+
+// src/hook-coordinator.ts
 import { rm as rm5 } from "node:fs/promises";
+var HookCoordinator;
+var init_hook_coordinator = __esm({
+  "src/hook-coordinator.ts"() {
+    "use strict";
+    init_budgets();
+    init_deadline();
+    init_environment();
+    init_hook_delivery();
+    init_hook_inbox();
+    init_log();
+    init_metadata();
+    init_results();
+    init_write_intent();
+    HookCoordinator = class {
+      constructor(root, hooks, onStart = () => void 0) {
+        this.root = root;
+        this.hooks = hooks;
+        this.onStart = onStart;
+        this.jobs = /* @__PURE__ */ new Map();
+        this.tasks = /* @__PURE__ */ new Set();
+        this.seen = /* @__PURE__ */ new Set();
+        this.disposed = false;
+      }
+      get active() {
+        return this.tasks.size > 0;
+      }
+      status() {
+        return [...this.jobs].map(([key]) => ({ key, state: "running" }));
+      }
+      ingest() {
+        if (this.disposed) return Promise.resolve();
+        this.ingesting ??= this.load().finally(() => {
+          this.ingesting = void 0;
+        });
+        return this.ingesting;
+      }
+      async load() {
+        for (const entry of await registeredHooks(this.root)) {
+          if (this.disposed || this.seen.has(entry.path)) continue;
+          const state = await withExecution(
+            entry.environment,
+            true,
+            () => new Metadata(this.root).read(text(entry.input["session_id"]))
+          );
+          if (state.epoch !== entry.epoch) {
+            await rm5(entry.path, { force: true });
+            continue;
+          }
+          this.seen.add(entry.path);
+          const key = `${text(entry.input["session_id"])}:${text(entry.input["hook_event_name"])}`;
+          const previous = this.jobs.get(key);
+          if (previous) {
+            if (entry.input["hook_event_name"] === "SessionStart") {
+              previous.registrations.add(entry.path);
+              continue;
+            }
+            previous.controller.abort();
+          }
+          const job = {
+            initial: entry,
+            controller: new AbortController(),
+            done: Promise.resolve(),
+            registrations: /* @__PURE__ */ new Set([entry.path])
+          };
+          this.jobs.set(key, job);
+          this.tasks.add(job);
+          if (entry.input["hook_event_name"] === "SessionStart") this.onStart(entry);
+          job.done = this.run(key, job);
+        }
+      }
+      async run(key, job) {
+        const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.project)]);
+        try {
+          await withExecution(job.initial.environment, true, () => this.hooks.hook(job.initial.input, signal, true));
+        } catch {
+          if (!signal.aborted) await logEvent("background-failure");
+        } finally {
+          if (this.jobs.get(key) === job) this.jobs.delete(key);
+          for (const path of job.registrations) {
+            await rm5(path, { force: true }).catch(() => logEvent("cancel-cleanup-failure"));
+            this.seen.delete(path);
+          }
+          this.tasks.delete(job);
+        }
+      }
+      async request(input, signal) {
+        const began = Date.now();
+        const session = text(input["session_id"]);
+        const event = text(input["hook_event_name"], "PostToolUse");
+        if (event === "PreToolUse") return { output: await this.hooks.hook(input, signal) };
+        if (event === "SessionEnd") {
+          for (const job2 of this.tasks) if (text(job2.initial.input["session_id"]) === session) job2.controller.abort();
+          return { output: await this.hooks.hook(input, signal) };
+        }
+        if (event === "PostToolUse" && writeIntent(this.root, input).kind === "read")
+          return consumeDelivery(this.root, session, event, signal);
+        await this.ingest();
+        if (event === "SessionStart" || input["stop_hook_active"] === true) return { output: { kind: "silent" } };
+        const key = `${session}:${event}`;
+        const job = this.jobs.get(key);
+        let pending = false;
+        if (job) {
+          const wait = event === "Stop" || event === "SubagentStop" ? BUDGET.stopWait : BUDGET.postWait;
+          const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait - (Date.now() - began)))]);
+          try {
+            await waitWithSignal(job.done, waiting);
+          } catch (error) {
+            if (signal.aborted || !waiting.aborted) throw error;
+            pending = true;
+          }
+        }
+        const delivery = await consumeDelivery(this.root, session, event, signal);
+        return pending && delivery.output.kind === "silent" ? {
+          output: {
+            kind: "context",
+            event,
+            context: "[Codex CodeIntel automatic diagnostics] Checks still running; results pending. Background work continues and later Hooks can retrieve results."
+          }
+        } : delivery;
+      }
+      async dispose() {
+        this.disposed = true;
+        for (const job of this.tasks) job.controller.abort();
+        await Promise.allSettled([...this.tasks].map((job) => job.done));
+      }
+    };
+  }
+});
+
+// src/service.ts
+import { rm as rm6 } from "node:fs/promises";
 import { createServer } from "node:net";
 async function runService(root, identity, token) {
   const location = await serviceLocation(root);
   if (location.identity !== identity || !token) throw new Error("Invalid service startup identity");
+  const startup = AbortSignal.timeout(8e3);
+  const release = await directoryLock(`${location.endpoint}.lock`, startup, 8e3);
+  try {
+    if (await existingService(root, startup)) return;
+    const previous = await readEndpoint(location);
+    if (previous && alive(previous.pid)) throw new Error("Service alive but unavailable; refusing duplicate startup");
+    await rm6(location.endpoint, { force: true });
+    if (process.platform !== "win32") await rm6(location.address, { force: true });
+    await serve(root, identity, token);
+  } finally {
+    await release();
+  }
+}
+async function serve(root, identity, token) {
+  const location = await serviceLocation(root);
   const projects = new ProjectChecks(root);
   const engine = new Engine(root, void 0, projects);
   const automatic = new Automatic(root, engine);
@@ -7487,7 +7994,27 @@ async function runService(root, identity, token) {
       executionEnvironment(),
       signal
     ),
-    end: (session) => automatic.cancel(session)
+    end: (session) => {
+      automatic.cancel(session);
+      projects.cancelSession(session);
+    }
+  });
+  let warmupTimer;
+  let warmed = false;
+  let warming = false;
+  let warmupTask;
+  let warmupSession = "";
+  const warmupController = new AbortController();
+  const coordinator = new HookCoordinator(root, hooks, (entry) => {
+    if (warmed) return;
+    warmed = true;
+    warmupSession = text(entry.input["session_id"]);
+    warmupTimer = setTimeout(() => {
+      warming = true;
+      warmupTask = withExecution(entry.environment, true, () => engine.warmup(warmupController.signal)).catch(() => void 0).finally(() => {
+        warming = false;
+      });
+    }, BUDGET.warmupDelay);
   });
   const sockets = /* @__PURE__ */ new Set();
   let lastActivity = Date.now();
@@ -7535,11 +8062,28 @@ async function runService(root, identity, token) {
               automatic.cancel(text(args["session"]));
               return { operation };
             }
+            if (operation === "hook_ack") {
+              await acknowledgeDelivery(
+                root,
+                text(args["session"]),
+                text(args["deliveryId"]),
+                controller.signal
+              );
+              return { operation };
+            }
             if (operation === "automatic")
               return { operation, ...await automatic.request(args, environment, controller.signal) };
             if (operation === "check_project")
               return { ...await projects.request(args, environment, controller.signal) };
-            if (operation === "hook") return { operation, output: await hooks.hook(args, controller.signal) };
+            if (operation === "hook") {
+              if (args["hook_event_name"] === "SessionEnd" && text(args["session_id"]) === warmupSession) {
+                if (warmupTimer) clearTimeout(warmupTimer);
+                warmupTimer = void 0;
+                warmupController.abort();
+                warmupSession = "";
+              }
+              return { operation, ...await coordinator.request(args, controller.signal) };
+            }
             if (!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(
               operation
             ))
@@ -7552,7 +8096,8 @@ async function runService(root, identity, token) {
                 ...output2,
                 service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
                 automaticDiagnostics: config.automaticDiagnostics,
-                automaticTasks: automatic.status()
+                automaticTasks: automatic.status(),
+                hookTasks: coordinator.status()
               };
             return output2;
           }
@@ -7593,19 +8138,29 @@ async function runService(root, identity, token) {
     if (stopping) return;
     stopping = true;
     clearInterval(idle);
+    if (warmupTimer) clearTimeout(warmupTimer);
+    warmupController.abort();
     server2.close();
     for (const socket of sockets) socket.destroy();
+    await coordinator.dispose();
     await automatic.dispose();
+    await warmupTask;
     await projects.dispose();
     await engine.dispose();
     if ((await readEndpoint(location).catch(() => void 0))?.token === token)
-      await rm5(location.endpoint, { force: true });
+      await rm6(location.endpoint, { force: true });
   };
+  let revalidation;
   const idle = setInterval(() => {
-    void automatic.revalidate();
-    if (requests || automatic.active || projects.active) lastActivity = Date.now();
-    else if (Date.now() - lastActivity >= 12e4) void stop();
-  }, 1e3);
+    void coordinator.ingest().catch(() => void 0);
+    if (!revalidation)
+      revalidation = automatic.revalidate().catch(() => void 0).finally(() => {
+        revalidation = void 0;
+      });
+    if (requests || coordinator.active || automatic.active || projects.active || warming || warmupTimer && !warmupTask)
+      lastActivity = Date.now();
+    else if (Date.now() - lastActivity >= BUDGET.idle) void stop();
+  }, 250);
   process.once("SIGTERM", () => {
     void stop();
   });
@@ -7617,14 +8172,19 @@ async function runService(root, identity, token) {
     server2.listen(location.address, resolve12);
   });
   await publishEndpoint(location, token);
+  await coordinator.ingest();
 }
 var init_service = __esm({
   "src/service.ts"() {
     "use strict";
     init_automatic();
+    init_budgets();
     init_config();
+    init_directory_lock();
     init_engine();
     init_environment();
+    init_hook_coordinator();
+    init_hook_delivery();
     init_hook_engine();
     init_ipc();
     init_project_checks();
@@ -7688,6 +8248,7 @@ if (major < 22 || major === 22 && minor < 12) {
   const reason = `Codex CodeIntel requires Node >=22.12.0; found ${process.versions.node}.`;
   if (process.argv[2] === "hook") {
     let event = "";
+    let passthrough = false;
     let input = "";
     for await (const chunk of process.stdin) {
       input += String(chunk);
@@ -7695,14 +8256,18 @@ if (major < 22 || major === 22 && minor < 12) {
     }
     try {
       const parsed = JSON.parse(input);
-      if (parsed && typeof parsed === "object" && "hook_event_name" in parsed && typeof parsed.hook_event_name === "string")
+      if (parsed && typeof parsed === "object" && "hook_event_name" in parsed && typeof parsed.hook_event_name === "string") {
         event = parsed.hook_event_name;
+        const tool2 = "tool_name" in parsed && typeof parsed.tool_name === "string" ? parsed.tool_name : "";
+        passthrough = event === "PreToolUse" && (/^(?:bash|shell|exec_command|unified_exec)$/i.test(tool2.split(".").at(-1) ?? "") || /read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool2));
+      }
     } catch {
     }
-    process.stdout.write(
-      `${JSON.stringify({ systemMessage: reason, ...event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {} })}
+    if (!passthrough)
+      process.stdout.write(
+        `${JSON.stringify({ systemMessage: reason, ...event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {} })}
 `
-    );
+      );
   } else {
     process.stderr.write(`${reason}
 `);

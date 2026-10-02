@@ -22,7 +22,10 @@ interface ExecutionContext {
 }
 const executions = new AsyncLocalStorage<ExecutionContext>();
 export function executionEnvironment(): NodeJS.ProcessEnv {
-	return executions.getStore()?.environment ?? process.env;
+	// IPC objects and native environment blocks need not enumerate in the same order.
+	return Object.fromEntries(
+		Object.entries(executions.getStore()?.environment ?? process.env).sort(([a], [b]) => a.localeCompare(b)),
+	);
 }
 export function automaticExecution(): boolean {
 	return executions.getStore()?.automatic ?? false;

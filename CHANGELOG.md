@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.7.0 (unreleased)
+## 0.8.0 (2026-10-02)
+
+- Let all shell commands and reads pass PreToolUse immediately; retain reliable baseline gates for explicit file edits and MCP writes.
+- Bound foreground Hook waits independently of service startup and background analysis. Persist late diagnostic deliveries with content/generation/session binding, stable delivery IDs and acknowledgement retries.
+- Separate discovery from analysis waits, cancel superseded/session-ended work, and preserve pending or uncertain diagnostic states.
+- Delay limited local LSP warmup, cool down repeated initialization failures, and extend actual service/LSP idle reuse to five minutes.
+- Hide Windows subprocess consoles for Git, checkers, LSP, service startup and cleanup; make taskkill asynchronous with a bounded timeout. Fix Windows directory-scoped diagnostic path filtering.
+- Add three focused end-to-end regression scenarios for cold startup, delayed delivery and Windows process handling.
+
+## 0.7.0
 
 - Consolidate current usage and configuration examples; keep phase engineering records locally under ignored `docs/history/` and exclude common local settings/caches from Git.
 

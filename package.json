@@ -1,6 +1,6 @@
 {
 	"name": "@zoisythe/codex-codeintel",
-	"version": "0.7.0",
+	"version": "0.8.0",
 	"description": "Codex code intelligence with LSP/lint diagnostics, symbol navigation, rename, formatting, and automatic Hooks.",
 	"type": "module",
 	"packageManager": "npm@11.12.1",
@@ -45,7 +45,7 @@
 		"lint": "node ./node_modules/@biomejs/biome/bin/biome check src test scripts",
 		"lint:fix": "node ./node_modules/@biomejs/biome/bin/biome check --write src test scripts",
 		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
-		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs test/automatic-e2e.test.mjs",
+		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs test/automatic-e2e.test.mjs test/background-hooks-e2e.test.mjs",
 		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
 		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs test/automatic-real-e2e.test.mjs"
 	},

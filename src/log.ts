@@ -9,7 +9,7 @@ const instance = `${process.pid}-${randomUUID()}`;
 let queue: Promise<void> = Promise.resolve();
 // Only fixed event names: never exception text, source, environment values or configuration.
 export function logEvent(
-	event: "startup-failure" | "abnormal-exit" | "timeout" | "cancel-cleanup-failure",
+	event: "startup-failure" | "abnormal-exit" | "timeout" | "cancel-cleanup-failure" | "background-failure",
 ): Promise<void> {
 	queue = queue
 		.then(async () => {
