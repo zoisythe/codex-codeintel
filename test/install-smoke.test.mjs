@@ -57,6 +57,11 @@ test(
 		assert.equal(pkg.optionalDependencies, undefined);
 		const skill = await readFile(join(root, "skills/code-intelligence/SKILL.md"), "utf8");
 		assert.match(skill, /^---\nname: code-intelligence\n/);
+		const setup = await readFile(join(root, "skills/setup-lsp/SKILL.md"), "utf8");
+		assert.match(setup, /^---\nname: setup-lsp\n/);
+		assert.match(await readFile(join(root, "skills/setup-lsp/agents/openai.yaml"), "utf8"), /display_name: "setupLSP"/);
+		for (const reference of ["configuration.md", "languages.md"]) assert((await readFile(join(root, "skills/setup-lsp/references", reference), "utf8")).length > 500);
+		assert.equal(JSON.parse(await readFile(join(root,"hooks/hooks.json"),"utf8")).hooks.PreToolUse, undefined);
 
 		const missing = join(temp, "lsp-client.json");
 		await writeFile(

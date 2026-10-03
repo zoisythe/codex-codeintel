@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parse as parseToml } from "smol-toml";
 import { BUDGET } from "./budgets.js";
-import { type Config, configuration } from "./config.js";
+import { assertConfiguration, type Config, configuration } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
+import { addedFindings } from "./diagnostic-delta.js";
 import { withExecution } from "./environment.js";
-import { hash, inventory, workspacePath } from "./files.js";
+import { hash, type Inventory, inventory, workspacePath } from "./files.js";
 import { analysisIdentity } from "./identity.js";
 import { Metadata } from "./metadata.js";
 import { projectOutput } from "./project-output.js";
@@ -25,6 +26,8 @@ interface Job {
 	controller: AbortController;
 	done: Promise<void>[];
 	before: string;
+	configuration: string;
+	environment: NodeJS.ProcessEnv;
 }
 function normalizedPattern(pattern: string): string {
 	return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
@@ -69,6 +72,10 @@ export class ProjectChecks {
 		this.sessionJobs.delete(session);
 	}
 	private latest: string | undefined;
+	status(configuration?: string): unknown {
+		const job = this.latest ? this.jobs.get(this.latest) : undefined;
+		return job ? this.cachedOutput(job, 0, configuration) : { state: "unverified", checkers: [] };
+	}
 	constructor(private readonly root: string) {}
 	get active(): boolean {
 		return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
@@ -132,7 +139,7 @@ export class ProjectChecks {
 						runner.command,
 						...runner.prefix,
 						...(runner.name === "ruff"
-							? ["check", "--no-fix", "--no-fix-only", "--output-format", "json", "."]
+							? ["check", "--no-fix", "--no-fix-only", "--no-cache", "--output-format", "json", "."]
 							: runner.name === "biome"
 								? ["lint", "--reporter=json", "--max-diagnostics=none", "."]
 								: ["--format", "json", "."]),
@@ -158,10 +165,22 @@ export class ProjectChecks {
 					check,
 					tool,
 					await Promise.all(
-						tool.command.slice(1).map(async (arg) => {
-							const info = await stat(resolve(cwd, arg)).catch(() => undefined);
-							return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
-						}),
+						// Source arguments and directory mtimes change on ordinary edits.
+						// Only interpreter launch scripts belong to the tool identity.
+						tool.command
+							.slice(1)
+							.filter(
+								(arg, index, args) =>
+									/^(?:node|python(?:\d+(?:\.\d+)*)?|bash|sh)(?:\.exe)?$/.test(
+										basename(tool.command[0] ?? ""),
+									) &&
+									/\.(?:[cm]?js|py|sh)$/.test(arg) &&
+									!args.slice(0, index).some((previous) => /\.(?:[cm]?js|py|sh)$/.test(previous)),
+							)
+							.map(async (arg) => {
+								const info = await stat(resolve(cwd, arg)).catch(() => undefined);
+								return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
+							}),
 					),
 					await analysisIdentity(
 						this.root,
@@ -204,6 +223,19 @@ export class ProjectChecks {
 				: {}),
 		};
 	}
+	private cachedOutput(job: Job, cursor: number, configuration?: string): ProjectResult {
+		const output = this.output(job, cursor);
+		if (configuration === undefined || configuration === job.configuration) return output;
+		return {
+			...output,
+			state: "stale",
+			checkers: output.checkers.map((result) => ({
+				...result,
+				state: "stale",
+				note: "Configuration changed; cached diagnostics only",
+			})),
+		};
+	}
 	async request(
 		args: Record<string, unknown>,
 		environment: NodeJS.ProcessEnv,
@@ -214,7 +246,7 @@ export class ProjectChecks {
 		let job = id ? this.jobs.get(id) : undefined;
 		if (cached)
 			return job
-				? this.output(job, this.cursor(args))
+				? this.cachedOutput(job, this.cursor(args), (await configuration(this.root)).version)
 				: {
 						operation: "check_project",
 						job: id,
@@ -225,13 +257,13 @@ export class ProjectChecks {
 						warnings: 0,
 					};
 		const config = await configuration(this.root);
-		if (!config.trusted) throw new Error("Project checks require workspace trust in Codex config.toml");
+		assertConfiguration(config);
 		const checks = await this.discover(config, signal);
 		const identity = await this.identity(checks, config, signal);
 		const before = await inventory(this.root, BUDGET.files, signal, config.exclude);
 		if (!before.complete) throw new Error("Project snapshot incomplete; baseline unavailable");
 		if (!job || args["refresh"] === true || job.identity !== identity || job.before !== before.version) {
-			job = await this.start(checks, config, environment, identity, before.version);
+			job = await this.start(checks, config, environment, identity, before);
 		}
 		const wait =
 			typeof args["waitMs"] === "number" ? Math.min(BUDGET.stopWait, Math.max(0, args["waitMs"])) : BUDGET.postWait;
@@ -248,12 +280,14 @@ export class ProjectChecks {
 		config: Config,
 		environment: NodeJS.ProcessEnv,
 		identity: string,
-		before: string,
+		before: Inventory,
 	): Promise<Job> {
 		const job: Job = {
 			id: randomUUID(),
 			identity,
-			before,
+			configuration: config.version,
+			environment,
+			before: before.version,
 			checks,
 			controller: new AbortController(),
 			results: checks.map((check) => ({
@@ -277,7 +311,7 @@ export class ProjectChecks {
 					try {
 						const cwd = await workspacePath(this.root, check.cwd);
 						const checkIdentity = await this.identity([check], config, signal);
-						const beforeFiles = await inventory(this.root, BUDGET.files, signal, config.exclude);
+						const beforeFiles = before;
 						const tool = await resolveTool(
 							config.projectChecks === "auto" ? this.root : cwd,
 							join(cwd, "representative"),
@@ -392,9 +426,16 @@ export class ProjectChecks {
 		environment: NodeJS.ProcessEnv,
 		signal: AbortSignal,
 		wait: number,
-	): Promise<{ reference: string; findings: Finding[]; pending: string[]; failures: string[] }> {
+	): Promise<{
+		reference: string;
+		findings: Finding[];
+		pending: string[];
+		failures: string[];
+		reliable: Record<string, string[]>;
+		covered: string[];
+	}> {
 		const config = await configuration(this.root);
-		if (!config.trusted) throw new Error("Project baseline requires workspace trust");
+		assertConfiguration(config);
 		const store = new Metadata(this.root);
 		const state = await store.read(session);
 		const checks = await this.discover(config, signal);
@@ -412,13 +453,13 @@ export class ProjectChecks {
 				(entry) => entry.id === state.shown["baselineJob"] && entry.identity === identity,
 			);
 			if (!job) {
-				if (state.edited && !state.diagnosticBaseline)
+				if (state.edited)
 					throw new Error(
 						"Editing has already occurred; cannot create a pre-edit diagnostic baseline. Restart the session or explicitly disable automatic diagnostics",
 					);
 				const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude);
 				if (!snapshot.complete) throw new Error("Baseline inventory incomplete");
-				job = await this.start(checks, config, environment, identity, snapshot.version);
+				job = await this.start(checks, config, environment, identity, snapshot);
 				this.sessionJobs.set(session, job.id);
 				await store.update(session, signal, (current) => {
 					if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
@@ -451,9 +492,12 @@ export class ProjectChecks {
 			);
 		const failures: string[] = [];
 		const pending: string[] = [];
+		const reliable: Record<string, string[]> = {};
+		const covered: string[] = [];
 		for (const path of targets) {
 			if (!codeLanguage(config, path)) continue;
 			const related = results.filter((result) => covers(result, path));
+			reliable[path] = related.filter((result) => result.state === "complete").map((result) => result.parser);
 			const language = codeLanguage(config, path);
 			const required =
 				language === "typescript" && /\.[cm]?tsx?$/.test(path)
@@ -466,6 +510,12 @@ export class ProjectChecks {
 			if (config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
 				failures.push(`${path}: no type checker coverage; configure projectChecks`);
 			if (!related.length) failures.push(`${path}: no project checker coverage; configure projectChecks`);
+			if (
+				related.length &&
+				related.every((result) => result.state === "complete") &&
+				!(config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
+			)
+				covered.push(path);
 			for (const result of related) {
 				if (result.state === "running") pending.push(result.name);
 				else if (result.state !== "complete") failures.push(`${result.name}: ${result.note ?? result.state}`);
@@ -473,10 +523,45 @@ export class ProjectChecks {
 		}
 		return {
 			reference,
+			reliable,
+			covered,
 			findings: results.filter((result) => result.state === "complete").flatMap((result) => result.findings),
 			failures: [...new Set(failures)],
 			pending: [...new Set(pending)],
 		};
+	}
+	async introduced(
+		session: string,
+		paths: string[],
+		environment: NodeJS.ProcessEnv,
+		signal: AbortSignal,
+		wait: number,
+	): Promise<Finding[]> {
+		const baseline = await this.baseline(session, paths, environment, signal, 0);
+		const store = new Metadata(this.root);
+		const data = await store.readShared(baseline.reference);
+		if (!record(data) || !Array.isArray(data["results"])) return [];
+		const before = data["results"] as CheckerResult[];
+		const output = await this.request({ waitMs: wait }, environment, signal);
+		const job = this.jobs.get(output.job);
+		if (!job || job.identity !== data["identity"]) return [];
+		return job.results.flatMap((result) => {
+			const old = before.find((item) => item.name === result.name && item.parser === result.parser);
+			if (result.state !== "complete" || old?.state !== "complete") return [];
+			return addedFindings(old.findings, result.findings).filter(
+				(finding) =>
+					paths.includes(finding.path) && baseline.covered.includes(finding.path) && covers(result, finding.path),
+			);
+		});
+	}
+	async revalidate(): Promise<void> {
+		for (const job of this.jobs.values()) {
+			if (!job.results.some((result) => result.state === "running")) continue;
+			await withExecution(job.environment, true, async () => {
+				const config = await configuration(this.root);
+				if (config.version !== job.configuration || !config.valid) job.controller.abort();
+			});
+		}
 	}
 	async dispose(): Promise<void> {
 		for (const job of this.jobs.values()) job.controller.abort();

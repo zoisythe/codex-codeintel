@@ -33,3 +33,26 @@ export function addedFindings(before: Finding[], after: Finding[]): Finding[] {
 export function retainedFindings(before: Finding[], after: Finding[]): Finding[] {
 	return addedFindings(addedFindings(before, after), after);
 }
+
+// A successful lint baseline cannot establish the history of type diagnostics.
+export function attributableFinding(
+	finding: Finding,
+	parsers: readonly string[],
+	before: readonly Finding[] = [],
+): boolean {
+	if (parsers.includes("json")) return true;
+	if (parsers.includes("sarif")) {
+		// Compiler SARIF and clangd use different rule ids/messages. With existing
+		// findings, a cross-protocol comparison cannot establish new occurrences.
+		return before
+			.filter((item) => item.path === finding.path)
+			.every((item) => item.source.split("/")[0] === finding.source.split("/")[0]);
+	}
+	const source = finding.source.toLowerCase();
+	const parser = /^(?:typescript|tsc|ts(?:\/|$|\d))/.test(source)
+		? "tsc"
+		: /^(?:rust|cargo)/.test(source)
+			? "cargo"
+			: ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
+	return parser !== undefined && parsers.includes(parser);
+}

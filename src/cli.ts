@@ -20,19 +20,12 @@ if (major < 22 || (major === 22 && minor < 12)) {
 				typeof parsed.hook_event_name === "string"
 			) {
 				event = parsed.hook_event_name;
-				const tool = "tool_name" in parsed && typeof parsed.tool_name === "string" ? parsed.tool_name : "";
-				passthrough =
-					event === "PreToolUse" &&
-					(/^(?:bash|shell|exec_command|unified_exec)$/i.test(tool.split(".").at(-1) ?? "") ||
-						/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool));
+				passthrough = event === "PreToolUse";
 			}
 		} catch {
 			/* Runtime message remains useful for invalid input. */
 		}
-		if (!passthrough)
-			process.stdout.write(
-				`${JSON.stringify({ systemMessage: reason, ...(event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {}) })}\n`,
-			);
+		if (!passthrough) process.stdout.write(`${JSON.stringify({ systemMessage: reason })}\n`);
 	} else {
 		process.stderr.write(`${reason}\n`);
 		process.exitCode = 1;

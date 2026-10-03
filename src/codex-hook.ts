@@ -22,6 +22,7 @@ export async function runHookCli(): Promise<void> {
 	}
 	if (!record(parsed)) throw new Error("Hook input must be an object");
 	const event = text(parsed["hook_event_name"], "PostToolUse");
+	if (event === "PreToolUse") return;
 	const cwd = text(parsed["cwd"], process.cwd());
 	const shell = isShellTool(parsed);
 	const budget =
@@ -33,10 +34,9 @@ export async function runHookCli(): Promise<void> {
 					? BUDGET.quickHook
 					: BUDGET.hook;
 	let signal = AbortSignal.timeout(budget);
-	// The session workspace is the trust boundary, including inside a Git repo.
+	// Keep the selected workspace boundary, including inside a Git repository.
 	try {
 		const intent = shell ? undefined : writeIntent(cwd, parsed);
-		if (event === "PreToolUse" && (shell || intent?.kind !== "write")) return;
 		if (event === "PostToolUse" && intent?.kind === "read") signal = AbortSignal.timeout(BUDGET.quickHook);
 		const root = await realpath(cwd);
 		const runtime = new Runtime();
@@ -66,7 +66,7 @@ export async function runHookCli(): Promise<void> {
 			? "Codex CodeIntel: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results."
 			: `Codex CodeIntel unavailable: ${message(error).slice(0, 300)}`;
 		process.stdout.write(
-			`${JSON.stringify(event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: context } } : event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}\n`,
+			`${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}\n`,
 		);
 	}
 }

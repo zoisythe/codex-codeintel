@@ -118,10 +118,12 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	assert.deepEqual(longWrite.structuredContent.modifiedPaths, longPaths.sort(), "structured writes retain every path after text truncation");
 	await Promise.all(longPaths.map(path => rm(join(root, path))));
 	await configure({ lsp: { python: false } });
-	assert((await client.call("check_diagnostics", { path: "pkg/src/main.py" })).isError);
+	await script(join(bin, "ruff"), 'console.log("[]")');
+	assert(!(await client.call("check_diagnostics", { path: "pkg/src/main.py", source: "lint" })).isError);
 	await mkdir(join(root, ".codex")); await writeFile(join(root, ".codex", "lsp-client.json"), "invalid project json");
 	await configure({ workspaces: [] }); assert(!(await client.call("lsp_status")).isError);
-	await configure({}); assert((await client.call("lsp_status")).isError);
+	await configure({}); assert(!(await client.call("lsp_status")).isError);
+	assert((await client.call("check_diagnostics",{path:"main.fake"})).isError);
 	await rm(join(root, ".codex"), { recursive: true });
 	await writeFile(join(home, "lsp-client.json"), "{}");
 	assert.match((await client.call("lsp_status")).content[0].text, /Migration required/);

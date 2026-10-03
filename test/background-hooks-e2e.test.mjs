@@ -27,7 +27,7 @@ async function fixture(t, extra = {}, mode = "pull") {
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "main.fake"), "clean\n");
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	const config = { schemaVersion: 1, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: lspLog } } } };
+	const config = { schemaVersion: 1, stopGate: "introduced-errors", automaticDiagnostics: {postToolUse: "delta", stop: "errors"}, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: lspLog } } } };
 	const configure = (value = config) => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
 	await configure();
 	const preload = join(dir, "observe.mjs");
@@ -101,8 +101,8 @@ test("cold shell passthrough, bounded startup and explicit write baseline", { ti
 	const waiting = f.pre(); await delay(200);
 	assert.equal((await f.hook("PreToolUse", { tool_name: "exec_command", tool_input: { cmd: "rg clean ." } })).text, "");
 	const gate = await waiting;
-	assert.equal(gate.value.hookSpecificOutput?.permissionDecision, "deny"); assert(gate.ms < 5100, `Write startup wait exceeded its budget: ${gate.ms}`);
-	await delay(2400);
+	assert.equal(gate.text, ""); assert(gate.ms < 5100, `Write startup wait exceeded its budget: ${gate.ms}`);
+	await delay(7100);
 	assert.equal((await f.pre()).text, "", "The independently started service and baseline remain reusable");
 	const before = (await f.records()).filter((entry) => entry.args?.includes("ls-files")).length;
 	const read = await f.read(); assert(read.ms < 1200);
@@ -112,6 +112,9 @@ test("cold shell passthrough, bounded startup and explicit write baseline", { ti
 
 test("late delivery, acknowledgement retry, stale hashes, Stop repair and session epochs", { timeout: 35000 }, async (t) => {
 	const f = await fixture(t, {}, "cold");
+	await f.hook("SessionStart");
+	await until(async () => (await f.state())?.diagnosticBaseline);
+	await delay(150);
 	assert.equal((await f.pre()).text, "");
 	await f.write("broken\n"); const initial = await f.post();
 	assert(!initial.text.includes("broken fixture"), "A cold analysis did not block the hook until completion");
@@ -125,12 +128,13 @@ test("late delivery, acknowledgement retry, stale hashes, Stop repair and sessio
 	assert.equal((await f.consume()).output.kind, "silent", "Acknowledged results are not repeated");
 	assert.equal((await f.hook("Stop")).value.decision, "block");
 	assert.notEqual((await f.hook("Stop")).value.decision, "block");
-	await f.write("clean\n"); assert.match((await f.post()).text, /repaired/);
+	await f.write("clean\n"); await f.post();
+	await until(async () => /repaired/.test((await f.read()).text));
 	const epoch = (await f.state()).epoch;
 	await f.hook("SessionEnd"); assert.notEqual((await f.state()).epoch, epoch);
 	assert.equal((await f.consume()).output.kind, "silent");
 	const stale = await fixture(t, {}, "cold");
-	await stale.pre(); await stale.write("broken old\n"); await stale.post();
+	await stale.hook("SessionStart"); await until(async () => (await stale.state())?.diagnosticBaseline); await delay(150); await stale.pre(); await stale.write("broken old\n"); await stale.post();
 	await until(async () => Object.keys((await stale.state()).outbox).length);
 	await stale.write("clean\n");
 	assert.equal((await stale.consume()).output.kind, "silent", "Changed contents invalidate an unacknowledged result");

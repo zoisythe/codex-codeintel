@@ -47,12 +47,20 @@ export class HookEngine {
 		const store = new Metadata(root);
 		this.engine = new ProductionHook(root, {
 			projects: {
-				baseline: async (session) => {
+				introduced: async () => [],
+				baseline: async (session, paths) => {
 					const reference = await store.shared({ results: [], identity: "test baseline" });
 					await store.update(session, new AbortController().signal, (state) => {
 						state.diagnosticBaseline = reference;
 					});
-					return { reference, findings: [], failures: [], pending: [] };
+					return {
+						reference,
+						findings: [],
+						failures: [],
+						pending: [],
+						reliable: Object.fromEntries((paths ?? []).map((path) => [path, ["json"]])),
+						covered: paths ?? [],
+					};
 				},
 			},
 			check: async (paths, _session, _turn, generation, _wait, signal) => {

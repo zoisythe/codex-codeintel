@@ -6,7 +6,6 @@ import { hash } from "./files.js";
 import { BUILTIN_SERVERS } from "./lsp/server-definitions.js";
 import type { ProjectCheck } from "./project-types.js";
 import { record } from "./results.js";
-import { type Trust, workspaceTrust } from "./trust.js";
 
 export interface Server {
 	readonly id: string;
@@ -27,50 +26,93 @@ export interface Config {
 	readonly version: string;
 	readonly user: string;
 	readonly project: string;
-	readonly trusted: boolean;
-	readonly trust: Trust;
+	readonly stopGate: "off" | "introduced-errors";
+	readonly issues: readonly ConfigIssue[];
+	readonly sources: readonly { path: string; exists: boolean }[];
+	readonly valid: boolean;
+	readonly formattingEnabled: boolean;
 	readonly extensions: Readonly<Record<string, readonly string[]>>;
 	readonly servers: Readonly<Record<string, Server | false>>;
 	readonly formatting: Readonly<{ tabSize: number; insertSpaces: boolean }>;
 }
-export function configPaths(root: string): { user: string; project: string; codex: string } {
-	for (const key of Object.keys(executionEnvironment()))
-		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
-			throw new Error(
-				`Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/usage.md#upgrade`,
-			);
+export interface ConfigIssue {
+	readonly source: string;
+	readonly scope: string;
+	readonly severity: "error" | "migration";
+	readonly message: string;
+}
+export function configPaths(root: string): { user: string; project: string } {
 	return {
 		user: join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "lsp-client.json"),
 		project: join(root, ".codex", "lsp-client.json"),
-		codex: join(executionEnvironment()["CODEX_HOME"] ?? join(homedir(), ".codex"), "config.toml"),
 	};
 }
-async function read(path: string): Promise<Record<string, unknown>> {
+export function assertConfiguration(config: Config): void {
+	if (!config.valid)
+		throw new Error(
+			`Configuration error: ${config.issues
+				.filter((issue) => issue.scope === "configuration" && issue.severity === "error")
+				.map((issue) => `${issue.source}: ${issue.message}`)
+				.join("; ")}`,
+		);
+}
+async function read(
+	path: string,
+	issues: ConfigIssue[],
+	sources: { path: string; exists: boolean }[],
+): Promise<Record<string, unknown>> {
+	let content: string;
 	try {
-		const value: unknown = JSON.parse(await readFile(path, "utf8"));
+		content = await readFile(path, "utf8");
+	} catch (error) {
+		if (record(error) && error["code"] === "ENOENT") {
+			sources.push({ path, exists: false });
+			return {};
+		}
+		issues.push({ source: path, scope: "configuration", severity: "error", message: "Cannot read configuration" });
+		sources.push({ path, exists: true });
+		return {};
+	}
+	sources.push({ path, exists: true });
+	try {
+		const value: unknown = JSON.parse(content);
 		if (!record(value) || value["schemaVersion"] !== 1)
 			throw new Error(
-				`Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/usage.md#upgrade`,
+				"Migration required: schemaVersion: 1 and language-keyed lsp entries; see docs/usage.md#upgrade",
 			);
-		// Legacy trustedWorkspaces is accepted but grants no trust.
-		for (const key of Object.keys(value))
-			if (
+		for (const key of Object.keys(value)) {
+			if (["trustedWorkspaces", "trusted", "trust"].includes(key)) {
+				issues.push({
+					source: path,
+					scope: key,
+					severity: "migration",
+					message: `Legacy ${key} is ignored; directory trust is no longer checked by this plugin`,
+				});
+			} else if (
 				![
 					"schemaVersion",
-					"trustedWorkspaces",
 					"lsp",
 					"lint",
 					"exclude",
 					"formatting",
 					"automaticDiagnostics",
 					"projectChecks",
+					"stopGate",
 				].includes(key)
-			)
-				throw new Error(`Unknown configuration field ${key} in ${path}`);
+			) {
+				throw new Error(`Unknown configuration field ${key}`);
+			}
+		}
 		return value;
 	} catch (error) {
-		if (record(error) && error["code"] === "ENOENT") return {};
-		throw new Error(`Configuration error in ${path}: ${error instanceof Error ? error.message : String(error)}`);
+		issues.push({
+			source: path,
+			scope: "configuration",
+			severity: "error",
+			message:
+				error instanceof SyntaxError ? "Invalid JSON" : error instanceof Error ? error.message : String(error),
+		});
+		return {};
 	}
 }
 const defaults: Record<string, string> = {
@@ -142,134 +184,243 @@ function freeze<T>(value: T): T {
 	}
 	return value;
 }
-export async function trusted(root: string): Promise<boolean> {
-	return (await configuration(root)).trusted;
-}
 export async function configuration(root: string): Promise<Config> {
 	const paths = configPaths(root);
-	const user = await read(paths.user);
-	const trust = await workspaceTrust(root, paths.codex);
-	const project = trust.level === "trusted" ? await read(paths.project) : {};
+	const issues: ConfigIssue[] = [];
+	const sources: { path: string; exists: boolean }[] = [];
+	for (const key of Object.keys(executionEnvironment()))
+		if ((key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG")) || key === "CODEX_LSP_TRUST_PROJECT")
+			issues.push({
+				source: "environment",
+				scope: key,
+				severity: "migration",
+				message: `Legacy ${key} is ignored; use $CODEX_HOME/lsp-client.json and <workspace>/.codex/lsp-client.json`,
+			});
+	const user = await read(paths.user, issues, sources);
+	const project = await read(paths.project, issues, sources);
+	const problem = (source: string, scope: string, error: unknown) =>
+		issues.push({
+			source,
+			scope,
+			severity: "error",
+			message: error instanceof Error ? error.message : String(error),
+		});
 	const servers: Record<string, Server | false> = {};
-	for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
+	const extensions: Record<string, readonly string[]> = {};
+	for (const [language, name] of Object.entries(defaults)) {
+		const entry = server(name, language, "builtin");
+		servers[language] = entry;
+		if (entry) extensions[language] = entry.extensions;
+	}
+	let javascript: Config["javascript"] = "auto";
+	let python: Config["python"] = "auto";
+	let exclude: string[] = [];
+	let formatting: Config["formatting"] = { tabSize: 4, insertSpaces: true };
+	let formattingEnabled = true;
+	let automaticDiagnostics: Config["automaticDiagnostics"] = { postToolUse: "off", stop: "off" };
+	let projectChecks: Config["projectChecks"] = "auto";
 	for (const [data, source] of [
 		[user, paths.user],
 		[project, paths.project],
 	] as const) {
-		if (data["lsp"] !== undefined && !record(data["lsp"])) throw new Error(`Invalid lsp in ${source}`);
-		if (record(data["lsp"]))
-			for (const [language, value] of Object.entries(data["lsp"]))
-				servers[language] = server(value, language, source);
-		for (const key of ["lint", "formatting", "automaticDiagnostics"])
-			if (data[key] !== undefined && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
-	}
-	const extensions: Record<string, readonly string[]> = {};
-	for (const [language, name] of Object.entries(defaults)) {
-		const entry = server(name, language, "builtin");
-		if (entry) extensions[language] = entry.extensions;
-	}
-	for (const [language, entry] of Object.entries(servers)) if (entry) extensions[language] = entry.extensions;
-	const used = new Map<string, string>();
-	for (const [language, entry] of Object.entries(servers))
-		if (entry)
-			for (const extension of entry.extensions) {
-				if (used.has(extension))
-					throw new Error(
-						`Extension conflict ${extension}: ${used.get(extension)} and ${language}; disable or replace the original language entry`,
-					);
-				used.set(extension, language);
-			}
-	const lint = { ...(record(user["lint"]) ? user["lint"] : {}), ...(record(project["lint"]) ? project["lint"] : {}) };
-	const javascript = lint["javascript"] ?? "auto";
-	const python = lint["python"] ?? "auto";
-	if (javascript !== "auto" && javascript !== "biome" && javascript !== "eslint" && javascript !== "off")
-		throw new Error("Invalid lint.javascript");
-	if (python !== "auto" && python !== "ruff" && python !== "off") throw new Error("Invalid lint.python");
-	const exclude = project["exclude"] ?? user["exclude"] ?? [];
-	if (
-		!Array.isArray(exclude) ||
-		!exclude.every(
-			(item): item is string =>
-				typeof item === "string" &&
-				!item.startsWith("!") &&
-				!item.includes("\\") &&
-				!isAbsolute(item) &&
-				!item.split("/").includes(".."),
-		)
-	)
-		throw new Error("exclude requires relative forward-slash globs without negation");
-	const formatting = {
-		tabSize: 4,
-		insertSpaces: true,
-		...(record(user["formatting"]) ? user["formatting"] : {}),
-		...(record(project["formatting"]) ? project["formatting"] : {}),
-	};
-	if (
-		!Number.isInteger(formatting.tabSize) ||
-		formatting.tabSize < 1 ||
-		formatting.tabSize > 16 ||
-		typeof formatting.insertSpaces !== "boolean"
-	)
-		throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
-	const automaticDiagnostics = {
-		postToolUse: "delta",
-		stop: "errors",
-		...(record(user["automaticDiagnostics"]) ? user["automaticDiagnostics"] : {}),
-		...(record(project["automaticDiagnostics"]) ? project["automaticDiagnostics"] : {}),
-	};
-	for (const [key, value] of Object.entries(automaticDiagnostics)) {
-		if (value === "full" || (key === "stop" && value === "delta"))
-			throw new Error(
-				"Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks. See docs/usage.md#upgrade",
-			);
-		if (!["postToolUse", "stop"].includes(key) || ![key === "stop" ? "errors" : "delta", "off"].includes(value))
-			throw new Error(`Invalid automaticDiagnostics.${key}`);
-	}
-	const projectChecks = project["projectChecks"] ?? user["projectChecks"] ?? "auto";
-	if (projectChecks !== "auto") {
-		if (!Array.isArray(projectChecks)) throw new Error("projectChecks requires auto or a list");
-		const used = new Set<string>();
-		for (const check of projectChecks) {
+		if (data["lsp"] !== undefined) {
+			if (!record(data["lsp"])) {
+				problem(source, "lsp", "Invalid lsp; all LSP capabilities disabled");
+				for (const language of Object.keys(servers)) servers[language] = false;
+			} else
+				for (const [language, value] of Object.entries(data["lsp"])) {
+					try {
+						servers[language] = server(value, language, source);
+						const entry = servers[language];
+						if (entry) extensions[language] = entry.extensions;
+					} catch (error) {
+						servers[language] = false;
+						problem(source, `lsp.${language}`, error);
+					}
+				}
+		}
+		if (data["lint"] !== undefined) {
+			const lint = data["lint"];
+			if (!record(lint)) {
+				javascript = python = "off";
+				problem(source, "lint", "Invalid lint; lint capabilities disabled");
+			} else
+				for (const [key, value] of Object.entries(lint)) {
+					if (
+						key === "javascript" &&
+						typeof value === "string" &&
+						["auto", "biome", "eslint", "off"].includes(value)
+					)
+						javascript = value as Config["javascript"];
+					else if (key === "python" && typeof value === "string" && ["auto", "ruff", "off"].includes(value))
+						python = value as Config["python"];
+					else {
+						if (key === "python") python = "off";
+						if (key === "javascript") javascript = "off";
+						problem(source, `lint.${key}`, `Invalid lint.${key}`);
+					}
+				}
+		}
+		if (data["exclude"] !== undefined) {
+			const value = data["exclude"];
 			if (
-				!record(check) ||
-				Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) ||
-				typeof check["name"] !== "string" ||
-				!check["name"] ||
-				used.has(check["name"]) ||
-				typeof check["cwd"] !== "string" ||
-				isAbsolute(check["cwd"]) ||
-				check["cwd"].split(/[\\/]/).includes("..") ||
-				!["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(String(check["parser"])) ||
-				!Array.isArray(check["command"]) ||
-				!check["command"].length ||
-				!check["command"].every((arg: unknown) => typeof arg === "string" && arg.length) ||
-				!Array.isArray(check["coverage"]) ||
-				!check["coverage"].length ||
-				!check["coverage"].every(
-					(arg: unknown) =>
-						typeof arg === "string" && !isAbsolute(arg) && !arg.startsWith("!") && !arg.split("/").includes(".."),
+				Array.isArray(value) &&
+				value.every(
+					(item): item is string =>
+						typeof item === "string" &&
+						!item.startsWith("!") &&
+						!item.includes("\\") &&
+						!isAbsolute(item) &&
+						!item.split("/").includes(".."),
 				)
 			)
-				throw new Error(
-					"Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs",
-				);
-			used.add(check["name"]);
+				exclude = value;
+			else problem(source, "configuration", "exclude requires relative forward-slash globs without negation");
+		}
+		if (data["formatting"] !== undefined) {
+			const value = data["formatting"];
+			const merged = { ...formatting, ...(record(value) ? value : {}) };
+			formattingEnabled =
+				record(value) &&
+				Object.keys(value).every((key) => ["tabSize", "insertSpaces"].includes(key)) &&
+				Number.isInteger(merged.tabSize) &&
+				merged.tabSize >= 1 &&
+				merged.tabSize <= 16 &&
+				typeof merged.insertSpaces === "boolean";
+			if (formattingEnabled) formatting = merged;
+			else
+				problem(source, "formatting", "Invalid formatting.tabSize or formatting.insertSpaces; formatting disabled");
+		}
+		if (data["automaticDiagnostics"] !== undefined) {
+			const value = data["automaticDiagnostics"];
+			if (!record(value)) {
+				automaticDiagnostics = { postToolUse: "off", stop: "off" };
+				problem(source, "automaticDiagnostics", "Invalid automaticDiagnostics; automatic feedback disabled");
+			} else
+				for (const [key, mode] of Object.entries(value)) {
+					if (key === "postToolUse" && (mode === "delta" || mode === "off"))
+						automaticDiagnostics = { ...automaticDiagnostics, postToolUse: mode };
+					else if (key === "stop" && (mode === "errors" || mode === "off"))
+						automaticDiagnostics = { ...automaticDiagnostics, stop: mode };
+					else {
+						if (key === "postToolUse" || key === "stop")
+							automaticDiagnostics = { ...automaticDiagnostics, [key]: "off" };
+						problem(
+							source,
+							`automaticDiagnostics.${key}`,
+							"Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks",
+						);
+					}
+				}
+		}
+		if (data["projectChecks"] !== undefined) {
+			const value = data["projectChecks"];
+			if (value === "auto") projectChecks = "auto";
+			else if (!Array.isArray(value)) {
+				projectChecks = [];
+				problem(source, "projectChecks", "projectChecks requires auto or a list; project checks disabled");
+			} else {
+				const checks: ProjectCheck[] = [];
+				const names = new Set<string>();
+				for (const [index, check] of value.entries()) {
+					if (
+						!record(check) ||
+						Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) ||
+						typeof check["name"] !== "string" ||
+						!check["name"] ||
+						names.has(check["name"]) ||
+						typeof check["cwd"] !== "string" ||
+						isAbsolute(check["cwd"]) ||
+						check["cwd"].split(/[\\/]/).includes("..") ||
+						!["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
+							typeof check["parser"] === "string" ? check["parser"] : "",
+						) ||
+						!Array.isArray(check["command"]) ||
+						!check["command"].length ||
+						!check["command"].every((arg: unknown) => typeof arg === "string" && arg.length) ||
+						!Array.isArray(check["coverage"]) ||
+						!check["coverage"].length ||
+						!check["coverage"].every(
+							(arg: unknown) =>
+								typeof arg === "string" &&
+								!isAbsolute(arg) &&
+								!arg.startsWith("!") &&
+								!arg.includes("\\") &&
+								!arg.split("/").includes(".."),
+						)
+					) {
+						problem(
+							source,
+							`projectChecks.${record(check) ? (typeof check["name"] === "string" ? check["name"] : index) : index}`,
+							"Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs",
+						);
+						continue;
+					}
+					names.add(check["name"]);
+					checks.push(check as unknown as ProjectCheck);
+				}
+				projectChecks = checks;
+			}
 		}
 	}
-
+	const used = new Map<string, string[]>();
+	for (const [language, entry] of Object.entries(servers))
+		if (entry)
+			for (const extension of entry.extensions) used.set(extension, [...(used.get(extension) ?? []), language]);
+	for (const [extension, languages] of used)
+		if (languages.length > 1)
+			for (const language of languages) {
+				problem(
+					servers[language] ? servers[language].source : "configuration",
+					`lsp.${language}`,
+					`Extension conflict ${extension}: ${languages.join(" and ")}; disable or replace the original language entry`,
+				);
+				servers[language] = false;
+			}
+	let stopGate: Config["stopGate"] = "off";
+	if (user["stopGate"] === "off" || user["stopGate"] === "introduced-errors") stopGate = user["stopGate"];
+	else if (user["stopGate"] !== undefined)
+		problem(paths.user, "stopGate", "Invalid stopGate; expected off or introduced-errors; gate disabled");
+	if (project["stopGate"] !== undefined)
+		issues.push({
+			source: paths.project,
+			scope: "stopGate",
+			severity: "migration",
+			message: "Project stopGate is ignored; only user global configuration may enable the ending gate",
+		});
+	const valid = !issues.some((issue) => issue.scope === "configuration" && issue.severity === "error");
+	if (!valid) automaticDiagnostics = { postToolUse: "off", stop: "off" };
 	return freeze({
 		schemaVersion: 1,
-		projectChecks: projectChecks as Config["projectChecks"],
-		automaticDiagnostics: automaticDiagnostics as Config["automaticDiagnostics"],
+		projectChecks,
+		automaticDiagnostics,
+		stopGate,
 		javascript,
 		python,
 		exclude,
-		trusted: trust.level === "trusted",
-		trust,
+		issues,
+		sources,
+		valid,
+		formattingEnabled,
 		...paths,
 		extensions,
 		servers,
 		formatting,
-		version: hash(JSON.stringify([user, project, trust, paths])),
+		version: hash(
+			JSON.stringify([
+				projectChecks,
+				automaticDiagnostics,
+				stopGate,
+				javascript,
+				python,
+				exclude,
+				formatting,
+				formattingEnabled,
+				servers,
+				extensions,
+				issues.filter((issue) => issue.severity === "error"),
+				paths,
+			]),
+		),
 	});
 }

@@ -55,7 +55,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
-		assert.equal(init.serverInfo.version, "0.8.0");
+		assert.equal(init.serverInfo.version, "0.9.0");
 		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
@@ -178,5 +178,5 @@ test("disabled automatic diagnostics establish no baseline and full mode require
 	}
 	await writeFile(join(dir,"lsp-client.json"),JSON.stringify({schemaVersion:1,automaticDiagnostics:{stop:"full"}}));
 	const child=spawnSync(process.execPath,[resolve("dist/cli.js"),"hook"],{cwd:dir,env:{...process.env,CODEX_HOME:dir,CODEX_LSP_CACHE:join(dir,"cache")},encoding:"utf8",input:JSON.stringify({cwd:dir,session_id:"s",hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{path:"new.ts"}})});
-	const output=JSON.parse(child.stdout);assert.equal(output.hookSpecificOutput.permissionDecision,"deny");assert.match(output.hookSpecificOutput.permissionDecisionReason,/Migration required/);
+	assert.equal(child.status,0,child.stderr);assert.equal(child.stdout,"");
 });

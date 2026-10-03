@@ -110,7 +110,7 @@ export class HookCoordinator {
 		const key = `${session}:${event}`;
 		const job = this.jobs.get(key);
 		let pending = false;
-		if (job) {
+		if (job && (event === "Stop" || event === "SubagentStop")) {
 			const wait = event === "Stop" || event === "SubagentStop" ? BUDGET.stopWait : BUDGET.postWait;
 			const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait - (Date.now() - began)))]);
 			try {
@@ -120,6 +120,7 @@ export class HookCoordinator {
 				pending = true;
 			}
 		}
+		if (job && event === "PostToolUse") pending = true;
 		const delivery = await consumeDelivery(this.root, session, event, signal);
 		return pending && delivery.output.kind === "silent"
 			? {

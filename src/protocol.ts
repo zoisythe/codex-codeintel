@@ -51,7 +51,7 @@ export const TOOLS = [
 	),
 	tool(
 		"lsp_status",
-		"Explain configuration, trust, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
+		"Explain configuration issues, per-capability availability, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
 		{ workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
 		[],
 		true,
@@ -163,7 +163,7 @@ export async function runMcp(
 		if (method === "initialize") {
 			ok({
 				protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-				serverInfo: { name: "codex-codeintel", version: "0.8.0" }, // keep in sync with package.json
+				serverInfo: { name: "codex-codeintel", version: "0.9.0" }, // keep in sync with package.json
 				capabilities: { tools: { listChanged: false } },
 			});
 			return;

@@ -34,7 +34,7 @@ export async function runService(root: string, identity: string, token: string):
 async function serve(root: string, identity: string, token: string): Promise<void> {
 	const location = await serviceLocation(root);
 	const projects = new ProjectChecks(root);
-	const engine = new Engine(root, undefined, projects);
+	const engine = new Engine(root);
 	const automatic = new Automatic(root, engine);
 	const hooks = new HookEngine(root, {
 		projects,
@@ -151,12 +151,17 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 						)
 							throw new Error("Unknown service operation");
 						const config = await configuration(root);
-						if (!config.trusted) automatic.cancel();
+						if (
+							!config.valid ||
+							(config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+						)
+							automatic.cancel();
 						const output = await engine.dispatch(operation, args, controller.signal);
 						if (operation === "lsp_status")
 							return {
 								...output,
 								service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
+								projectChecks: projects.status(config.version),
 								automaticDiagnostics: config.automaticDiagnostics,
 								automaticTasks: automatic.status(),
 								hookTasks: coordinator.status(),
@@ -214,8 +219,8 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 	const idle = setInterval(() => {
 		void coordinator.ingest().catch(() => undefined);
 		if (!revalidation)
-			revalidation = automatic
-				.revalidate()
+			revalidation = Promise.all([automatic.revalidate(), projects.revalidate()])
+				.then(() => undefined)
 				.catch(() => undefined)
 				.finally(() => {
 					revalidation = undefined;

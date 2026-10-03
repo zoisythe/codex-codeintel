@@ -1,138 +1,109 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
-const cli = resolve("dist/cli.js");
-const checker = resolve("test/fixtures/project-checker.mjs");
-async function fixture(t, mode = "pull", extra = {}) {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-auto-")), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "spawns");
-	await mkdir(root); await mkdir(home);
-	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), ...extra };
-	const config = { schemaVersion: 1, projectChecks: [{name: "fake", cwd: ".", command: [process.execPath, checker], parser: "json", coverage: ["**/*.fake"]}], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log} } } };
-	const configure = value => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
-	await configure(config); await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	const clients = [];
-	const client = (environment = {}, script = cli) => { const instance = bundleClient(root, home, { ...env, ...environment }, script); clients.push(instance); return instance; };
-	const hook = (event = "PostToolUse", session = "s", input = {}) => new Promise((resolve, reject) => {
-		const began = performance.now(); const child = spawn(process.execPath, [cli, "hook"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
-		let stdout = "", stderr = ""; child.stdout.setEncoding("utf8").on("data", part => {stdout += part;}); child.stderr.setEncoding("utf8").on("data", part => {stderr += part;});
-		child.on("error", reject); child.on("exit", code => code === 0 ? resolve({text: stdout, value: stdout ? JSON.parse(stdout) : {}, elapsed: performance.now() - began}) : reject(new Error(stderr)));
-		child.stdin.end(JSON.stringify({cwd: root, hook_event_name: event, session_id: session, turn_id: "turn-1", ...input}));
-	});
-	const pre = (path = "main.fake", session = "s") => hook("PreToolUse", session, {tool_name: "Write", tool_input: {path}});
-	const start = async (session = "s") => {await hook("SessionStart", session); const gate = await pre("main.fake", session); assert.equal(gate.value.hookSpecificOutput?.permissionDecision, undefined, gate.text);};
-	const launches = async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
-	const state = async () => {
-		const paths = (await readdir(env.CODEX_LSP_CACHE, {recursive: true})).filter(path => path.endsWith(".json"));
-		return (await Promise.all(paths.map(async path => JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8"))))).find(entry => entry.id === "s");
-	};
-	t.after(async () => { const c = client(); try { const status = (await c.call("lsp_status", {path: "main.fake"})).structuredContent; if (status.service?.pid) process.kill(status.service.pid, "SIGTERM"); } catch {} await Promise.all(clients.map(c => c.close())); await delay(150); await rm(dir, {recursive: true, force: true}); });
-	return {dir,root,home,env,config,configure,client,hook,pre,start,launches,state};
+
+async function until(action, timeout = 12000) {
+	const deadline = Date.now() + timeout;
+	while (Date.now() < deadline) { const value = await action(); if (value) return value; await delay(30); }
+	assert.fail("Background analysis did not finish");
 }
-test("pre-edit historical diagnostics, delta, repair/reintroduction, Stop continuation once, shared cached results", {timeout: 30000}, async t => {
-	const f = await fixture(t); await writeFile(join(f.root,"main.fake"),"broken historical"); await f.start();
-	assert.equal((await f.hook("SessionStart")).text, ""); assert.equal((await f.launches()).length,0);
-	await writeFile(join(f.root,"main.fake"),"broken historical\n\n"); assert.equal((await f.hook()).text, "", "historical finding suppressed");
-	await writeFile(join(f.root,"main.fake"),"clean"); await f.hook();
-	await writeFile(join(f.root,"new.fake"),"broken new"); assert.match((await f.hook()).text,/pull broken/);
-	const c = f.client(); assert.equal((await c.call("check_diagnostics",{run:"cached",scope:"session",session:"s"})).structuredContent.errors,1);
-	const first = await f.hook("Stop"); assert.equal(first.value.decision,"block"); assert.match(first.value.reason,/new.fake/);
-	assert.equal((await f.hook("Stop", "s", {stop_hook_active:true})).text, ""); assert.notEqual((await f.hook("Stop")).value.decision,"block");
-	await writeFile(join(f.root,"new.fake"),"clean"); assert.match((await f.hook()).text,/repaired/);
-	await writeFile(join(f.root,"new.fake"),"broken again"); assert.match((await f.hook()).text,/pull broken/);
-	assert.equal((await f.launches()).length,1); assert.equal((await f.hook()).text,"");
-});
-test("missing SessionStart starts before first edit; missing Post baseline cannot be fabricated", {timeout:10000}, async t => {
-	const f=await fixture(t); await writeFile(join(f.root,"main.fake"),"clean"); assert.equal((await f.pre()).text,"");
-	await writeFile(join(f.root,"main.fake"),"broken"); assert.match((await f.hook()).text,/pull broken/);
-	assert.match((await f.hook("PostToolUse","late-session")).text,/Pre-edit baseline missing/);
-});
-test("failed/missing checker denies edits; reads and configuration repair pass; off removes gate", {timeout:15000}, async t => {
-	const f=await fixture(t,"pull",{CHECK_FAIL:"1"}); await writeFile(join(f.root,"main.fake"),"clean"); await f.hook("SessionStart");
-	assert.equal((await f.pre()).value.hookSpecificOutput.permissionDecision,"deny");
-	assert.equal((await f.hook("PreToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"git status --short"}})).text,"");
-	assert.equal((await f.hook("PreToolUse","s",{tool_name:"Write",tool_input:{path:"tsconfig.json"}})).text,"");
-	assert.equal((await f.hook("PreToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"echo x > main.fake"}})).text,"");
-	await f.configure({...f.config,automaticDiagnostics:{postToolUse:"off",stop:"off"}}); assert.equal((await f.pre()).text,""); assert.equal((await f.hook()).text,"");
-});
-test("parallel project failures are isolated and uncovered files are denied",{timeout:15000},async t=>{
-	const f=await fixture(t); await mkdir(join(f.root,"good")); await mkdir(join(f.root,"bad"));
-	const localCommand=process.platform==="win32"?"node_modules/.bin/checker.cmd":"node_modules/.bin/checker";
-	await mkdir(join(f.root,"good","node_modules/.bin"),{recursive:true});
-	await writeFile(join(f.root,"good",localCommand),process.platform==="win32"?`@echo off\r\n"${process.execPath}" "${checker}" %*\r\n`:`#!${process.execPath}\nimport(${JSON.stringify(pathToFileURL(checker).href)});\n`);
-	await chmod(join(f.root,"good",localCommand),0o755);
-	await writeFile(join(f.root,"good/a.fake"),"clean");
-	await f.configure({...f.config, projectChecks:[{...f.config.projectChecks[0],cwd:"good",command:[localCommand]},{name:"bad",cwd:"bad",command:[join(f.dir,"missing")],parser:"json",coverage:["**/*.fake"]}]});
-	await f.hook("SessionStart"); assert.equal((await f.pre("good/a.fake")).text,"");
-	assert.equal((await f.pre("bad/a.fake")).value.hookSpecificOutput.permissionDecision,"deny");
-	assert.equal((await f.pre("uncovered.fake")).value.hookSpecificOutput.permissionDecision,"deny");
-	const c=f.client(); const check=(await c.call("check_project")).structuredContent; assert.equal(check.state,"failed"); assert(check.checkers.some(check=>check.name==="fake"&&check.state==="complete"));
-});
-test("project active background and cached paging do not start analysis, strict wait then success", {timeout:15000},async t=>{
-	const f=await fixture(t,"pull",{CHECK_DELAY:"4200"}); await writeFile(join(f.root,"main.fake"),"clean"); const c=f.client();
-	assert.equal((await c.call("check_project",{run:"cached"})).structuredContent.state,"missing");
-	await f.hook("SessionStart"); const gate=await f.pre(); assert.equal(gate.value.hookSpecificOutput.permissionDecision,"deny"); await delay(800); assert.equal((await f.pre()).text,"");
-	const check=(await c.call("check_project",{refresh:true})).structuredContent; assert.equal(check.state,"running"); assert(check.next); await delay(1000); const cached=(await c.call("check_project",check.next)).structuredContent; assert.equal(cached.job,check.job);
-});
-test("service recovery retains reliable baseline and diagnostic generations stay isolated",{timeout:20000},async t=>{
-	const f=await fixture(t); await writeFile(join(f.root,"main.fake"),"clean"); await f.start("s"); await f.start("other");
-	await writeFile(join(f.root,"main.fake"),"broken"); assert.match((await f.hook()).text,/pull broken/);
-	const c=f.client(); const old=(await c.call("lsp_status",{path:"main.fake"})).structuredContent; process.kill(old.service.pid,"SIGKILL"); await delay(250);
-	assert.equal((await f.pre()).text,""); await writeFile(join(f.root,"main.fake"),"broken recovered"); await f.hook(); assert.equal((await f.hook("Stop")).value.decision,"block");
-	await f.hook("SessionEnd"); assert.equal((await f.state()).turn,"__ended__"); assert.equal((await f.hook()).text,"");
-});
-test("ordinary config/clock/blocklist edits retain hot LSP; rename/delete and unchanged shell avoid content reads",{timeout:15000},async t=>{
-	const f=await fixture(t); await writeFile(join(f.root,"main.fake"),"clean"); await f.start(); await writeFile(join(f.root,"main.fake"),"broken"); await f.hook();
-	for(const name of ["config.fake","clock.fake","blocklist.fake"]) {await writeFile(join(f.root,name),"clean"); await f.hook();} assert.equal((await f.launches()).length,1);
-	await rename(join(f.root,"main.fake"),join(f.root,"moved.fake")); await f.hook(); assert.match((await f.hook("Stop")).value.reason,/moved.fake/); await rm(join(f.root,"moved.fake")); await f.hook();
-	const c=f.client(); const before=(await c.call("lsp_status",{path:"config.fake"})).structuredContent.index;
-	assert.equal((await f.hook("PostToolUse","s",{tool_name:"exec_command",tool_input:{cmd:"git status --short"}})).text,"");
-	const after=(await c.call("lsp_status",{path:"config.fake"})).structuredContent.index; assert.equal(after.contentReads,before.contentReads);
-});
-test("project CLI detects an unmodified TypeScript caller while Stop only considers touched files",{timeout:20000},async t=>{
-	const f=await fixture(t); await symlink(resolve("node_modules"),join(f.root,"node_modules"),process.platform==="win32"?"junction":"dir");
-	await f.configure({schemaVersion:1,lsp:{typescript:"tsc"},lint:{javascript:"off"}});
-	await writeFile(join(f.root,"tsconfig.json"),JSON.stringify({compilerOptions:{strict:true,noEmit:true,types:[]},include:["*.ts"]}));
-	await writeFile(join(f.root,"defs.ts"),"export function value(): number {return 1;}\n"); await writeFile(join(f.root,"caller.ts"),'import {value} from "./defs";\nconst answer: number = value();\n');
-	await f.hook("SessionStart"); assert.equal((await f.pre("defs.ts")).text,""); await writeFile(join(f.root,"defs.ts"),'export function value(): string {return "one";}\n');
-	const delta=await f.hook(); assert(!delta.text.includes("caller.ts:"),delta.text); assert.notEqual((await f.hook("Stop")).value.decision,"block");
-	const c=f.client(); const project=(await c.call("check_project")).structuredContent; assert.equal(project.state,"complete"); assert(project.diagnostics.some(finding=>finding.path==="caller.ts"));
-	assert.match((await c.call("check_diagnostics",{})).content[0].text,/check_project/);
-});
-test("identical installed bundles share service without dependencies, full mode migration is explicit",{timeout:10000},async t=>{
-	const f=await fixture(t); await writeFile(join(f.root,"main.fake"),"clean"); await f.start(); const copy=join(f.dir,"installed.mjs"); await cp(cli,copy);
-	const a=f.client(),b=f.client({},copy); assert.equal((await a.call("lsp_status",{path:"main.fake"})).structuredContent.service.pid,(await b.call("lsp_status",{path:"main.fake"})).structuredContent.service.pid);
-	await f.configure({...f.config,automaticDiagnostics:{stop:"full"}}); assert.match((await a.call("lsp_status")).content[0].text,/Migration required/);
+async function fixture(t, extra = {}, environment = {}) {
+	const dir = await mkdtemp(join(tmpdir(), "codeintel-auto-")), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "lsp.log");
+	await mkdir(root); await mkdir(home); await writeFile(join(root, "main.fake"), "clean\n");
+	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), ...environment };
+	const config = { schemaVersion: 1, automaticDiagnostics: { postToolUse: "delta", stop: "errors" }, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } }, ...extra };
+	const configure = value => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
+	await configure(config);
+	const c = bundleClient(root, home, env);
+	const status = async () => (await c.call("lsp_status", { path: "main.fake" })).structuredContent;
+	const hook = (event = "PostToolUse", input = {}) => new Promise((resolveResult, reject) => {
+		const began = performance.now(), child = spawn(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
+		let stdout = "", stderr = "";
+		child.stdout.setEncoding("utf8").on("data", value => { stdout += value; }); child.stderr.setEncoding("utf8").on("data", value => { stderr += value; });
+		child.once("error", reject); child.once("close", code => code === 0 ? resolveResult({ text: stdout, value: stdout ? JSON.parse(stdout) : {}, ms: performance.now() - began }) : reject(new Error(stderr)));
+		child.stdin.end(JSON.stringify({ cwd: root, hook_event_name: event, session_id: "s", turn_id: "turn-1", ...input }));
+	});
+	const state = async () => {
+		for (const path of await readdir(env.CODEX_LSP_CACHE, { recursive: true }).catch(() => [])) {
+			if (!path.endsWith(".json")) continue;
+			const data = JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8")); if (data.id === "s") return data;
+		}
+	};
+	const read = () => hook("PostToolUse", { tool_name: "exec_command", tool_input: { cmd: "git status --short" } });
+	const settle = () => until(async () => { const result = await status(); return result.hookTasks?.length === 0; });
+	const start = async () => {
+		await hook("SessionStart");
+		await until(async () => { const value = (await c.call("check_project", { run: "cached" })).structuredContent; return value.state !== "missing" && value.state !== "running"; });
+		await settle(); await read();
+	};
+	const post = async (input = {}) => {
+		const result = await hook("PostToolUse", { tool_name: "Write", tool_input: { path: "main.fake" }, ...input });
+		await settle(); const delivered = await read();
+		return { ...result, text: (result.text.includes("deliveryId=") ? result.text : "") + delivered.text };
+	};
+	t.after(async () => { await hook("SessionEnd"); const s = await status(); if (s.service?.pid) try { process.kill(s.service.pid, "SIGTERM"); } catch {} await c.close(); await delay(100); await rm(dir, { recursive: true, force: true }); });
+	return { dir, root, home, env, config, configure, c, status, hook, start, post, read, settle, state, write: value => writeFile(join(root, "main.fake"), value) };
+}
+
+test("default feedback reports introduced errors without blocking; PreToolUse never checks", { timeout: 20000 }, async t => {
+	const f = await fixture(t); await f.start();
+	assert.equal((await f.hook("PreToolUse", { session_id: "", tool_name: "Write", tool_input: { path: "main.fake" } })).text, "");
+	await f.write("broken new\n"); const post = await f.post(); assert(post.ms < 1500, String(post.ms)); assert.match(post.text, /introduced=1/);
+	assert.equal((await f.hook("Stop")).value.decision, undefined);
+	const cached = (await f.c.call("check_diagnostics", { run: "cached", scope: "session", session: "s" })).structuredContent; assert.equal(cached.errors, 1);
 });
 
-test("read-only diagnostics before the first MCP write do not masquerade as prior edits", {timeout:15000},async t=>{
-	const f=await fixture(t);await writeFile(join(f.root,"main.fake"),"clean text");const c=f.client();
-	assert.equal((await c.call("check_diagnostics",{path:"main.fake",source:"lsp"})).isError,undefined);
-	const write=await c.call("lsp_format",{path:"main.fake"});assert.equal(write.isError,undefined,JSON.stringify(write));assert(write.structuredContent.modifiedPaths.includes("main.fake"));
-	await f.hook("PostToolUse","late");assert.equal((await f.pre("main.fake","late")).value.hookSpecificOutput.permissionDecision,"deny","a late Post cannot be promoted into pre-edit baseline");
+test("global gate confirms new errors once per turn, historical shifts remain historical", { timeout: 25000 }, async t => {
+	const f = await fixture(t, { stopGate: "introduced-errors" }); await f.write("broken historical\n"); await f.start();
+	await f.write("\n\nbroken historical\n"); assert.equal((await f.post()).text, ""); assert.equal((await f.hook("Stop")).value.decision, undefined);
+	await f.write("broken historical\nbroken duplicate\n"); assert.match((await f.post()).text, /introduced=1/);
+	const stop = await f.hook("Stop"); assert.equal(stop.value.decision, "block"); assert.match(stop.value.reason, /pull broken/);
+	assert.notEqual((await f.hook("SubagentStop")).value.decision, "block");
+	assert.equal((await f.hook("Stop", { stop_hook_active: true })).text, "");
+	await f.write("clean\n"); assert.match((await f.post()).text, /repaired/);
+	await f.write("broken historical\nbroken again\n"); await f.post({ turn_id: "turn-2" }); assert.equal((await f.hook("Stop", { turn_id: "turn-2" })).value.decision, "block");
 });
 
-test("line shifts, duplicate diagnostic counts and late cancelled responses keep an exact unresolved ledger",{timeout:70000},async t=>{
-	const f=await fixture(t);await writeFile(join(f.root,"main.fake"),"broken historical\n");await f.start();
-	await writeFile(join(f.root,"main.fake"),"\n\nbroken historical\n");assert.equal((await f.hook()).text,"");
-	await writeFile(join(f.root,"main.fake"),"broken historical\nbroken duplicate\n");assert.match((await f.hook()).text,/introduced=1/);assert.equal((await f.state()).unresolved["main.fake"].length,1);
-	await writeFile(join(f.root,"main.fake"),"broken historical\nbroken duplicate\ndelayed-reply\n");assert.match((await f.hook()).text,/pending=1/);
-	assert.equal((await f.state()).unresolved["main.fake"].length,1);assert.notEqual((await f.hook("Stop")).value.decision,"block","a pending empty response cannot confirm an error or a repair");
-	await writeFile(join(f.root,"main.fake"),"broken historical\nbroken duplicate\n");await f.hook();assert.equal((await f.state()).unresolved["main.fake"].length,1);assert.equal((await f.hook("Stop")).value.decision,"block");
-	await writeFile(join(f.root,"main.fake"),"clean\n");assert.match((await f.hook()).text,/repaired/);await delay(8300);assert.equal((await f.hook()).text,"");assert.equal((await f.state()).unresolved["main.fake"].length,0);assert.equal((await f.launches()).length,1);
+test("missing baseline still reports current diagnostics, cannot create post-edit history", { timeout: 15000 }, async t => {
+	const f = await fixture(t, { stopGate: "introduced-errors" });
+	await f.write("broken current\n"); const result = await f.post(); assert.match(result.text, /unattributed=1/); assert.match(result.text, /cannot be attributed/); assert.match(result.text, /pull broken/);
+	assert.equal((await f.state()).diagnosticBaseline, null); assert.equal((await f.hook("Stop")).value.decision, undefined); assert.equal((await f.hook("PreToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } })).text, "");
 });
 
-test("auto type coverage exclusions and a missing configured lint checker fail closed",{timeout:20000},async t=>{
-	const f=await fixture(t);await symlink(resolve("node_modules"),join(f.root,"node_modules"),process.platform==="win32"?"junction":"dir");
-	await writeFile(join(f.root,"tsconfig.json"),JSON.stringify({compilerOptions:{noEmit:true,types:[]},files:["included.ts"]}));await writeFile(join(f.root,"included.ts"),"export const value = 1;\n");await writeFile(join(f.root,"excluded.ts"),"export const value = 1;\n");await writeFile(join(f.root,"unchecked.js"),"export const value = 1;\n");
-	await f.configure({schemaVersion:1,lsp:{typescript:"tsc"},lint:{javascript:"off"}});await f.hook("SessionStart");assert.equal((await f.pre("unchecked.js")).value.hookSpecificOutput.permissionDecision,"deny");assert.equal((await f.pre("included.ts")).text,"");assert.equal((await f.pre("excluded.ts")).value.hookSpecificOutput.permissionDecision,"deny");
-	await mkdir(join(f.root,"src/generated"),{recursive:true});await writeFile(join(f.root,"src/good.ts"),"export const value = 1;\n");await writeFile(join(f.root,"src/generated/ignored.ts"),'export const value: number = "wrong";\n');
-	await writeFile(join(f.root,"tsconfig.json"),JSON.stringify({compilerOptions:{noEmit:true,types:[]},include:["./src"],exclude:["./src/generated"]}));assert.equal((await f.pre("src/good.ts")).text,"");assert.equal((await f.pre("src/generated/ignored.ts")).value.hookSpecificOutput.permissionDecision,"deny");
-	await writeFile(join(f.root,"tsconfig.json"),JSON.stringify({compilerOptions:{noEmit:true,types:[]},include:["."],exclude:["./src/generated"]}));assert.equal((await f.pre("included.ts")).text,"");
-	await writeFile(join(f.root,"eslint.config.js"),"export default [];\n");await f.configure({schemaVersion:1,lsp:{typescript:"tsc"},lint:{javascript:"eslint"}});const gate=await f.pre("included.ts");assert.equal(gate.value.hookSpecificOutput.permissionDecision,"deny");assert.match(gate.text,/eslint/i);
+test("failed baseline and uncovered checks retain feedback but cannot gate", { timeout: 20000 }, async t => {
+	for (const settings of [{ env: { CHECK_FAIL: "1" } }, { checks: [] }]) {
+		const f = await fixture(t, { stopGate: "introduced-errors", ...(settings.checks ? { projectChecks: settings.checks } : {}) }, settings.env ?? {}); await f.start(); await f.write("broken\n"); assert.match((await f.post()).text, /unattributed=1/); assert.equal((await f.hook("Stop")).value.decision, undefined);
+	}
+});
+
+test("one checker failure preserves reliable independent ranges", { timeout: 20000 }, async t => {
+	const f = await fixture(t, { stopGate: "introduced-errors" }); await mkdir(join(f.root, "bad")); await writeFile(join(f.root, "bad", "other.fake"), "clean\n");
+	await f.configure({ ...f.config, projectChecks: [...f.config.projectChecks, { name: "missing", cwd: "bad", command: [join(f.dir, "missing")], parser: "json", coverage: ["**/*.fake"] }] });
+	await f.start(); await f.write("broken good range\n"); assert.match((await f.post()).text, /introduced=1/); assert.equal((await f.hook("Stop")).value.decision, "block");
+	const project = (await f.c.call("check_project")).structuredContent; assert.equal(project.state, "failed"); assert(project.checkers.some(value => value.name === "fake" && value.state === "complete"));
+});
+
+test("project cannot enable gate and explicit global off takes precedence", { timeout: 15000 }, async t => {
+	const f = await fixture(t, { stopGate: "off" }); await mkdir(join(f.root, ".codex")); await writeFile(join(f.root, ".codex", "lsp-client.json"), JSON.stringify({ schemaVersion: 1, stopGate: "introduced-errors" }));
+	assert((await f.status()).configurationIssues.some(issue => /Project stopGate is ignored/.test(issue.message)));
+	await f.start(); await f.write("broken\n"); await f.post(); assert.equal((await f.hook("Stop")).value.decision, undefined);
+});
+
+test("configuration and ending policy changes invalidate old baselines and deliveries", { timeout: 18000 }, async t => {
+	const f = await fixture(t, { stopGate: "introduced-errors" }); await f.start(); await f.write("broken old\n"); await f.hook("PostToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } }); await f.settle(); assert(Object.keys((await f.state()).outbox).length);
+	await f.configure({ ...f.config, stopGate: "off" }); assert.equal((await f.c.call("check_project", {run:"cached"})).structuredContent.state,"stale"); assert.equal((await f.read()).text, ""); assert.equal((await f.hook("Stop")).value.decision, undefined);
+	await f.configure({ ...f.config, stopGate: "introduced-errors" }); await f.write("broken new configuration\n"); assert.match((await f.post()).text, /unattributed=1/); assert.equal((await f.hook("Stop")).value.decision, undefined);
+});
+
+test("MCP formatting succeeds without a baseline; later diagnostic cancellation is supplementary", { timeout: 15000 }, async t => {
+	const f = await fixture(t, {}, { CHECK_FAIL: "1" });
+	await f.write("clean text\n");
+	const result = await f.c.call("lsp_format", { path: "main.fake" }); assert.equal(result.isError, undefined, JSON.stringify(result)); assert(result.structuredContent.modifiedPaths.includes("main.fake"));
+	assert.match(await readFile(join(f.root, "main.fake"), "utf8"), /fixed!/);
+	assert.equal((await f.state())?.diagnosticBaseline ?? null, null);
 });

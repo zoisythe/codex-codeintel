@@ -1,0 +1,4 @@
+interface:
+  display_name: "setupLSP"
+  short_description: "Configure and verify project language tools"
+  default_prompt: "Use $setup-lsp to configure and verify CodeIntel tools for this project."

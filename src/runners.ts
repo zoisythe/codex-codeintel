@@ -5,18 +5,15 @@ import { BUDGET } from "./budgets.js";
 import { type Config, configuration } from "./config.js";
 import { configurationImpact } from "./config-files.js";
 import { automaticExecution, executionEnvironment, subprocessEnvironment } from "./environment.js";
-import { createSpawnCommand, terminateProcessTree } from "./lsp/process.js";
-
-export { trusted } from "./config.js";
-
-import { inside, workspacePath } from "./files.js";
+import { hash, inside, workspacePath } from "./files.js";
 import { parseLint } from "./lint-output.js";
 import { logEvent } from "./log.js";
+import { createSpawnCommand, terminateProcessTree } from "./lsp/process.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
 import { HIDDEN_PROCESS } from "./process-options.js";
 import { type FileResult, type FormatResult, message, record } from "./results.js";
-import { languageFor, resolveTool } from "./tool-resolution.js";
+import { codeLanguage, resolveTool } from "./tool-resolution.js";
 
 export async function run(
 	command: string,
@@ -149,9 +146,9 @@ export async function select(
 		if (tool.source === "missing") {
 			const prepared = await preparedRuff();
 			if (prepared) return { name: "ruff", command: prepared, prefix: [], source: "prepared" };
-			if (!active || automaticExecution() || !config.trusted)
+			if (!active || automaticExecution())
 				throw new Error(
-					"Ruff unavailable: no local or prepared executable; run trusted active MCP diagnostics to prepare it. Hook never downloads tools",
+					"Ruff unavailable: no local or prepared executable; run active MCP diagnostics to prepare it. Hook never downloads tools",
 				);
 			tool = await resolveTool(root, path, ["ruff"]);
 			if (tool.source === "missing") throw new Error(tool.note);
@@ -192,7 +189,6 @@ export async function select(
 }
 export async function runnerIdentity(root: string, path: string, provided?: Config): Promise<string> {
 	const config = provided ?? (await configuration(root));
-	if (!config.trusted) return "untrusted";
 	try {
 		const runner = await select(root, path, false, config);
 		if (!runner) return "none";
@@ -206,6 +202,32 @@ export async function runnerIdentity(root: string, path: string, provided?: Conf
 	} catch {
 		return "unavailable";
 	}
+}
+
+async function lintReportIdentity(root: string, path: string, config: Config): Promise<string> {
+	return hash(
+		JSON.stringify([config.version, executionEnvironment(), await runnerIdentity(root, resolve(root, path), config)]),
+	);
+}
+export function clearLintAvailability(root: string): void {
+	for (const key of lintReports.keys()) if (key.startsWith(`${root}:`)) lintReports.delete(key);
+}
+const lintReports = new Map<string, { identity: string; state: "available" | "failed"; reason?: string }>();
+export async function lintAvailability(
+	root: string,
+	path: string,
+	config: Config,
+): Promise<{ state: "available" | "failed" | "unverified"; reason?: string }> {
+	const report = lintReports.get(`${root}:${resolve(root, path)}`);
+	return report?.identity === (await lintReportIdentity(root, path, config)) ? report : { state: "unverified" };
+}
+async function reportLint(root: string, path: string, config: Config, reason?: string): Promise<void> {
+	lintReports.set(`${root}:${resolve(root, path)}`, {
+		identity: await lintReportIdentity(root, path, config),
+		state: reason ? "failed" : "available",
+		...(reason ? { reason } : {}),
+	});
+	while (lintReports.size > 1000) lintReports.delete(lintReports.keys().next().value ?? "");
 }
 
 export async function lint(
@@ -226,12 +248,11 @@ export async function lintBatch(
 ): Promise<Map<string, FileResult>> {
 	const config = provided ?? (await configuration(root));
 	const results = new Map<string, FileResult>();
-	if (!config.trusted) return results;
 	const groups = new Map<string, { runner: Runner; cwd: string; paths: string[] }>();
 	for (const path of paths) {
 		try {
 			const absolute = await workspacePath(root, path);
-			const runner = languageFor(config, path)
+			const runner = codeLanguage(config, path)
 				? await select(root, absolute, false, config, active, signal)
 				: undefined;
 			if (!runner) {
@@ -296,7 +317,8 @@ export async function lintBatch(
 				if (output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `Runner exit ${output.code}`);
 				const data: unknown = JSON.parse(output.stdout);
 				const split = splitLint(runner.name, data, root, cwd);
-				for (const path of paths)
+				for (const path of paths) {
+					await reportLint(root, path, config);
 					results.set(path, {
 						path,
 						state: "complete",
@@ -307,14 +329,17 @@ export async function lintBatch(
 							await readFile(resolve(root, path), "utf8"),
 						),
 					});
+				}
 			} catch (error) {
-				for (const path of paths)
+				for (const path of paths) {
+					await reportLint(root, path, config, message(error));
 					results.set(path, {
 						path,
 						state: signal.aborted ? "pending" : "failed",
 						findings: [],
 						note: `lint: ${message(error)}`,
 					});
+				}
 			}
 		}
 	}
@@ -352,7 +377,6 @@ export async function formatWithRunner(
 	provided?: Config,
 ): Promise<FormatResult | undefined> {
 	const config = provided ?? (await configuration(root));
-	if (!config.trusted) return undefined;
 	const absolute = await workspacePath(root, path);
 	const runner = await select(root, absolute, true, config, true, signal);
 	if (!runner || runner.name === "eslint") return undefined;
@@ -376,10 +400,6 @@ export async function preflightRunner(
 	config: Config,
 	signal: AbortSignal,
 ): Promise<boolean> {
-	if (!config.trusted) {
-		if (/\.pyi?$/.test(path)) throw new Error("Python formatting with Ruff requires workspace trust");
-		return false;
-	}
 	const runner = await select(root, await workspacePath(root, path), true, config, true, signal);
 	if (!runner || runner.name === "eslint") return false;
 	const result = await run(runner.command, [...runner.prefix, "--version"], root, signal);

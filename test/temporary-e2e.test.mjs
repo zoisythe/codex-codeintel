@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
@@ -33,11 +34,16 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	const launcherLog = join(dir, "unexpected-launch");
 	await rm(join(bin, "uvx"));
 	await writeFile(join(bin, "uvx"), `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(launcherLog)}, "launched");process.exit(99);\n`, { mode: 0o755 });
-	const hook = event => spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, ...env, CODEX_HOME: home, UV_OFFLINE: "1" }, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: event }) });
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"delta",stop:"errors"},projectChecks:[],lsp:{python:false}}));
+	const hook = (event, tool = "Write") => spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, ...env, CODEX_HOME: home, UV_OFFLINE: "1" }, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: event, tool_name: tool, tool_input: tool === "Write" ? {path:"main.py"} : {cmd:"git status --short"} }) });
 	assert.equal(hook("SessionStart").status, 0);
+	await delay(350);
 	await writeFile(join(root, "main.py"), "import sys\nvalue: int = 1\n");
-	assert.match(hook("PostToolUse").stdout, /F401/);
+	let feedback = hook("PostToolUse").stdout;
+	for(let attempt=0;attempt<20&&!feedback.includes("F401");attempt++){await delay(100);feedback+=hook("PostToolUse","exec_command").stdout;}
+	assert.match(feedback, /F401/, JSON.stringify((await client.call("lsp_status",{path:"main.py"})).structuredContent));
 	assert.equal(await readFile(launcherLog, "utf8").catch(() => ""), "", "Hook uses prepared executable, never launcher");
+	await writeFile(join(home,"lsp-client.json"),JSON.stringify({schemaVersion:1}));
 	await client.close();
 	await rm(join(bin, "uvx")); await symlink(uvx, join(bin, "uvx"));
 	client = bundleClient(root, home, { ...env, UV_CACHE_DIR: join(dir, "empty-cache"), UV_OFFLINE: "1" });

@@ -1,97 +1,68 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-test("Codex user trust: exact workspaces, parent file scope, Hook cwd and live revocation", { timeout: 30000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-trust-"));
-	const root = join(dir, "PJ"), child = join(root, "PJ1"), sibling = join(dir, "PJ-other"), home = join(dir, "home");
-	for (const path of [child, sibling, home]) await mkdir(path, { recursive: true });
-	const git = spawnSync("git", ["init", "--quiet", root], { encoding: "utf8" }); assert.equal(git.status, 0, git.stderr);
-	const user = join(home, "config.toml"), log = join(dir, "lint-launches"), cli = resolve("dist/cli.js");
-	const configure = entries => writeFile(user, entries.map(([path, level]) => `[projects.${JSON.stringify(path)}]\ntrust_level = ${JSON.stringify(level)}\n`).join("\n"));
-	const script = `require("node:fs").appendFileSync(${JSON.stringify(log)}, "lint\\n");console.log(JSON.stringify({diagnostics:[{severity:"error",description:"trust fixture",category:"fixture",location:{path:{file:process.argv.at(-1)}}}]}));`;
-	for (const path of [root, child]) {
-		const bin = join(path, "node_modules", "@biomejs", "biome", "bin"); await mkdir(bin, { recursive: true });
-		await writeFile(join(bin, "biome"), script); await writeFile(join(path, "biome.json"), "{}");
-		await writeFile(join(path, "main.js"), "baseline\n");
+test("no config or trust file: default Hooks do no analysis and all pre-edit calls pass", { timeout: 15000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "codeintel-defaults-")), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home");
+	await mkdir(child, { recursive: true }); await mkdir(home); await writeFile(join(root, "main.py"), "value: int = 1\n");
+	const env = { ...process.env, PATH: "", CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), CODEX_LSP_TRUST_PROJECT: "1", LSP_TOOLS_MCP_USER_CONFIG: "obsolete" };
+	const cli = resolve("dist/cli.js"), c = bundleClient(root, home, env);
+	t.after(async () => { await c.close(); await rm(dir, { recursive: true, force: true }); });
+	const hook = (event, cwd = root, session = "s") => {
+		const result = spawnSync(process.execPath, [cli, "hook"], { cwd, env, encoding: "utf8", input: JSON.stringify({ cwd, session_id: session, hook_event_name: event, tool_name: "Write", tool_input: { path: "main.py" } }), timeout: 3000 });
+		assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, "");
+	};
+	for (const config of [undefined, 'invalid = "private-value']) {
+		if (config) await writeFile(join(home, "config.toml"), config);
+		for (const cwd of [root, child]) for (const event of ["SessionStart", "PreToolUse", "PostToolUse", "Stop", "SubagentStop"]) hook(event, cwd);
 	}
-	const client = bundleClient(root, home);
-	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const status = async workspace => {
-		const result = await client.call("lsp_status", { workspace, path: "main.js" }); assert(!result.isError, JSON.stringify(result)); return result.structuredContent;
-	};
-	const launches = async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
-	const check = (workspace, path = "main.js") => client.call("check_diagnostics", { workspace, path, source: "lint" });
-	const hook = (workspace, event, session) => {
-		const result = spawnSync(process.execPath, [cli, "hook"], { cwd: workspace, env: { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") }, input: JSON.stringify({ cwd: workspace, hook_event_name: event, session_id: session }), encoding: "utf8", timeout: 10000 });
-		assert.equal(result.status, 0, result.stderr); return result.stdout;
-	};
-	assert.equal((await status(root)).trusted, false, "missing user config does not grant trust");
-	await configure([[root, "trusted"]]);
-	const parent = await status(root); assert.equal(parent.trusted, true); assert.equal(parent.configuration.trust.path, user);
-	assert.equal((await status(child)).trusted, false, "parent trust is not inherited by a child workspace");
-	assert.equal((await status(sibling)).trusted, false, "similar prefixes are separate workspaces");
-	assert.equal((await check(root, "PJ1/main.js")).structuredContent.errors, 1, "trusted parent can lint files in its child");
-	const count = await launches();
-	await check(child); assert.equal(await launches(), count, "child workspace cannot run lint before its own trust");
-	hook(child, "SessionStart", "child"); await writeFile(join(child, "main.js"), "child changed\n");
-	assert.match(hook(child, "PostToolUse", "child"), /baseline missing|requires workspace trust/i); assert.equal(await launches(), count, "Hook must not promote child cwd to Git root");
-	hook(root, "SessionStart", "parent"); await writeFile(join(child, "main.js"), "parent changed child\n");
-	assert.equal((await check(root,"PJ1/main.js")).structuredContent.errors,1);
-	await configure([[root, "trusted"], [child, "trusted"]]);
-	assert.equal((await check(child)).structuredContent.errors, 1, "new Codex trust takes effect in an existing MCP process");
-	await writeFile(join(child, "main.js"), "trusted child changed\n");
-	assert.equal((await check(child)).structuredContent.errors,1);
-	await configure([[root, "trusted"], [child, "untrusted"]]);
-	const beforeRevocation = await launches();
-	const denied = await check(child); assert.equal(denied.structuredContent.errors, 0); assert.equal(denied.structuredContent.results[0].state, "skipped");
-	const revoked = await status(child); assert.equal(revoked.trusted, false); assert.equal(revoked.configuration.trust.level, "untrusted");
-	hook(child, "SessionStart", "revoked");
-	await writeFile(join(child, "main.js"), "revoked child changed\n"); assert.match(hook(child, "PostToolUse", "revoked"), /baseline missing|requires workspace trust/i);
-	assert.equal(await launches(), beforeRevocation, "revocation invalidates lint caches and stops Hook execution");
-	assert.equal((await check(root, "PJ1/main.js")).structuredContent.errors, 1, "file operations stay authorized by the selected parent workspace");
-	await mkdir(join(child, ".codex"));
-	await writeFile(join(child, ".codex", "config.toml"), `[projects.${JSON.stringify(child)}]\ntrust_level = "trusted"\n`);
-	await writeFile(join(child, ".codex", "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, trustedWorkspaces: [child] }));
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, trustedWorkspaces: [child] }));
-	assert.equal((await status(child)).trusted, false, "project trust and legacy plugin lists cannot override Codex");
-	await writeFile(join(child, ".codex", "lsp-client.json"), "invalid JSON"); assert.equal((await status(child)).trusted, false, "untrusted project config is not loaded");
-	await rm(join(child, ".codex", "lsp-client.json"));
-	const alias = join(dir, "alias"); await symlink(child, alias, process.platform === "win32" ? "junction" : "dir");
-	await configure([[alias, "trusted"]]); assert.equal((await status(child)).trusted, true, "aliases identify the same directory");
-	await configure([[alias, "trusted"], [child, "untrusted"]]); assert.equal((await status(alias)).trusted, false, "conflicting aliases fail closed");
-	await configure([[child, "invalid"]]); assert.equal((await status(child)).trusted, false);
-	await writeFile(user, 'invalid = "private-value');
-	const malformed = await client.call("lsp_status", { workspace: child }); assert(malformed.isError); assert.match(malformed.content[0].text, /Invalid TOML/); assert(!malformed.content[0].text.includes("private-value"));
-	assert.equal(hook(child, "SessionEnd", "child"), "", "session cleanup survives malformed user trust");
-	await rm(user); assert.equal((await status(child)).trusted, false);
-	await configure([[root, "trusted"]]);
-	const installed = join(home, "plugins", "cache", "example", "plugin", "0.6.0", "dist", "cli.js");
-	await mkdir(resolve(installed, ".."), { recursive: true }); await cp(cli, installed);
-	const originalTrust = await readFile(user, "utf8"), sanitized = { ...process.env, CODEX_LSP_CACHE: join(dir, "installed-cache") };
-	delete sanitized.CODEX_HOME;
-	const installedHook = event => {
-		const result = spawnSync(process.execPath, [installed, "hook"], { cwd: root, env: sanitized, input: JSON.stringify({ cwd: root, session_id: "installed", hook_event_name: event }), encoding: "utf8", timeout: 10000 });
-		assert.equal(result.status, 0, result.stderr); return result.stdout;
-	};
-	installedHook("SessionStart"); await writeFile(join(root, "main.js"), "installed hook changed\n");
-	assert.equal(installedHook("PostToolUse"), "", "installed Hook recovers CODEX_HOME and disabled automatic configuration");
-	assert.equal(await readFile(user, "utf8"), originalTrust, "the plugin never writes Codex trust records");
-	const bin = join(dir, "bin"); await mkdir(bin);
-	const launcher = join(bin, process.platform === "win32" ? "npx.cmd" : "npx");
-	await writeFile(launcher, "exit 99\n", { mode: 0o755 });
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { typescript: "tsc" } }));
-	await writeFile(join(root, "main.ts"), "export const value = 1;\n");
-	await configure([[root, "untrusted"]]);
-	const temporary = bundleClient(root, home, { PATH: bin });
-	try {
-		const selected = (await temporary.call("lsp_status", { path: "main.ts" })).structuredContent;
-		assert.equal(selected.tools[0].tool.source, "temporary"); assert.equal(selected.trusted, false);
-		const blocked = await temporary.call("check_diagnostics", { path: "main.ts", source: "lsp" });
-		assert(blocked.isError); assert.match(blocked.content[0].text, /requires workspace trust in Codex user config\.toml/);
-	} finally { await temporary.close(); }
+	assert.equal(await readFile(join(dir, "cache", "sentinel"), "utf8").catch(() => "missing"), "missing");
+	const status = (await c.call("lsp_status", { path: "main.py" })).structuredContent;
+	assert.equal(status.trusted, undefined); assert.equal(status.configuration.trust, undefined); assert.deepEqual(status.configuration.automaticDiagnostics, { postToolUse: "off", stop: "off" });
+	assert.equal(status.service.state, "stopped"); assert.equal(status.clients.processStarts, 0); assert.equal(status.index.fullScans ?? status.index.scans ?? 0, 0);
+	assert(status.configurationIssues.some(issue => issue.scope === "CODEX_LSP_TRUST_PROJECT"));
+	for (const raw of ["invalid JSON", '{"schemaVersion":0}', '{"schemaVersion":1,"lsp":42}', '{"schemaVersion":1,"automaticDiagnostics":{"stop":"full"}}']) {
+		await writeFile(join(home, "lsp-client.json"), raw); hook("PreToolUse", root, ""); hook("SessionStart"); hook("Stop");
+		assert(!(await c.call("lsp_status")).isError);
+	}
+	hook("SessionEnd");
+});
+
+test("parent and child configs load without trust; canonical boundaries and installed home remain enforced", { timeout: 12000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "codeintel-scope-")), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home"), log = join(dir, "launches");
+	await mkdir(join(child, ".codex"), { recursive: true }); await mkdir(home);
+	await writeFile(join(child, "main.fake"), "broken\n");
+	await writeFile(join(child, ".codex", "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } } }));
+	const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
+	t.after(async () => { await c.close(); await rm(dir, { recursive: true, force: true }); });
+	const status = (await c.call("lsp_status", { workspace: child, path: "main.fake" })).structuredContent;
+	assert.equal(status.configurationSources[1].path, join(child, ".codex", "lsp-client.json")); assert.equal(status.tools[0].capabilities.diagnostics, "unverified");
+	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "status starts no LSP");
+	assert.equal((await c.call("check_diagnostics", { workspace: child, path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
+	const escaped = await c.call("check_diagnostics", { workspace: child, path: "../outside.py" }); assert(escaped.isError);
+	await writeFile(join(dir, "outside.fake"), "outside\n"); await symlink(join(dir, "outside.fake"), join(child, "escape.fake")); assert((await c.call("lsp_format", { workspace: child, path: "escape.fake" })).isError);
+	const installed = join(home, "plugins/cache/example/plugin/0.9.0/dist/cli.js"); await mkdir(resolve(installed, ".."), { recursive: true }); await cp(resolve("dist/cli.js"), installed);
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" } }));
+	const sanitized = { ...process.env, CODEX_LSP_CACHE: join(dir, "installed-cache") }; delete sanitized.CODEX_HOME;
+	const hook = spawnSync(process.execPath, [installed, "hook"], { cwd: child, env: sanitized, input: JSON.stringify({ cwd: child, session_id: "installed", hook_event_name: "SessionStart" }), encoding: "utf8", timeout: 3000 }); assert.equal(hook.status, 0, hook.stderr); assert.equal(hook.stdout, "");
+});
+
+test("localized config errors degrade independently; malformed JSON keeps status and cached diagnostics", { timeout: 15000 }, async t => {
+	const dir = await mkdtemp(join(tmpdir(), "codeintel-config-")), root = join(dir, "project"), home = join(dir, "home"); await mkdir(root); await mkdir(home);
+	const path = join(home, "lsp-client.json"), fake = { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull" } };
+	await writeFile(join(root, "main.fake"), "broken\n"); await writeFile(join(root, "main.py"), "import os\n");
+	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake, python: { command: [] }, cpp: { command: ["missing-explicit"], extensions: [".c"] } } }));
+	const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
+	t.after(async () => { await c.close(); await rm(dir, { recursive: true, force: true }); });
+	const status = (await c.call("lsp_status")).structuredContent; assert(status.configurationIssues.some(issue => issue.scope === "lsp.python")); assert.equal(status.configuration.valid, true);
+	assert.equal((await c.call("lsp_status", { path: "main.c" })).structuredContent.tools[0].tool.source, "missing");
+	assert.equal((await c.call("check_diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
+	await writeFile(path, "invalid JSON"); const broken = await c.call("lsp_status"); assert.equal(broken.isError, undefined); assert.equal(broken.structuredContent.configuration.valid, false);
+	const cached = await c.call("check_diagnostics", { path: "main.fake", source: "lsp", run: "cached" }); assert.equal(cached.isError, undefined, JSON.stringify(cached)); assert.equal(cached.structuredContent.errors, 1); assert.equal(cached.structuredContent.results[0].state, "stale");
+	assert.match((await c.call("lsp_navigation", { path: "main.fake", operation: "symbols" })).content[0].text, /Configuration error/);
+	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake } })); assert.equal((await c.call("check_diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
 });

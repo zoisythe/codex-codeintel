@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
-import { configuration, trusted } from "../src/config.js";
+import { configuration } from "../src/config.js";
+import { Engine as ProductionEngine } from "../src/engine.js";
 import { inventory } from "../src/files.js";
+import { HookEngine as ProductionHook } from "../src/hook-engine.js";
 import { Metadata } from "../src/metadata.js";
 import { lint, run } from "../src/runners.js";
 import { Engine, HookEngine } from "./engine-harness.js";
@@ -31,11 +33,14 @@ async function fixture() {
 	vi.stubEnv("CODEX_LSP_CACHE", join(dir, "cache"));
 
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
-	await writeFile(user, JSON.stringify({ schemaVersion: 1 }));
+	await writeFile(
+		user,
+		JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "delta", stop: "errors" } }),
+	);
 	await writeFile(join(root, "a.js"), "export const a=1;");
 	return { dir, root, user, project };
 }
-it("merges lint fields and replaces exclude using Codex user trust", async () => {
+it("merges lint fields and replaces exclude without directory trust", async () => {
 	const { root, user, project } = await fixture();
 	await writeFile(
 		user,
@@ -46,7 +51,6 @@ it("merges lint fields and replaces exclude using Codex user trust", async () =>
 		}),
 	);
 	await writeFile(project, JSON.stringify({ schemaVersion: 1, lint: { javascript: "eslint" }, exclude: ["new/**"] }));
-	expect(await trusted(root)).toBe(true);
 	expect(await configuration(root)).toMatchObject({ javascript: "eslint", python: "ruff", exclude: ["new/**"] });
 	await writeFile(user, JSON.stringify({ schemaVersion: 1, lint: { javascript: "off" }, exclude: ["user/**"] }));
 	await writeFile(join(process.env["CODEX_HOME"] ?? "", "config.toml"), "");
@@ -59,8 +63,7 @@ it("merges lint fields and replaces exclude using Codex user trust", async () =>
 			exclude: ["project/**"],
 		}),
 	);
-	expect(await trusted(root)).toBe(false);
-	expect(await configuration(root)).toMatchObject({ javascript: "off", exclude: ["user/**"] });
+	expect(await configuration(root)).toMatchObject({ javascript: "biome", exclude: ["project/**"] });
 });
 it("explicit Runner selection never falls back and off never runs installed Biome", async () => {
 	const { root, project } = await fixture();
@@ -252,4 +255,102 @@ it.each(["add", "delete", "modify", "configuration"])("rejects old revision afte
 	else await writeFile(project, '{"schemaVersion":1,"lint":{"javascript":"off"}}');
 	await expect(engine.dispatch("check_diagnostics", { ...args, cursor }, signal())).rejects.toThrow("Cursor");
 	await engine.close();
+});
+
+it("reports completed MCP writes successfully when follow-up diagnostics fail", async () => {
+	const { root, project } = await fixture();
+	await writeFile(
+		project,
+		JSON.stringify({
+			schemaVersion: 1,
+			lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"] } },
+		}),
+	);
+	await writeFile(join(root, "a.fake"), "clean text\n");
+	const engine = new ProductionEngine(root, {
+		checkBatch: async () => {
+			throw new Error("follow-up checker unavailable");
+		},
+	});
+	try {
+		const output = await engine.dispatch("lsp_format", { path: "a.fake" }, signal());
+		expect(output["modifiedPaths"]).toEqual(["a.fake"]);
+		expect(output["diagnostics"]).toMatchObject({ state: "unavailable", note: "follow-up checker unavailable" });
+		expect(await readFile(join(root, "a.fake"), "utf8")).toContain("fixed!");
+	} finally {
+		await engine.dispose();
+	}
+});
+
+it.each(["pending", "stale", "failed"] as const)(
+	"does not gate on %s diagnostics even when a project checker confirms an error",
+	async (readiness) => {
+		const { root, user } = await fixture();
+		await writeFile(
+			user,
+			JSON.stringify({
+				schemaVersion: 1,
+				automaticDiagnostics: { postToolUse: "delta", stop: "errors" },
+				stopGate: "introduced-errors",
+			}),
+		);
+		const store = new Metadata(root);
+		const finding = {
+			path: "a.js",
+			line: 1,
+			column: 1,
+			severity: "error" as const,
+			source: "fake",
+			message: "introduced",
+		};
+		let pending = false;
+		const hook = new ProductionHook(root, {
+			projects: {
+				baseline: async (session) => {
+					const reference = await store.shared({ results: [] });
+					await store.update(session, signal(), (state) => {
+						state.diagnosticBaseline = reference;
+					});
+					return {
+						reference,
+						findings: [],
+						failures: [],
+						pending: [],
+						reliable: { "a.js": ["json"] },
+						covered: ["a.js"],
+					};
+				},
+				introduced: async () => [finding],
+			},
+			check: async (_paths, _session, _turn, generation) => ({
+				generation,
+				results: [{ path: "a.js", state: pending ? readiness : "complete", findings: [finding] }],
+				note: "",
+			}),
+			end: () => undefined,
+		});
+		await hook.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal());
+		await writeFile(join(root, "a.js"), "changed");
+		await hook.hook({ session_id: "s", hook_event_name: "PostToolUse" }, signal());
+		expect((await store.read("s")).unresolved["a.js"]).toHaveLength(1);
+		pending = true;
+		expect((await hook.hook({ session_id: "s", hook_event_name: "Stop" }, signal())).kind).not.toBe("block");
+		expect((await store.read("s")).blocked).toEqual([]);
+	},
+);
+it("legacy trust-only configuration changes do not invalidate execution identity", async () => {
+	const { root, user } = await fixture();
+	const before = await configuration(root);
+	await writeFile(
+		user,
+		JSON.stringify({
+			schemaVersion: 1,
+			automaticDiagnostics: { postToolUse: "delta", stop: "errors" },
+			trustedWorkspaces: [root],
+			trust: { level: "untrusted" },
+		}),
+	);
+	const after = await configuration(root);
+	expect(after.version).toBe(before.version);
+	expect(after.issues.filter((issue) => issue.severity === "migration")).toHaveLength(2);
 });

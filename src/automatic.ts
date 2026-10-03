@@ -1,6 +1,6 @@
 import { setTimeout as delay, setImmediate as yieldBatch } from "node:timers/promises";
 import { BUDGET } from "./budgets.js";
-import { configuration } from "./config.js";
+import { assertConfiguration, configuration } from "./config.js";
 import type { Engine } from "./engine.js";
 import { withExecution } from "./environment.js";
 import { hash } from "./files.js";
@@ -89,10 +89,7 @@ export class Automatic {
 		if (state.turn === "__ended__" || state.generation !== args["generation"])
 			return { generation: -1, scope: "delta", total: 0, note: "", results: [], pending: [], state: "stale" };
 		const config = await configuration(this.root);
-		if (!config.trusted) {
-			this.cancel();
-			throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
-		}
+		assertConfiguration(config);
 		const requested = Array.isArray(args["paths"])
 			? args["paths"].filter((path): path is string => typeof path === "string")
 			: state.pending;
@@ -165,11 +162,10 @@ export class Automatic {
 						state.epoch !== job.epoch ||
 						state.generation !== job.generation ||
 						config.version !== job.configuration ||
-						(await analysisIdentity(this.root, job.paths, config, signal)) !== job.analysis ||
-						!config.trusted
+						(await analysisIdentity(this.root, job.paths, config, signal)) !== job.analysis
 					) {
 						job.state = "cancelled";
-						job.note = "Generation/configuration/trust changed; results stale";
+						job.note = "Generation/configuration changed; results stale";
 						return;
 					}
 					const paths = remaining.slice(start, start + BUDGET.batch);
@@ -238,7 +234,6 @@ export class Automatic {
 					const config = await configuration(this.root);
 					const state = await new Metadata(this.root).read(job.session);
 					if (
-						!config.trusted ||
 						config.version !== job.configuration ||
 						state.generation !== job.generation ||
 						state.epoch !== job.epoch ||

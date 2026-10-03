@@ -21,7 +21,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 		await mkdir(root); await mkdir(home);
 		await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 		const userConfig = join(home, "lsp-client.json");
-		await writeFile(userConfig, JSON.stringify({ schemaVersion: 1, lint: { javascript: "off", python: "off" }, ...(language === "native-typescript" ? { lsp: { typescript: "tsc" } } : {}) }));
+		await writeFile(userConfig, JSON.stringify({ schemaVersion: 1, automaticDiagnostics: {postToolUse:"delta",stop:"errors"}, lint: { javascript: "off", python: "off" }, ...(language === "native-typescript" ? { lsp: { typescript: "tsc" } } : {}) }));
 		let path, clean, broken;
 		if (language === "python") { await writeFile(join(root,"pyproject.toml"),"[project]\nname=\"fixture\"\nversion=\"0.1.0\"\n"); path = "main.py"; clean = "value: int = 1\n"; broken = 'value: int = "wrong"\n'; }
 		else if (language.includes("typescript")) {
@@ -51,6 +51,14 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 			child.stdin.end(JSON.stringify({ cwd: root, session_id: language, hook_event_name: event, tool_name:"Write", tool_input:{path} }));
 		});
 		await hook("SessionStart");
+		const baselineClient = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
+		try {
+			for (let attempt = 0; attempt < 60; attempt++) {
+				const result = (await baselineClient.call("check_project", { run: "cached" })).structuredContent;
+				if (result.state !== "missing" && result.state !== "running") { assert.equal(result.state, "complete", JSON.stringify(result)); break; }
+				await delay(200);
+			}
+		} finally { await baselineClient.close(); }
 		const pre = await hook("PreToolUse"); assert(!pre.output || !JSON.parse(pre.output).hookSpecificOutput?.permissionDecision, `${language}: ${pre.output}`);
 		await writeFile(join(root, path), broken);
 		const cold = await hook("PostToolUse");
@@ -71,9 +79,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 			process.kill(status.service.pid, "SIGTERM");
 		} finally { await c.close(); }
 	}
-	await mkdir(resolve("docs/history"), { recursive: true });
-	await writeFile(resolve("docs/history/performance-0.7-real.json"), JSON.stringify({ platform: process.platform, node: process.version, bundleSha256, automaticOnly: true, results: summaries }, null, 2) + "\n");
-	t.diagnostic(JSON.stringify(summaries));
+	t.diagnostic(JSON.stringify({bundleSha256, summaries}));
 });
 function resolveCli() { return resolve("dist/cli.js"); }
 test("automatic Cargo baseline refuses a missing Rustup toolchain without downloading", {skip: !enabled, timeout: 20000}, async t => {
@@ -82,7 +88,7 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	await writeFile(join(root, "Cargo.toml"), '[package]\nname="no_download_fixture"\nversion="0.1.0"\nedition="2021"\n');
 	await writeFile(join(root, "src/main.rs"), "fn main() {}\n");
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`);
-	await writeFile(join(home, "lsp-client.json"), JSON.stringify({schemaVersion: 1, lint: {javascript:"off",python:"off"}}));
+	await writeFile(join(home, "lsp-client.json"), JSON.stringify({schemaVersion: 1, automaticDiagnostics: {postToolUse:"delta",stop:"errors"}, lint: {javascript:"off",python:"off"}}));
 	const env = {...process.env, CODEX_HOME:home, CODEX_LSP_CACHE:join(dir,"cache"), RUSTUP_TOOLCHAIN:"1.0.0", RUSTUP_AUTO_INSTALL:"1", RUSTUP_DIST_SERVER:"http://127.0.0.1:9"};
 	const c = bundleClient(root,home,env);
 	t.after(async () => {try {const status=(await c.call("lsp_status",{path:"src/main.rs"})).structuredContent; if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
@@ -91,7 +97,8 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 		assert.equal(result.status,0,result.stderr); return result.stdout?JSON.parse(result.stdout):{};
 	};
 	hook("SessionStart");
-	const gate=hook("PreToolUse"); assert.equal(gate.hookSpecificOutput.permissionDecision,"deny");
+	const gate=hook("PreToolUse"); assert.equal(gate.hookSpecificOutput?.permissionDecision,undefined);
+	await delay(700);
 	const result=(await c.call("check_project",{run:"cached"})).structuredContent;
 	assert.equal(result.state,"failed");
 	assert.match(result.checkers[0].note,/not installed/);
@@ -101,20 +108,21 @@ test("automatic Ruff baseline and MCP lint preserve source with fix/fix-only con
 	const dir=await mkdtemp(join(tmpdir(),"codeintel-ruff-readonly-")),root=join(dir,"project"),home=join(dir,"home");
 	await mkdir(root);await mkdir(home);
 	await writeFile(join(home,"config.toml"),`[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`);
-	await writeFile(join(home,"lsp-client.json"),JSON.stringify({schemaVersion:1}));
+	await writeFile(join(home,"lsp-client.json"),JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"delta",stop:"errors"}}));
 	await writeFile(join(root,"pyproject.toml"),'[tool.ruff]\nfix=true\nfix-only=true\n[tool.ruff.lint]\nselect=["F401"]\n');
 	const original="import os\nvalue: int = 1\n";await writeFile(join(root,"main.py"),original);
 	const env={...process.env,CODEX_HOME:home,CODEX_LSP_CACHE:join(dir,"cache")},c=bundleClient(root,home,env);
 	t.after(async()=>{try{const status=(await c.call("lsp_status",{path:"main.py"})).structuredContent;if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
 	for(const event of ["SessionStart","PreToolUse"]){const result=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:event,session_id:"ruff-readonly",tool_name:"Write",tool_input:{path:"main.py"}})});assert.equal(result.status,0,result.stderr);assert.equal(result.stdout?JSON.parse(result.stdout).hookSpecificOutput?.permissionDecision:undefined,undefined,result.stdout);}
 	assert.equal(await readFile(join(root,"main.py"),"utf8"),original);
+	await delay(1000);
 	const baseline=(await c.call("check_project",{run:"cached"})).structuredContent;
-	assert.equal(baseline.state,"complete");assert(baseline.diagnostics.some(finding=>finding.source.includes("F401")));
+	assert.equal(baseline.state,"complete",JSON.stringify(baseline));assert(baseline.diagnostics.some(finding=>finding.source.includes("F401")));
 	const diagnostic=await c.call("check_diagnostics",{path:"main.py",source:"lint"});
 	assert.equal(diagnostic.isError,undefined);assert(diagnostic.structuredContent.errors>0);
 	assert.equal(await readFile(join(root,"main.py"),"utf8"),original);
 	await writeFile(join(root,"ty.toml"),'[src]\ninclude=["."]\nexclude=["."]\n');
 	const excluded=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:"PreToolUse",session_id:"ruff-readonly",tool_name:"Write",tool_input:{path:"main.py"}})});
-	assert.equal(excluded.status,0,excluded.stderr);assert.equal(JSON.parse(excluded.stdout).hookSpecificOutput.permissionDecision,"deny",excluded.stdout);
-	const excludedBaseline=(await c.call("check_project",{run:"cached"})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python").state,"complete");
+	assert.equal(excluded.status,0,excluded.stderr);assert.equal(excluded.stdout,"",excluded.stdout);
+	const excludedBaseline=(await c.call("check_project",{refresh:true})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python").state,"complete");
 });

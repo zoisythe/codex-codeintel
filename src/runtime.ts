@@ -1,12 +1,13 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { BUDGET } from "./budgets.js";
+import { configuration } from "./config.js";
 import { Engine, type ToolOutput } from "./engine.js";
 import { registerHook } from "./hook-inbox.js";
 import { ensureService, exchange, existingService } from "./ipc.js";
 import { Metadata } from "./metadata.js";
 import { text } from "./results.js";
-import { isShellTool, writeIntent } from "./write-intent.js";
+import { writeIntent } from "./write-intent.js";
 
 export class Runtime {
 	private readonly active = new Set<AbortController>();
@@ -17,10 +18,15 @@ export class Runtime {
 		signal: AbortSignal,
 	): Promise<ToolOutput> {
 		const event = operation === "hook" ? text(args["hook_event_name"], "PostToolUse") : "";
-		if (event === "PreToolUse" && (isShellTool(args) || writeIntent(root, args).kind !== "write"))
-			return { operation: "hook", output: { kind: "silent" } };
+		if (event === "PreToolUse") return { operation: "hook", output: { kind: "silent" } };
 		if (!isAbsolute(root)) throw new Error("workspace must be an absolute project directory");
 		root = await realpath(root);
+		if (operation === "hook" && event !== "SessionEnd") {
+			const config = await configuration(root);
+			if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+				return { operation: "hook", output: { kind: "silent" } };
+			if (!text(args["session_id"])) return { operation: "hook", output: { kind: "silent" } };
+		}
 		const controller = new AbortController();
 		this.active.add(controller);
 		signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(BUDGET.request)]);

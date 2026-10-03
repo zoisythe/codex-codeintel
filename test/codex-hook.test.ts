@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +9,11 @@ const roots: string[] = [];
 async function fixture(): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "codex-lsp-hook-"));
 	roots.push(root);
+	await mkdir(join(root, ".codex"));
+	await writeFile(
+		join(root, ".codex", "lsp-client.json"),
+		JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "delta", stop: "errors" } }),
+	);
 	await writeFile(join(root, "clean.ts"), "export const value = 1;\n");
 	return root;
 }
@@ -43,8 +48,8 @@ describe("inventory-based PostToolUse hook", () => {
 		await engine.hook({ session_id: "s", hook_event_name: "SessionStart" }, signal);
 		await writeFile(join(root, "changed.ts"), "changed");
 		const output = JSON.parse(await engine.hook({ session_id: "s", hook_event_name: "Stop" }, signal));
-		expect(output.decision).toBe("block");
-		expect(output.reason).toContain("broken");
+		expect(output.decision).toBeUndefined();
+		expect(output.systemMessage).toContain("broken");
 		expect(output.hookSpecificOutput).toBeUndefined();
 		expect(await engine.hook({ session_id: "s", hook_event_name: "Stop", stop_hook_active: true }, signal)).toBe("");
 	});
@@ -60,8 +65,8 @@ describe("inventory-based PostToolUse hook", () => {
 				{ session_id: "s1", turn_id: "t1", hook_event_name: "PostToolUse", cwd: root },
 				new AbortController().signal,
 			),
-		).toContain("Pre-edit baseline missing");
-		expect(checks).toBe(0);
+		).toBe("");
+		expect(checks).toBe(1);
 	});
 
 	it("checks only files that changed after the baseline", async () => {

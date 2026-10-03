@@ -27,9 +27,9 @@ export async function queueDelivery(
 ): Promise<void> {
 	if (output.kind !== "context" && output.kind !== "block") return;
 	const content = output.kind === "context" ? output.context : output.reason;
-	const pages: string[] = [];
+	const pages: string[] = output.kind === "block" ? [content.slice(0, 8000)] : [];
 	let page = "";
-	for (const line of content.split("\n")) {
+	for (const line of output.kind === "block" ? [] : content.split("\n")) {
 		if (page && Buffer.byteLength(`${page}\n${line}`) > 3500) {
 			pages.push(page);
 			page = "";
@@ -62,7 +62,7 @@ export async function consumeDelivery(
 	const state = await store.read(session);
 	const config = await configuration(root);
 	if (
-		!config.trusted ||
+		!config.valid ||
 		state.turn === "__ended__" ||
 		(event === "Stop" || event === "SubagentStop"
 			? config.automaticDiagnostics.stop
@@ -108,7 +108,7 @@ export async function consumeDelivery(
 			});
 			continue;
 		}
-		if (item.output.kind === "block" && state.turn !== item.turn) {
+		if (item.output.kind === "block" && (state.turn !== item.turn || config.stopGate !== "introduced-errors")) {
 			await acknowledgeDelivery(root, session, id, signal);
 			continue;
 		}

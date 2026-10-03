@@ -60,7 +60,7 @@ test("bundle idle release keeps stdio alive and starts a new client", { timeout:
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	const firstPid = Number((await readFile(log, "utf8")).trim());
-	await writeFile(clockFile, "121000");
+	await writeFile(clockFile, "301000");
 	await new Promise(resolve => setTimeout(resolve, 1800));
 	assert.throws(() => process.kill(firstPid, 0));
 	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);

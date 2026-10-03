@@ -23,8 +23,8 @@ import {
 	text,
 	WriteFailure,
 } from "./results.js";
-import { select } from "./runners.js";
-import { resolveServer } from "./tool-resolution.js";
+import { lintAvailability, select } from "./runners.js";
+import { codeLanguage, resolveServer } from "./tool-resolution.js";
 
 function diagnosticUriKey(uri: string): string {
 	try {
@@ -40,6 +40,10 @@ function diagnosticUriKey(uri: string): string {
 }
 
 class Client extends LspClient {
+	diagnosticsVerified = false;
+	workspaceRoot(): string {
+		return this.root;
+	}
 	serverIdentity(): string {
 		return this.server.id;
 	}
@@ -357,7 +361,6 @@ export class Languages {
 	async update(config: Config): Promise<void> {
 		for (const managed of this.manager.getSnapshot()) {
 			if (
-				config.trusted !== this.config.trusted ||
 				Object.keys(this.config.servers).some((language) => {
 					const previous = this.config.servers[language];
 					return (
@@ -410,27 +413,74 @@ export class Languages {
 		{ identity: string; root: string; attempts: number; retryAt: number; reason: string }
 	>();
 	async status(path: string): Promise<unknown> {
-		const resolved = await resolveServer(this.root, path, this.config);
-		const failure = [...this.failures.values()]
-			.filter((entry) => entry.identity === resolved.tool.identity && inside(entry.root, resolve(this.root, path)))
-			.sort((a, b) => b.root.length - a.root.length)[0];
+		let resolved: Awaited<ReturnType<typeof resolveServer>> | undefined;
+		let reason = "";
+		try {
+			resolved = await resolveServer(this.root, path, this.config);
+		} catch (error) {
+			reason = message(error);
+		}
+		const failure = resolved
+			? [...this.failures.values()]
+					.filter(
+						(entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve(this.root, path)),
+					)
+					.sort((a, b) => b.root.length - a.root.length)[0]
+			: undefined;
+		const identity = resolved
+			? `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`
+			: "";
+		const client = [...this.clients].find(
+			(client) =>
+				client.isAlive() &&
+				client.serverIdentity() === identity &&
+				inside(client.workspaceRoot(), resolve(this.root, path)),
+		);
+		let lint: unknown;
+		try {
+			lint = (await select(this.root, resolve(this.root, path), false, this.config)) ?? {
+				unavailable: "Lint disabled or no matching runner",
+			};
+		} catch (error) {
+			lint = { unavailable: message(error) };
+		}
+		const lintHealth = await lintAvailability(this.root, path, this.config);
+		const formatter = await select(this.root, resolve(this.root, path), true, this.config).catch(() => undefined);
+		const unavailable = !this.config.valid || !resolved || resolved.tool.source === "missing" || !!failure;
+		const status = (operation: string) =>
+			unavailable
+				? "unavailable"
+				: !client
+					? "unverified"
+					: client.supports(operation)
+						? "available"
+						: "unsupported";
 		return {
+			path,
 			...resolved,
-			lint: this.config.trusted
-				? ((await select(this.root, resolve(this.root, path), false, this.config).catch((error) => ({
-						unavailable: message(error),
-					}))) ?? { unavailable: "No configured lint runner" })
-				: { unavailable: "Workspace trust required" },
-			running: [...this.clients].some(
-				(client) =>
-					client.isAlive() &&
-					client.serverIdentity() ===
-						`${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`,
-			),
-			failure: failure && Date.now() < failure.retryAt ? failure.reason : undefined,
+			language: resolved?.language ?? codeLanguage(this.config, path),
+			lint: record(lint) ? { ...lint, verification: lintHealth } : lint,
+			capabilities: {
+				diagnostics: unavailable ? "unavailable" : client?.diagnosticsVerified ? "available" : "unverified",
+				navigation: status("definition"),
+				rename: status("rename"),
+				formatting: !this.config.valid
+					? "unavailable"
+					: !this.config.formattingEnabled
+						? "disabled"
+						: formatter && formatter.name !== "eslint"
+							? "unverified"
+							: status("format"),
+				lint: !this.config.valid || (record(lint) && lint["unavailable"]) ? "unavailable" : lintHealth.state,
+			},
+			running: !!client,
+			verified: !!client,
+			failure: !this.config.valid
+				? "Configuration error; execution disabled"
+				: (failure?.reason ?? (resolved?.tool.source === "missing" ? resolved.tool.note : reason || undefined)),
 			retryAt: failure?.retryAt,
 			recovery:
-				"Install or repair the local tool, then lsp_status refresh=true; failure cooldown is 30/60/120 seconds, capped at 300 seconds",
+				"Use $setup-lsp to configure, install or repair tools; then lsp_status refresh=true. Status does not start or download tools. Existing commands that fail never fall back.",
 		};
 	}
 	async preflight(path: string, signal: AbortSignal, operation?: string): Promise<void> {
@@ -455,8 +505,6 @@ export class Languages {
 	): Promise<T> {
 		const resolved = await resolveServer(this.root, path, this.config);
 		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
-		if (resolved.tool.source === "temporary" && !this.config.trusted)
-			throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
 		let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
 		if (!inside(this.root, root)) root = this.root;
 		if (
@@ -516,6 +564,7 @@ export class Languages {
 					if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
 					const absolute = await workspacePath(this.root, path);
 					const result = await measured("diagnostics/wait", () => client.collect(absolute, signal));
+					client.diagnosticsVerified = result.ready;
 					return {
 						path,
 						state: result.ready ? "complete" : "pending",

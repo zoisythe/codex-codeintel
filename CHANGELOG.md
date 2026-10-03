@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+- Remove plugin directory-trust checks and the published PreToolUse edit gate; compatibility calls always pass. Keep workspace boundaries, symlink and conflict checks, complete modifiedPaths, and CODEX_HOME isolation.
+- Default both automatic feedback modes to off. All six MCP tools remain explicitly callable; editing, shell operations, rename and formatting require no diagnostic baseline.
+- Report current diagnostics without reliable baselines as unattributed. Track reliability by checker and actual coverage, retaining useful feedback after partial failures.
+- Make Stop/SubagentStop feedback-only unless the user globally opts into stopGate=introduced-errors. Confirm fresh introduced errors against the same project checker; block at most once per turn. Project gate settings, pending, failed, uncovered and stale results cannot block.
+- Expose configuration sources/issues and per-capability availability without starting/downloading tools. Keep status/cache reads after malformed configuration and degrade localized errors independently. Legacy trust fields/variables only produce migration notes.
+- Invalidate work/baselines/deliveries when configuration, tool identity or ending policy changes. Return post-write diagnostic failures as supplementary status rather than replayable write failures.
+- Add discoverable setupLSP ($setup-lsp), UI metadata and language/configuration references; route setup requests from code-intelligence. Reuse local tools, respect project conventions and verify actual capabilities; continue other languages after installation failures.
+- Upgrade: existing stop=errors now means feedback. Ending gates require an explicit global stopGate; setup never enables one. Restart sessions and re-review the changed Hook definitions.
+
 ## 0.8.0 (2026-10-02)
 
 - Let all shell commands and reads pass PreToolUse immediately; retain reliable baseline gates for explicit file edits and MCP writes.

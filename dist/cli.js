@@ -496,1070 +496,72 @@ var init_results = __esm({
   }
 });
 
-// node_modules/smol-toml/dist/date.js
-var DATE_TIME_RE, TomlDate;
-var init_date = __esm({
-  "node_modules/smol-toml/dist/date.js"() {
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-    DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
-    TomlDate = class _TomlDate extends Date {
-      #hasDate = false;
-      #hasTime = false;
-      #offset = null;
-      constructor(date) {
-        let hasDate = true;
-        let hasTime = true;
-        let offset = "Z";
-        if (typeof date === "string") {
-          let match = date.match(DATE_TIME_RE);
-          if (match) {
-            if (!match[1]) {
-              hasDate = false;
-              date = `0000-01-01T${date}`;
-            }
-            hasTime = !!match[2];
-            hasTime && date[10] === " " && (date = date.replace(" ", "T"));
-            if (match[2] && +match[2] > 23) {
-              date = "";
-            } else {
-              offset = match[3] || null;
-              date = date.toUpperCase();
-              if (!offset && hasTime)
-                date += "Z";
-            }
-          } else {
-            date = "";
-          }
-        }
-        super(date);
-        if (!isNaN(this.getTime())) {
-          this.#hasDate = hasDate;
-          this.#hasTime = hasTime;
-          this.#offset = offset;
-        }
-      }
-      isDateTime() {
-        return this.#hasDate && this.#hasTime;
-      }
-      isLocal() {
-        return !this.#hasDate || !this.#hasTime || !this.#offset;
-      }
-      isDate() {
-        return this.#hasDate && !this.#hasTime;
-      }
-      isTime() {
-        return this.#hasTime && !this.#hasDate;
-      }
-      isValid() {
-        return this.#hasDate || this.#hasTime;
-      }
-      toISOString() {
-        let iso = super.toISOString();
-        if (this.isDate())
-          return iso.slice(0, 10);
-        if (this.isTime())
-          return iso.slice(11, 23);
-        if (this.#offset === null)
-          return iso.slice(0, -1);
-        if (this.#offset === "Z")
-          return iso;
-        let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
-        offset = this.#offset[0] === "-" ? offset : -offset;
-        let offsetDate = new Date(this.getTime() - offset * 6e4);
-        return offsetDate.toISOString().slice(0, -1) + this.#offset;
-      }
-      static wrapAsOffsetDateTime(jsDate, offset = "Z") {
-        let date = new _TomlDate(jsDate);
-        date.#offset = offset;
-        return date;
-      }
-      static wrapAsLocalDateTime(jsDate) {
-        let date = new _TomlDate(jsDate);
-        date.#offset = null;
-        return date;
-      }
-      static wrapAsLocalDate(jsDate) {
-        let date = new _TomlDate(jsDate);
-        date.#hasTime = false;
-        date.#offset = null;
-        return date;
-      }
-      static wrapAsLocalTime(jsDate) {
-        let date = new _TomlDate(jsDate);
-        date.#hasDate = false;
-        date.#offset = null;
-        return date;
-      }
-    };
-  }
-});
-
-// node_modules/smol-toml/dist/error.js
-function getLineColFromPtr(string2, ptr) {
-  let lines = string2.slice(0, ptr).split(/\r\n|\n|\r/g);
-  return [lines.length, lines.pop().length + 1];
+// src/config.ts
+import { readFile as readFile2 } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
+function configPaths(root) {
+  return {
+    user: join2(executionEnvironment()["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
+    project: join2(root, ".codex", "lsp-client.json")
+  };
 }
-function makeCodeBlock(string2, line, column) {
-  let lines = string2.split(/\r\n|\n|\r/g);
-  let codeblock = "";
-  let numberLen = (Math.log10(line + 1) | 0) + 1;
-  for (let i = line - 1; i <= line + 1; i++) {
-    let l = lines[i - 1];
-    if (!l)
-      continue;
-    codeblock += i.toString().padEnd(numberLen, " ");
-    codeblock += ":  ";
-    codeblock += l;
-    codeblock += "\n";
-    if (i === line) {
-      codeblock += " ".repeat(numberLen + column + 2);
-      codeblock += "^\n";
-    }
-  }
-  return codeblock;
+function assertConfiguration(config) {
+  if (!config.valid)
+    throw new Error(
+      `Configuration error: ${config.issues.filter((issue) => issue.scope === "configuration" && issue.severity === "error").map((issue) => `${issue.source}: ${issue.message}`).join("; ")}`
+    );
 }
-var TomlError;
-var init_error = __esm({
-  "node_modules/smol-toml/dist/error.js"() {
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-    TomlError = class extends Error {
-      line;
-      column;
-      codeblock;
-      constructor(message2, options) {
-        const [line, column] = getLineColFromPtr(options.toml, options.ptr);
-        const codeblock = makeCodeBlock(options.toml, line, column);
-        super(`Invalid TOML document: ${message2}
-
-${codeblock}`, options);
-        this.line = line;
-        this.column = column;
-        this.codeblock = codeblock;
-      }
-    };
-  }
-});
-
-// node_modules/smol-toml/dist/primitive.js
-function parseString(str, ptr) {
-  let c = str[ptr++];
-  let first = c;
-  let isLiteral = c === "'";
-  let isMultiline = c === str[ptr] && c === str[ptr + 1];
-  if (isMultiline) {
-    if (str[ptr += 2] === "\n")
-      ptr++;
-    else if (str[ptr] === "\r" && str[ptr + 1] === "\n")
-      ptr += 2;
-  }
-  let parsed = "";
-  let sliceStart = ptr;
-  let state = 0;
-  for (let i = ptr; i < str.length; i++) {
-    c = str[i];
-    if (isMultiline && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
-      state = state && 3;
-    } else if (c < " " && c !== "	" || c === "\x7F") {
-      throw new TomlError("control characters are not allowed in strings", {
-        toml: str,
-        ptr: i
-      });
-    } else if ((!state || state === 3) && c === first && (!isMultiline || str[i + 1] === first && str[i + 2] === first)) {
-      if (isMultiline) {
-        if (str[i + 3] === first)
-          i++;
-        if (str[i + 3] === first)
-          i++;
-      }
-      return [
-        // If we're in a newline escape still, then there's nothing to add.
-        // Also try to avoid concat if there's nothing to add to parsed, or nothing has been added to parsed.
-        state ? parsed : parsed + str.slice(sliceStart, i),
-        i + (isMultiline ? 3 : 1)
-      ];
-    } else if (!state) {
-      if (!isLiteral && c === "\\") {
-        parsed += str.slice(sliceStart, sliceStart = i);
-        state = 1;
-      }
-    } else if (state === 1) {
-      if (c === "x" || c === "u" || c === "U") {
-        let value = 0;
-        let len = c === "x" ? 2 : c === "u" ? 4 : 8;
-        for (let j = 0; j < len; j++, i++) {
-          let hex = str.charCodeAt(i + 1);
-          let digit = (
-            /* 0-9 */
-            hex >= 48 && hex <= 57 ? hex - 48 : (
-              /* A-F */
-              hex >= 65 && hex <= 70 ? hex - 65 + 10 : (
-                /* a-f */
-                hex >= 97 && hex <= 102 ? hex - 97 + 10 : -1
-              )
-            )
-          );
-          if (digit < 0)
-            throw new TomlError("invalid non-hex character in unicode escape", { toml: str, ptr: i + 1 });
-          value = value << 4 | digit;
-        }
-        if (value < 0 || value > 1114111 || value >= 55296 && value <= 57343) {
-          throw new TomlError("invalid unicode escape", { toml: str, ptr: i });
-        }
-        parsed += String.fromCodePoint(value);
-        sliceStart = i + 1;
-        state = 0;
-      } else if (c === " " || c === "	") {
-        state = 2;
-      } else {
-        if (c === "b")
-          parsed += "\b";
-        else if (c === "t")
-          parsed += "	";
-        else if (c === "n")
-          parsed += "\n";
-        else if (c === "f")
-          parsed += "\f";
-        else if (c === "r")
-          parsed += "\r";
-        else if (c === "e")
-          parsed += "\x1B";
-        else if (c === '"')
-          parsed += '"';
-        else if (c === "\\")
-          parsed += "\\";
-        else
-          throw new TomlError("unrecognized escape sequence", { toml: str, ptr: i });
-        sliceStart = i + 1;
-        state = 0;
-      }
-    } else if (c !== " " && c !== "	") {
-      if (state === 2) {
-        throw new TomlError("invalid escape: only line-ending whitespace may be escaped", {
-          toml: str,
-          ptr: sliceStart
-        });
-      }
-      state = !isLiteral && c === "\\" ? 1 : 0;
-      sliceStart = i;
-    }
-  }
-  throw new TomlError("unfinished string", { toml: str, ptr });
-}
-function parseValue(value, toml, ptr, integersAsBigInt) {
-  if (value === "true")
-    return true;
-  if (value === "false")
-    return false;
-  if (value === "-inf")
-    return -Infinity;
-  if (value === "inf" || value === "+inf")
-    return Infinity;
-  if (value === "nan" || value === "+nan" || value === "-nan")
-    return NaN;
-  if (value === "-0")
-    return integersAsBigInt ? 0n : 0;
-  let isInt = INT_REGEX.test(value);
-  if (isInt || FLOAT_REGEX.test(value)) {
-    if (LEADING_ZERO.test(value)) {
-      throw new TomlError("leading zeroes are not allowed", {
-        toml,
-        ptr
-      });
-    }
-    value = value.replace(/_/g, "");
-    let numeric = +value;
-    if (isNaN(numeric)) {
-      throw new TomlError("invalid number", {
-        toml,
-        ptr
-      });
-    }
-    if (isInt) {
-      if ((isInt = !Number.isSafeInteger(numeric)) && !integersAsBigInt) {
-        throw new TomlError("integer value cannot be represented losslessly", {
-          toml,
-          ptr
-        });
-      }
-      if (isInt || integersAsBigInt === true)
-        numeric = BigInt(value);
-    }
-    return numeric;
-  }
-  const date = new TomlDate(value);
-  if (!date.isValid()) {
-    throw new TomlError("invalid value", {
-      toml,
-      ptr
-    });
-  }
-  return date;
-}
-var INT_REGEX, FLOAT_REGEX, LEADING_ZERO;
-var init_primitive = __esm({
-  "node_modules/smol-toml/dist/primitive.js"() {
-    init_date();
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-    INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
-    FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
-    LEADING_ZERO = /^[+-]?0[0-9_]/;
-  }
-});
-
-// node_modules/smol-toml/dist/util.js
-function indexOfNewline(str, start = 0, end = str.length) {
-  let idx = str.indexOf("\n", start);
-  if (str[idx - 1] === "\r")
-    idx--;
-  return idx <= end ? idx : -1;
-}
-function skipComment(str, ptr) {
-  for (let i = ptr; i < str.length; i++) {
-    let c = str[i];
-    if (c === "\n")
-      return i;
-    if (c === "\r" && str[i + 1] === "\n")
-      return i + 1;
-    if (c < " " && c !== "	" || c === "\x7F") {
-      throw new TomlError("control characters are not allowed in comments", {
-        toml: str,
-        ptr
-      });
-    }
-  }
-  return str.length;
-}
-function skipVoid(str, ptr, banNewLines, banComments) {
-  let c;
-  while (1) {
-    while ((c = str[ptr]) === " " || c === "	" || !banNewLines && (c === "\n" || c === "\r" && str[ptr + 1] === "\n"))
-      ptr++;
-    if (banComments || c !== "#")
-      break;
-    ptr = skipComment(str, ptr);
-  }
-  return ptr;
-}
-function skipUntil(str, ptr, sep4, end, banNewLines = false) {
-  if (!end) {
-    ptr = indexOfNewline(str, ptr);
-    return ptr < 0 ? str.length : ptr;
-  }
-  for (let i = ptr; i < str.length; i++) {
-    let c = str[i];
-    if (c === "#") {
-      i = indexOfNewline(str, i);
-    } else if (c === sep4) {
-      return i + 1;
-    } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
-      return i;
-    }
-  }
-  throw new TomlError("cannot find end of structure", {
-    toml: str,
-    ptr
-  });
-}
-var init_util = __esm({
-  "node_modules/smol-toml/dist/util.js"() {
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-  }
-});
-
-// node_modules/smol-toml/dist/extract.js
-function sliceAndTrimEndOf(str, startPtr, endPtr) {
-  let value = str.slice(startPtr, endPtr);
-  let commentIdx = value.indexOf("#");
-  if (commentIdx > -1) {
-    skipComment(str, commentIdx);
-    value = value.slice(0, commentIdx);
-  }
-  return [value.trimEnd(), commentIdx];
-}
-function extractValue(str, ptr, end, depth, integersAsBigInt) {
-  if (depth === 0) {
-    throw new TomlError("document contains excessively nested structures. aborting.", {
-      toml: str,
-      ptr
-    });
-  }
-  let c = str[ptr];
-  if (c === "[" || c === "{") {
-    let [value, endPtr2] = c === "[" ? parseArray(str, ptr, depth, integersAsBigInt) : parseInlineTable(str, ptr, depth, integersAsBigInt);
-    if (end) {
-      endPtr2 = skipVoid(str, endPtr2);
-      if (str[endPtr2] === ",")
-        endPtr2++;
-      else if (str[endPtr2] !== end) {
-        throw new TomlError("expected comma or end of structure", {
-          toml: str,
-          ptr: endPtr2
-        });
-      }
-    }
-    return [value, endPtr2];
-  }
-  if (c === '"' || c === "'") {
-    let [parsed, endPtr2] = parseString(str, ptr);
-    if (end) {
-      endPtr2 = skipVoid(str, endPtr2);
-      if (str[endPtr2] && str[endPtr2] !== "," && str[endPtr2] !== end && str[endPtr2] !== "\n" && str[endPtr2] !== "\r") {
-        throw new TomlError("unexpected character encountered", {
-          toml: str,
-          ptr: endPtr2
-        });
-      }
-      if (str[endPtr2] === ",")
-        endPtr2++;
-    }
-    return [parsed, endPtr2];
-  }
-  let endPtr = skipUntil(str, ptr, ",", end);
-  let slice = sliceAndTrimEndOf(str, ptr, endPtr - (str[endPtr - 1] === "," ? 1 : 0));
-  if (!slice[0]) {
-    throw new TomlError("incomplete key-value declaration: no value specified", {
-      toml: str,
-      ptr
-    });
-  }
-  if (end && slice[1] > -1) {
-    endPtr = skipVoid(str, ptr + slice[1]);
-    if (str[endPtr] === ",")
-      endPtr++;
-  }
-  return [
-    parseValue(slice[0], str, ptr, integersAsBigInt),
-    endPtr
-  ];
-}
-var init_extract = __esm({
-  "node_modules/smol-toml/dist/extract.js"() {
-    init_primitive();
-    init_struct();
-    init_util();
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-  }
-});
-
-// node_modules/smol-toml/dist/struct.js
-function parseKey(str, ptr, end = "=") {
-  let dot = ptr - 1;
-  let parsed = [];
-  let endPtr = str.indexOf(end, ptr);
-  if (endPtr < 0) {
-    throw new TomlError("incomplete key-value: cannot find end of key", {
-      toml: str,
-      ptr
-    });
-  }
-  do {
-    let c = str[ptr = ++dot];
-    if (c !== " " && c !== "	") {
-      if (c === '"' || c === "'") {
-        if (c === str[ptr + 1] && c === str[ptr + 2]) {
-          throw new TomlError("multiline strings are not allowed in keys", {
-            toml: str,
-            ptr
-          });
-        }
-        let [part, eos] = parseString(str, ptr);
-        dot = str.indexOf(".", eos);
-        let strEnd = str.slice(eos, dot < 0 || dot > endPtr ? endPtr : dot);
-        let newLine = indexOfNewline(strEnd);
-        if (newLine > -1) {
-          throw new TomlError("newlines are not allowed in keys", {
-            toml: str,
-            ptr: ptr + dot + newLine
-          });
-        }
-        if (strEnd.trimStart()) {
-          throw new TomlError("found extra tokens after the string part", {
-            toml: str,
-            ptr: eos
-          });
-        }
-        if (endPtr < eos) {
-          endPtr = str.indexOf(end, eos);
-          if (endPtr < 0) {
-            throw new TomlError("incomplete key-value: cannot find end of key", {
-              toml: str,
-              ptr
-            });
-          }
-        }
-        parsed.push(part);
-      } else {
-        dot = str.indexOf(".", ptr);
-        let part = str.slice(ptr, dot < 0 || dot > endPtr ? endPtr : dot);
-        if (!KEY_PART_RE.test(part)) {
-          throw new TomlError("only letter, numbers, dashes and underscores are allowed in keys", {
-            toml: str,
-            ptr
-          });
-        }
-        parsed.push(part.trimEnd());
-      }
-    }
-  } while (dot + 1 && dot < endPtr);
-  return [parsed, skipVoid(str, endPtr + 1, true, true)];
-}
-function parseInlineTable(str, ptr, depth, integersAsBigInt) {
-  let res = {};
-  let seen = /* @__PURE__ */ new Set();
-  let c;
-  ptr++;
-  while ((c = str[ptr++]) !== "}" && c) {
-    if (c === ",") {
-      throw new TomlError("expected value, found comma", {
-        toml: str,
-        ptr: ptr - 1
-      });
-    } else if (c === "#")
-      ptr = skipComment(str, ptr);
-    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
-      let k;
-      let t = res;
-      let hasOwn = false;
-      let [key, keyEndPtr] = parseKey(str, ptr - 1);
-      for (let i = 0; i < key.length; i++) {
-        if (i)
-          t = hasOwn ? t[k] : t[k] = {};
-        k = key[i];
-        if ((hasOwn = Object.hasOwn(t, k)) && (typeof t[k] !== "object" || seen.has(t[k]))) {
-          throw new TomlError("trying to redefine an already defined value", {
-            toml: str,
-            ptr
-          });
-        }
-        if (!hasOwn && k === "__proto__") {
-          Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
-        }
-      }
-      if (hasOwn) {
-        throw new TomlError("trying to redefine an already defined value", {
-          toml: str,
-          ptr
-        });
-      }
-      let [value, valueEndPtr] = extractValue(str, keyEndPtr, "}", depth - 1, integersAsBigInt);
-      seen.add(value);
-      t[k] = value;
-      ptr = valueEndPtr;
-    }
-  }
-  if (!c) {
-    throw new TomlError("unfinished table encountered", {
-      toml: str,
-      ptr
-    });
-  }
-  return [res, ptr];
-}
-function parseArray(str, ptr, depth, integersAsBigInt) {
-  let res = [];
-  let c;
-  ptr++;
-  while ((c = str[ptr++]) !== "]" && c) {
-    if (c === ",") {
-      throw new TomlError("expected value, found comma", {
-        toml: str,
-        ptr: ptr - 1
-      });
-    } else if (c === "#")
-      ptr = skipComment(str, ptr);
-    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
-      let e = extractValue(str, ptr - 1, "]", depth - 1, integersAsBigInt);
-      res.push(e[0]);
-      ptr = e[1];
-    }
-  }
-  if (!c) {
-    throw new TomlError("unfinished array encountered", {
-      toml: str,
-      ptr
-    });
-  }
-  return [res, ptr];
-}
-var KEY_PART_RE;
-var init_struct = __esm({
-  "node_modules/smol-toml/dist/struct.js"() {
-    init_primitive();
-    init_extract();
-    init_util();
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-    KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
-  }
-});
-
-// node_modules/smol-toml/dist/parse.js
-function peekTable(key, table, meta, type) {
-  let t = table;
-  let m = meta;
-  let k;
-  let hasOwn = false;
-  let state;
-  for (let i = 0; i < key.length; i++) {
-    if (i) {
-      t = hasOwn ? t[k] : t[k] = {};
-      m = (state = m[k]).c;
-      if (type === 0 && (state.t === 1 || state.t === 2)) {
-        return null;
-      }
-      if (state.t === 2) {
-        let l = t.length - 1;
-        t = t[l];
-        m = m[l].c;
-      }
-    }
-    k = key[i];
-    if ((hasOwn = Object.hasOwn(t, k)) && m[k]?.t === 0 && m[k]?.d) {
-      return null;
-    }
-    if (!hasOwn) {
-      if (k === "__proto__") {
-        Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
-        Object.defineProperty(m, k, { enumerable: true, configurable: true, writable: true });
-      }
-      m[k] = {
-        t: i < key.length - 1 && type === 2 ? 3 : type,
-        d: false,
-        i: 0,
-        c: {}
-      };
-    }
-  }
-  state = m[k];
-  if (state.t !== type && !(type === 1 && state.t === 3)) {
-    return null;
-  }
-  if (type === 2) {
-    if (!state.d) {
-      state.d = true;
-      t[k] = [];
-    }
-    t[k].push(t = {});
-    state.c[state.i++] = state = { t: 1, d: false, i: 0, c: {} };
-  }
-  if (state.d) {
-    return null;
-  }
-  state.d = true;
-  if (type === 1) {
-    t = hasOwn ? t[k] : t[k] = {};
-  } else if (type === 0 && hasOwn) {
-    return null;
-  }
-  return [k, t, state.c];
-}
-function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
-  let res = {};
-  let meta = {};
-  let tbl = res;
-  let m = meta;
-  for (let ptr = skipVoid(toml, 0); ptr < toml.length; ) {
-    if (toml[ptr] === "[") {
-      let isTableArray = toml[++ptr] === "[";
-      let k = parseKey(toml, ptr += +isTableArray, "]");
-      if (isTableArray) {
-        if (toml[k[1] - 1] !== "]") {
-          throw new TomlError("expected end of table declaration", {
-            toml,
-            ptr: k[1] - 1
-          });
-        }
-        k[1]++;
-      }
-      let p = peekTable(
-        k[0],
-        res,
-        meta,
-        isTableArray ? 2 : 1
-        /* Type.EXPLICIT */
-      );
-      if (!p) {
-        throw new TomlError("trying to redefine an already defined table or value", {
-          toml,
-          ptr
-        });
-      }
-      m = p[2];
-      tbl = p[1];
-      ptr = k[1];
-    } else {
-      let k = parseKey(toml, ptr);
-      let p = peekTable(
-        k[0],
-        tbl,
-        m,
-        0
-        /* Type.DOTTED */
-      );
-      if (!p) {
-        throw new TomlError("trying to redefine an already defined table or value", {
-          toml,
-          ptr
-        });
-      }
-      let v = extractValue(toml, k[1], void 0, maxDepth, integersAsBigInt);
-      p[1][p[0]] = v[0];
-      ptr = v[1];
-    }
-    ptr = skipVoid(toml, ptr, true);
-    if (toml[ptr] && toml[ptr] !== "\n" && toml[ptr] !== "\r") {
-      throw new TomlError("each key-value declaration must be followed by an end-of-line", {
-        toml,
-        ptr
-      });
-    }
-    ptr = skipVoid(toml, ptr);
-  }
-  return res;
-}
-var init_parse = __esm({
-  "node_modules/smol-toml/dist/parse.js"() {
-    init_struct();
-    init_extract();
-    init_util();
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-  }
-});
-
-// node_modules/smol-toml/dist/stringify.js
-var init_stringify = __esm({
-  "node_modules/smol-toml/dist/stringify.js"() {
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-  }
-});
-
-// node_modules/smol-toml/dist/index.js
-var init_dist = __esm({
-  "node_modules/smol-toml/dist/index.js"() {
-    init_parse();
-    init_stringify();
-    init_date();
-    init_error();
-    /*!
-     * Copyright (c) Squirrel Chat et al., All rights reserved.
-     * SPDX-License-Identifier: BSD-3-Clause
-     *
-     * Redistribution and use in source and binary forms, with or without
-     * modification, are permitted provided that the following conditions are met:
-     *
-     * 1. Redistributions of source code must retain the above copyright notice, this
-     *    list of conditions and the following disclaimer.
-     * 2. Redistributions in binary form must reproduce the above copyright notice,
-     *    this list of conditions and the following disclaimer in the
-     *    documentation and/or other materials provided with the distribution.
-     * 3. Neither the name of the copyright holder nor the names of its contributors
-     *    may be used to endorse or promote products derived from this software without
-     *    specific prior written permission.
-     *
-     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-     */
-  }
-});
-
-// src/trust.ts
-import { readFile as readFile2, realpath as realpath2 } from "node:fs/promises";
-import { isAbsolute as isAbsolute2 } from "node:path";
-async function workspaceTrust(root, path) {
-  const workspace = await realpath2(root);
+async function read(path, issues, sources) {
   let content;
   try {
     content = await readFile2(path, "utf8");
   } catch (error) {
-    if (record(error) && error["code"] === "ENOENT") return { path, workspace, level: "unset" };
-    throw new Error(`Cannot read Codex user trust configuration: ${path}`);
+    if (record(error) && error["code"] === "ENOENT") {
+      sources.push({ path, exists: false });
+      return {};
+    }
+    issues.push({ source: path, scope: "configuration", severity: "error", message: "Cannot read configuration" });
+    sources.push({ path, exists: true });
+    return {};
   }
-  let config;
+  sources.push({ path, exists: true });
   try {
-    config = parse(content);
-  } catch {
-    throw new Error(`Invalid TOML in Codex user trust configuration: ${path}`);
-  }
-  const projects = record(config) ? config["projects"] : void 0;
-  if (projects === void 0) return { path, workspace, level: "unset" };
-  if (!record(projects)) throw new Error(`Invalid projects table in Codex user trust configuration: ${path}`);
-  const levels = await Promise.all(
-    Object.entries(projects).map(async ([candidate, entry]) => {
-      if (!isAbsolute2(candidate) || !record(entry)) return void 0;
-      if (await realpath2(candidate).catch(() => void 0) !== workspace) return void 0;
-      return entry["trust_level"];
-    })
-  );
-  const level = levels.includes("untrusted") ? "untrusted" : levels.includes("trusted") ? "trusted" : "unset";
-  return { path, workspace, level };
-}
-var init_trust = __esm({
-  "src/trust.ts"() {
-    "use strict";
-    init_dist();
-    init_results();
-  }
-});
-
-// src/config.ts
-import { readFile as readFile3 } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute as isAbsolute3, join as join2 } from "node:path";
-function configPaths(root) {
-  for (const key of Object.keys(executionEnvironment()))
-    if (key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG") || key === "CODEX_LSP_TRUST_PROJECT")
-      throw new Error(
-        `Migration required: remove ${key}; use $CODEX_HOME/lsp-client.json (schemaVersion: 1) and <workspace>/.codex/lsp-client.json; trust comes from $CODEX_HOME/config.toml. See docs/usage.md#upgrade`
-      );
-  return {
-    user: join2(executionEnvironment()["CODEX_HOME"] ?? join2(homedir(), ".codex"), "lsp-client.json"),
-    project: join2(root, ".codex", "lsp-client.json"),
-    codex: join2(executionEnvironment()["CODEX_HOME"] ?? join2(homedir(), ".codex"), "config.toml")
-  };
-}
-async function read(path) {
-  try {
-    const value = JSON.parse(await readFile3(path, "utf8"));
+    const value = JSON.parse(content);
     if (!record(value) || value["schemaVersion"] !== 1)
       throw new Error(
-        `Migration required: ${path} requires schemaVersion: 1 and language-keyed lsp entries; see docs/usage.md#upgrade`
+        "Migration required: schemaVersion: 1 and language-keyed lsp entries; see docs/usage.md#upgrade"
       );
-    for (const key of Object.keys(value))
-      if (![
+    for (const key of Object.keys(value)) {
+      if (["trustedWorkspaces", "trusted", "trust"].includes(key)) {
+        issues.push({
+          source: path,
+          scope: key,
+          severity: "migration",
+          message: `Legacy ${key} is ignored; directory trust is no longer checked by this plugin`
+        });
+      } else if (![
         "schemaVersion",
-        "trustedWorkspaces",
         "lsp",
         "lint",
         "exclude",
         "formatting",
         "automaticDiagnostics",
-        "projectChecks"
-      ].includes(key))
-        throw new Error(`Unknown configuration field ${key} in ${path}`);
+        "projectChecks",
+        "stopGate"
+      ].includes(key)) {
+        throw new Error(`Unknown configuration field ${key}`);
+      }
+    }
     return value;
   } catch (error) {
-    if (record(error) && error["code"] === "ENOENT") return {};
-    throw new Error(`Configuration error in ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    issues.push({
+      source: path,
+      scope: "configuration",
+      severity: "error",
+      message: error instanceof SyntaxError ? "Invalid JSON" : error instanceof Error ? error.message : String(error)
+    });
+    return {};
   }
 }
 function server(value, language, source) {
@@ -1602,99 +604,202 @@ function freeze(value) {
 }
 async function configuration(root) {
   const paths = configPaths(root);
-  const user = await read(paths.user);
-  const trust = await workspaceTrust(root, paths.codex);
-  const project = trust.level === "trusted" ? await read(paths.project) : {};
+  const issues = [];
+  const sources = [];
+  for (const key of Object.keys(executionEnvironment()))
+    if (key.startsWith("LSP_TOOLS_MCP_") && key.endsWith("_CONFIG") || key === "CODEX_LSP_TRUST_PROJECT")
+      issues.push({
+        source: "environment",
+        scope: key,
+        severity: "migration",
+        message: `Legacy ${key} is ignored; use $CODEX_HOME/lsp-client.json and <workspace>/.codex/lsp-client.json`
+      });
+  const user = await read(paths.user, issues, sources);
+  const project = await read(paths.project, issues, sources);
+  const problem = (source, scope2, error) => issues.push({
+    source,
+    scope: scope2,
+    severity: "error",
+    message: error instanceof Error ? error.message : String(error)
+  });
   const servers = {};
-  for (const [language, name] of Object.entries(defaults)) servers[language] = server(name, language, "builtin");
+  const extensions = {};
+  for (const [language, name] of Object.entries(defaults)) {
+    const entry = server(name, language, "builtin");
+    servers[language] = entry;
+    if (entry) extensions[language] = entry.extensions;
+  }
+  let javascript = "auto";
+  let python = "auto";
+  let exclude = [];
+  let formatting = { tabSize: 4, insertSpaces: true };
+  let formattingEnabled = true;
+  let automaticDiagnostics = { postToolUse: "off", stop: "off" };
+  let projectChecks = "auto";
   for (const [data, source] of [
     [user, paths.user],
     [project, paths.project]
   ]) {
-    if (data["lsp"] !== void 0 && !record(data["lsp"])) throw new Error(`Invalid lsp in ${source}`);
-    if (record(data["lsp"]))
-      for (const [language, value] of Object.entries(data["lsp"]))
-        servers[language] = server(value, language, source);
-    for (const key of ["lint", "formatting", "automaticDiagnostics"])
-      if (data[key] !== void 0 && !record(data[key])) throw new Error(`Invalid ${key} in ${source}`);
+    if (data["lsp"] !== void 0) {
+      if (!record(data["lsp"])) {
+        problem(source, "lsp", "Invalid lsp; all LSP capabilities disabled");
+        for (const language of Object.keys(servers)) servers[language] = false;
+      } else
+        for (const [language, value] of Object.entries(data["lsp"])) {
+          try {
+            servers[language] = server(value, language, source);
+            const entry = servers[language];
+            if (entry) extensions[language] = entry.extensions;
+          } catch (error) {
+            servers[language] = false;
+            problem(source, `lsp.${language}`, error);
+          }
+        }
+    }
+    if (data["lint"] !== void 0) {
+      const lint = data["lint"];
+      if (!record(lint)) {
+        javascript = python = "off";
+        problem(source, "lint", "Invalid lint; lint capabilities disabled");
+      } else
+        for (const [key, value] of Object.entries(lint)) {
+          if (key === "javascript" && typeof value === "string" && ["auto", "biome", "eslint", "off"].includes(value))
+            javascript = value;
+          else if (key === "python" && typeof value === "string" && ["auto", "ruff", "off"].includes(value))
+            python = value;
+          else {
+            if (key === "python") python = "off";
+            if (key === "javascript") javascript = "off";
+            problem(source, `lint.${key}`, `Invalid lint.${key}`);
+          }
+        }
+    }
+    if (data["exclude"] !== void 0) {
+      const value = data["exclude"];
+      if (Array.isArray(value) && value.every(
+        (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute2(item) && !item.split("/").includes("..")
+      ))
+        exclude = value;
+      else problem(source, "configuration", "exclude requires relative forward-slash globs without negation");
+    }
+    if (data["formatting"] !== void 0) {
+      const value = data["formatting"];
+      const merged = { ...formatting, ...record(value) ? value : {} };
+      formattingEnabled = record(value) && Object.keys(value).every((key) => ["tabSize", "insertSpaces"].includes(key)) && Number.isInteger(merged.tabSize) && merged.tabSize >= 1 && merged.tabSize <= 16 && typeof merged.insertSpaces === "boolean";
+      if (formattingEnabled) formatting = merged;
+      else
+        problem(source, "formatting", "Invalid formatting.tabSize or formatting.insertSpaces; formatting disabled");
+    }
+    if (data["automaticDiagnostics"] !== void 0) {
+      const value = data["automaticDiagnostics"];
+      if (!record(value)) {
+        automaticDiagnostics = { postToolUse: "off", stop: "off" };
+        problem(source, "automaticDiagnostics", "Invalid automaticDiagnostics; automatic feedback disabled");
+      } else
+        for (const [key, mode] of Object.entries(value)) {
+          if (key === "postToolUse" && (mode === "delta" || mode === "off"))
+            automaticDiagnostics = { ...automaticDiagnostics, postToolUse: mode };
+          else if (key === "stop" && (mode === "errors" || mode === "off"))
+            automaticDiagnostics = { ...automaticDiagnostics, stop: mode };
+          else {
+            if (key === "postToolUse" || key === "stop")
+              automaticDiagnostics = { ...automaticDiagnostics, [key]: "off" };
+            problem(
+              source,
+              `automaticDiagnostics.${key}`,
+              "Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks"
+            );
+          }
+        }
+    }
+    if (data["projectChecks"] !== void 0) {
+      const value = data["projectChecks"];
+      if (value === "auto") projectChecks = "auto";
+      else if (!Array.isArray(value)) {
+        projectChecks = [];
+        problem(source, "projectChecks", "projectChecks requires auto or a list; project checks disabled");
+      } else {
+        const checks = [];
+        const names = /* @__PURE__ */ new Set();
+        for (const [index, check] of value.entries()) {
+          if (!record(check) || Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) || typeof check["name"] !== "string" || !check["name"] || names.has(check["name"]) || typeof check["cwd"] !== "string" || isAbsolute2(check["cwd"]) || check["cwd"].split(/[\\/]/).includes("..") || !["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
+            typeof check["parser"] === "string" ? check["parser"] : ""
+          ) || !Array.isArray(check["command"]) || !check["command"].length || !check["command"].every((arg) => typeof arg === "string" && arg.length) || !Array.isArray(check["coverage"]) || !check["coverage"].length || !check["coverage"].every(
+            (arg) => typeof arg === "string" && !isAbsolute2(arg) && !arg.startsWith("!") && !arg.includes("\\") && !arg.split("/").includes("..")
+          )) {
+            problem(
+              source,
+              `projectChecks.${record(check) ? typeof check["name"] === "string" ? check["name"] : index : index}`,
+              "Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs"
+            );
+            continue;
+          }
+          names.add(check["name"]);
+          checks.push(check);
+        }
+        projectChecks = checks;
+      }
+    }
   }
-  const extensions = {};
-  for (const [language, name] of Object.entries(defaults)) {
-    const entry = server(name, language, "builtin");
-    if (entry) extensions[language] = entry.extensions;
-  }
-  for (const [language, entry] of Object.entries(servers)) if (entry) extensions[language] = entry.extensions;
   const used = /* @__PURE__ */ new Map();
   for (const [language, entry] of Object.entries(servers))
     if (entry)
-      for (const extension of entry.extensions) {
-        if (used.has(extension))
-          throw new Error(
-            `Extension conflict ${extension}: ${used.get(extension)} and ${language}; disable or replace the original language entry`
-          );
-        used.set(extension, language);
-      }
-  const lint = { ...record(user["lint"]) ? user["lint"] : {}, ...record(project["lint"]) ? project["lint"] : {} };
-  const javascript = lint["javascript"] ?? "auto";
-  const python = lint["python"] ?? "auto";
-  if (javascript !== "auto" && javascript !== "biome" && javascript !== "eslint" && javascript !== "off")
-    throw new Error("Invalid lint.javascript");
-  if (python !== "auto" && python !== "ruff" && python !== "off") throw new Error("Invalid lint.python");
-  const exclude = project["exclude"] ?? user["exclude"] ?? [];
-  if (!Array.isArray(exclude) || !exclude.every(
-    (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute3(item) && !item.split("/").includes("..")
-  ))
-    throw new Error("exclude requires relative forward-slash globs without negation");
-  const formatting = {
-    tabSize: 4,
-    insertSpaces: true,
-    ...record(user["formatting"]) ? user["formatting"] : {},
-    ...record(project["formatting"]) ? project["formatting"] : {}
-  };
-  if (!Number.isInteger(formatting.tabSize) || formatting.tabSize < 1 || formatting.tabSize > 16 || typeof formatting.insertSpaces !== "boolean")
-    throw new Error("Invalid formatting.tabSize or formatting.insertSpaces");
-  const automaticDiagnostics = {
-    postToolUse: "delta",
-    stop: "errors",
-    ...record(user["automaticDiagnostics"]) ? user["automaticDiagnostics"] : {},
-    ...record(project["automaticDiagnostics"]) ? project["automaticDiagnostics"] : {}
-  };
-  for (const [key, value] of Object.entries(automaticDiagnostics)) {
-    if (value === "full" || key === "stop" && value === "delta")
-      throw new Error(
-        "Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks. See docs/usage.md#upgrade"
-      );
-    if (!["postToolUse", "stop"].includes(key) || ![key === "stop" ? "errors" : "delta", "off"].includes(value))
-      throw new Error(`Invalid automaticDiagnostics.${key}`);
-  }
-  const projectChecks = project["projectChecks"] ?? user["projectChecks"] ?? "auto";
-  if (projectChecks !== "auto") {
-    if (!Array.isArray(projectChecks)) throw new Error("projectChecks requires auto or a list");
-    const used2 = /* @__PURE__ */ new Set();
-    for (const check of projectChecks) {
-      if (!record(check) || Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) || typeof check["name"] !== "string" || !check["name"] || used2.has(check["name"]) || typeof check["cwd"] !== "string" || isAbsolute3(check["cwd"]) || check["cwd"].split(/[\\/]/).includes("..") || !["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(String(check["parser"])) || !Array.isArray(check["command"]) || !check["command"].length || !check["command"].every((arg) => typeof arg === "string" && arg.length) || !Array.isArray(check["coverage"]) || !check["coverage"].length || !check["coverage"].every(
-        (arg) => typeof arg === "string" && !isAbsolute3(arg) && !arg.startsWith("!") && !arg.split("/").includes("..")
-      ))
-        throw new Error(
-          "Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs"
+      for (const extension of entry.extensions) used.set(extension, [...used.get(extension) ?? [], language]);
+  for (const [extension, languages] of used)
+    if (languages.length > 1)
+      for (const language of languages) {
+        problem(
+          servers[language] ? servers[language].source : "configuration",
+          `lsp.${language}`,
+          `Extension conflict ${extension}: ${languages.join(" and ")}; disable or replace the original language entry`
         );
-      used2.add(check["name"]);
-    }
-  }
+        servers[language] = false;
+      }
+  let stopGate = "off";
+  if (user["stopGate"] === "off" || user["stopGate"] === "introduced-errors") stopGate = user["stopGate"];
+  else if (user["stopGate"] !== void 0)
+    problem(paths.user, "stopGate", "Invalid stopGate; expected off or introduced-errors; gate disabled");
+  if (project["stopGate"] !== void 0)
+    issues.push({
+      source: paths.project,
+      scope: "stopGate",
+      severity: "migration",
+      message: "Project stopGate is ignored; only user global configuration may enable the ending gate"
+    });
+  const valid = !issues.some((issue) => issue.scope === "configuration" && issue.severity === "error");
+  if (!valid) automaticDiagnostics = { postToolUse: "off", stop: "off" };
   return freeze({
     schemaVersion: 1,
     projectChecks,
     automaticDiagnostics,
+    stopGate,
     javascript,
     python,
     exclude,
-    trusted: trust.level === "trusted",
-    trust,
+    issues,
+    sources,
+    valid,
+    formattingEnabled,
     ...paths,
     extensions,
     servers,
     formatting,
-    version: hash(JSON.stringify([user, project, trust, paths]))
+    version: hash(
+      JSON.stringify([
+        projectChecks,
+        automaticDiagnostics,
+        stopGate,
+        javascript,
+        python,
+        exclude,
+        formatting,
+        formattingEnabled,
+        servers,
+        extensions,
+        issues.filter((issue) => issue.severity === "error"),
+        paths
+      ])
+    )
   });
 }
 var defaults, web, builtins;
@@ -1705,7 +810,6 @@ var init_config = __esm({
     init_files();
     init_server_definitions();
     init_results();
-    init_trust();
     defaults = {
       python: "ty",
       typescript: "typescript",
@@ -1820,9 +924,100 @@ function addedFindings(before, after) {
     return false;
   });
 }
+function attributableFinding(finding, parsers, before = []) {
+  if (parsers.includes("json")) return true;
+  if (parsers.includes("sarif")) {
+    return before.filter((item) => item.path === finding.path).every((item) => item.source.split("/")[0] === finding.source.split("/")[0]);
+  }
+  const source = finding.source.toLowerCase();
+  const parser = /^(?:typescript|tsc|ts(?:\/|$|\d))/.test(source) ? "tsc" : /^(?:rust|cargo)/.test(source) ? "cargo" : ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
+  return parser !== void 0 && parsers.includes(parser);
+}
 var init_diagnostic_delta = __esm({
   "src/diagnostic-delta.ts"() {
     "use strict";
+  }
+});
+
+// src/lint-output.ts
+function position(value, content) {
+  const location = record(value["location"]) ? value["location"] : {};
+  const span = location["span"];
+  if (Array.isArray(span) && typeof span[0] === "number") {
+    const before = Buffer.from(content).subarray(0, span[0]).toString("utf8").split("\n");
+    return { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 };
+  }
+  const start = record(location["start"]) ? location["start"] : {};
+  const line = value["line"] ?? location["row"] ?? start["line"];
+  const column = value["column"] ?? location["column"] ?? start["column"];
+  return { line: typeof line === "number" ? line : 1, column: typeof column === "number" ? column : 1 };
+}
+function items(runner, data) {
+  if (runner === "eslint" && Array.isArray(data))
+    return data.flatMap((file) => record(file) && Array.isArray(file["messages"]) ? file["messages"] : []);
+  if (runner === "ruff" && Array.isArray(data)) return data;
+  if (runner === "biome" && record(data) && Array.isArray(data["diagnostics"])) {
+    const summary = data["summary"];
+    if (record(summary) && Number(summary["diagnosticsNotPrinted"]) > 0)
+      throw new Error("Lint result truncated; narrow file scope");
+    return data["diagnostics"];
+  }
+  throw new Error("Unexpected lint output");
+}
+function parseLint(runner, data, path, content) {
+  const findings = [];
+  for (const value of items(runner, data)) {
+    if (!record(value)) throw new Error("Malformed lint finding");
+    const severity = value["severity"];
+    if (severity !== void 0 && ![1, 2, "error", "warning", "fatal"].includes(severity))
+      continue;
+    findings.push({
+      path,
+      ...position(value, content),
+      severity: severity === 1 || severity === "warning" ? "warning" : "error",
+      source: `${runner}/${text(value["ruleId"], text(value["code"], text(value["category"], "lint")))}`,
+      message: text(value["description"], text(value["message"], "Lint finding"))
+    });
+  }
+  return findings;
+}
+var init_lint_output = __esm({
+  "src/lint-output.ts"() {
+    "use strict";
+    init_results();
+  }
+});
+
+// src/log.ts
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { homedir as homedir2, tmpdir } from "node:os";
+import { join as join3 } from "node:path";
+function logEvent(event) {
+  queue = queue.then(async () => {
+    const dir = join3(
+      executionEnvironment()["CODEX_LSP_CACHE"] ?? join3(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir2()).slice(0, 10)}`),
+      "logs-v5"
+    );
+    await mkdir(dir, { recursive: true, mode: 448 });
+    const path = join3(dir, `${instance}.log`);
+    if ((await stat(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
+      await rm(`${path}.1`, { force: true });
+      await rename(path, `${path}.1`);
+    }
+    await appendFile(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${event}
+`, { mode: 384 });
+  }).catch(() => void 0);
+  return queue;
+}
+var instance, queue;
+var init_log = __esm({
+  "src/log.ts"() {
+    "use strict";
+    init_environment();
+    init_files();
+    instance = `${process.pid}-${randomUUID()}`;
+    queue = Promise.resolve();
   }
 });
 
@@ -1881,7 +1076,7 @@ stderr tail: ${stderrTail}` : "";
 // src/lsp/process.ts
 import * as childProcess from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { delimiter, join as join3 } from "node:path";
+import { delimiter, join as join4 } from "node:path";
 function isMissingProcessError(error) {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return error.code === "ESRCH";
@@ -2045,7 +1240,7 @@ function resolveWindowsCommand(command, env) {
   const extensions = getWindowsPathExtensions(env);
   for (const baseDirectory of baseDirectories) {
     for (const extension of extensions) {
-      const candidate = baseDirectory ? join3(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
+      const candidate = baseDirectory ? join4(baseDirectory, `${command}${extension}`) : `${command}${extension}`;
       if (existsSync(candidate)) return candidate;
     }
   }
@@ -2108,101 +1303,19 @@ var init_process = __esm({
   }
 });
 
-// src/lint-output.ts
-function position(value, content) {
-  const location = record(value["location"]) ? value["location"] : {};
-  const span = location["span"];
-  if (Array.isArray(span) && typeof span[0] === "number") {
-    const before = Buffer.from(content).subarray(0, span[0]).toString("utf8").split("\n");
-    return { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 };
-  }
-  const start = record(location["start"]) ? location["start"] : {};
-  const line = value["line"] ?? location["row"] ?? start["line"];
-  const column = value["column"] ?? location["column"] ?? start["column"];
-  return { line: typeof line === "number" ? line : 1, column: typeof column === "number" ? column : 1 };
-}
-function items(runner, data) {
-  if (runner === "eslint" && Array.isArray(data))
-    return data.flatMap((file) => record(file) && Array.isArray(file["messages"]) ? file["messages"] : []);
-  if (runner === "ruff" && Array.isArray(data)) return data;
-  if (runner === "biome" && record(data) && Array.isArray(data["diagnostics"])) {
-    const summary = data["summary"];
-    if (record(summary) && Number(summary["diagnosticsNotPrinted"]) > 0)
-      throw new Error("Lint result truncated; narrow file scope");
-    return data["diagnostics"];
-  }
-  throw new Error("Unexpected lint output");
-}
-function parseLint(runner, data, path, content) {
-  const findings = [];
-  for (const value of items(runner, data)) {
-    if (!record(value)) throw new Error("Malformed lint finding");
-    const severity = value["severity"];
-    if (severity !== void 0 && ![1, 2, "error", "warning", "fatal"].includes(severity))
-      continue;
-    findings.push({
-      path,
-      ...position(value, content),
-      severity: severity === 1 || severity === "warning" ? "warning" : "error",
-      source: `${runner}/${text(value["ruleId"], text(value["code"], text(value["category"], "lint")))}`,
-      message: text(value["description"], text(value["message"], "Lint finding"))
-    });
-  }
-  return findings;
-}
-var init_lint_output = __esm({
-  "src/lint-output.ts"() {
-    "use strict";
-    init_results();
-  }
-});
-
-// src/log.ts
-import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
-import { homedir as homedir2, tmpdir } from "node:os";
-import { join as join4 } from "node:path";
-function logEvent(event) {
-  queue = queue.then(async () => {
-    const dir = join4(
-      executionEnvironment()["CODEX_LSP_CACHE"] ?? join4(tmpdir(), `codex-lsp-${process.getuid?.() ?? hash(homedir2()).slice(0, 10)}`),
-      "logs-v5"
-    );
-    await mkdir(dir, { recursive: true, mode: 448 });
-    const path = join4(dir, `${instance}.log`);
-    if ((await stat(path).catch(() => ({ size: 0 }))).size + 100 > 1024 * 1024) {
-      await rm(`${path}.1`, { force: true });
-      await rename(path, `${path}.1`);
-    }
-    await appendFile(path, `${(/* @__PURE__ */ new Date()).toISOString()} ${event}
-`, { mode: 384 });
-  }).catch(() => void 0);
-  return queue;
-}
-var instance, queue;
-var init_log = __esm({
-  "src/log.ts"() {
-    "use strict";
-    init_environment();
-    init_files();
-    instance = `${process.pid}-${randomUUID()}`;
-    queue = Promise.resolve();
-  }
-});
-
 // src/prepared-tools.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile4, rename as rename2, writeFile } from "node:fs/promises";
+import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile3, rename as rename2, writeFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { isAbsolute as isAbsolute4, join as join5 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join5 } from "node:path";
 function directory() {
   return join5(executionEnvironment()["CODEX_HOME"] ?? join5(homedir3(), ".codex"), "cache", "codex-lsp-v5", "tools");
 }
 async function preparedRuff() {
   try {
-    const value = JSON.parse(await readFile4(join5(directory(), "ruff.json"), "utf8"));
-    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute4(value["executable"]))
+    const value = JSON.parse(await readFile3(join5(directory(), "ruff.json"), "utf8"));
+    if (!record(value) || typeof value["executable"] !== "string" || !isAbsolute3(value["executable"]))
       return void 0;
     await access(value["executable"], constants.X_OK);
     return value["executable"];
@@ -2211,7 +1324,7 @@ async function preparedRuff() {
   }
 }
 async function rememberRuff(executable3) {
-  if (!isAbsolute4(executable3)) throw new Error("Invalid prepared Ruff path");
+  if (!isAbsolute3(executable3)) throw new Error("Invalid prepared Ruff path");
   await access(executable3, constants.X_OK);
   const dir = directory();
   await mkdir2(dir, { recursive: true, mode: 448 });
@@ -2234,7 +1347,7 @@ var init_prepared_tools = __esm({
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { constants as constants2 } from "node:fs";
 import { access as access2, stat as stat2 } from "node:fs/promises";
-import { basename as basename3, delimiter as delimiter2, dirname as dirname2, extname, isAbsolute as isAbsolute5, join as join6, resolve as resolve2 } from "node:path";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname2, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve2 } from "node:path";
 async function executable(path) {
   try {
     await access2(path, constants2.X_OK);
@@ -2287,7 +1400,7 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
       `Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`
     );
   if (explicit) {
-    const entry = isAbsolute5(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
+    const entry = isAbsolute4(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
     return resolution(
       [entry ?? name, ...command.slice(1)],
       entry && await executable(entry) ? "explicit" : "missing",
@@ -2392,7 +1505,7 @@ var init_tool_resolution = __esm({
 
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access as access3, readFile as readFile5, realpath as realpath3, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
+import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname3, extname as extname2, join as join7, relative as relative2, resolve as resolve3 } from "node:path";
 async function run(command, args, cwd, signal, input, options = {}) {
   signal.throwIfAborted();
@@ -2468,7 +1581,7 @@ async function executable2(root, target, packageName, entry) {
   let dir = dirname3(target);
   while (inside(root, dir)) {
     const path = join7(dir, "node_modules", packageName, entry);
-    if (await exists(path)) return realpath3(path);
+    if (await exists(path)) return realpath2(path);
     const parent = dirname3(dir);
     if (dir === root) break;
     dir = parent;
@@ -2493,9 +1606,9 @@ async function select(root, path, formatting = false, provided, active = false, 
     if (tool2.source === "missing") {
       const prepared = await preparedRuff();
       if (prepared) return { name: "ruff", command: prepared, prefix: [], source: "prepared" };
-      if (!active || automaticExecution() || !config.trusted)
+      if (!active || automaticExecution())
         throw new Error(
-          "Ruff unavailable: no local or prepared executable; run trusted active MCP diagnostics to prepare it. Hook never downloads tools"
+          "Ruff unavailable: no local or prepared executable; run active MCP diagnostics to prepare it. Hook never downloads tools"
         );
       tool2 = await resolveTool(root, path, ["ruff"]);
       if (tool2.source === "missing") throw new Error(tool2.note);
@@ -2532,7 +1645,6 @@ async function select(root, path, formatting = false, provided, active = false, 
 }
 async function runnerIdentity(root, path, provided) {
   const config = provided ?? await configuration(root);
-  if (!config.trusted) return "untrusted";
   try {
     const runner = await select(root, path, false, config);
     if (!runner) return "none";
@@ -2547,15 +1659,34 @@ async function runnerIdentity(root, path, provided) {
     return "unavailable";
   }
 }
+async function lintReportIdentity(root, path, config) {
+  return hash(
+    JSON.stringify([config.version, executionEnvironment(), await runnerIdentity(root, resolve3(root, path), config)])
+  );
+}
+function clearLintAvailability(root) {
+  for (const key of lintReports.keys()) if (key.startsWith(`${root}:`)) lintReports.delete(key);
+}
+async function lintAvailability(root, path, config) {
+  const report = lintReports.get(`${root}:${resolve3(root, path)}`);
+  return report?.identity === await lintReportIdentity(root, path, config) ? report : { state: "unverified" };
+}
+async function reportLint(root, path, config, reason) {
+  lintReports.set(`${root}:${resolve3(root, path)}`, {
+    identity: await lintReportIdentity(root, path, config),
+    state: reason ? "failed" : "available",
+    ...reason ? { reason } : {}
+  });
+  while (lintReports.size > 1e3) lintReports.delete(lintReports.keys().next().value ?? "");
+}
 async function lintBatch(root, paths, signal, provided, active = false) {
   const config = provided ?? await configuration(root);
   const results = /* @__PURE__ */ new Map();
-  if (!config.trusted) return results;
   const groups = /* @__PURE__ */ new Map();
   for (const path of paths) {
     try {
       const absolute = await workspacePath(root, path);
-      const runner = languageFor(config, path) ? await select(root, absolute, false, config, active, signal) : void 0;
+      const runner = codeLanguage(config, path) ? await select(root, absolute, false, config, active, signal) : void 0;
       if (!runner) {
         results.set(path, {
           path,
@@ -2614,7 +1745,8 @@ async function lintBatch(root, paths, signal, provided, active = false) {
         if (output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `Runner exit ${output.code}`);
         const data = JSON.parse(output.stdout);
         const split = splitLint(runner.name, data, root, cwd);
-        for (const path of paths2)
+        for (const path of paths2) {
+          await reportLint(root, path, config);
           results.set(path, {
             path,
             state: "complete",
@@ -2622,17 +1754,20 @@ async function lintBatch(root, paths, signal, provided, active = false) {
               runner.name,
               split.get(path) ?? (runner.name === "biome" ? { diagnostics: [] } : []),
               path,
-              await readFile5(resolve3(root, path), "utf8")
+              await readFile4(resolve3(root, path), "utf8")
             )
           });
+        }
       } catch (error) {
-        for (const path of paths2)
+        for (const path of paths2) {
+          await reportLint(root, path, config, message(error));
           results.set(path, {
             path,
             state: signal.aborted ? "pending" : "failed",
             findings: [],
             note: `lint: ${message(error)}`
           });
+        }
       }
     }
   }
@@ -2660,31 +1795,27 @@ function splitLint(runner, data, root, cwd) {
 }
 async function formatWithRunner(root, path, signal, provided) {
   const config = provided ?? await configuration(root);
-  if (!config.trusted) return void 0;
   const absolute = await workspacePath(root, path);
   const runner = await select(root, absolute, true, config, true, signal);
   if (!runner || runner.name === "eslint") return void 0;
-  const before = await readFile5(absolute, "utf8");
+  const before = await readFile4(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
   const result = await run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
-  if (await readFile5(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
+  if (await readFile4(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   if (before === result.stdout) return { status: "unchanged", path, modifiedPaths: [] };
   signal.throwIfAborted();
   await writeFile2(absolute, result.stdout);
   return { status: "formatted", path, modifiedPaths: [path] };
 }
 async function preflightRunner(root, path, config, signal) {
-  if (!config.trusted) {
-    if (/\.pyi?$/.test(path)) throw new Error("Python formatting with Ruff requires workspace trust");
-    return false;
-  }
   const runner = await select(root, await workspacePath(root, path), true, config, true, signal);
   if (!runner || runner.name === "eslint") return false;
   const result = await run(runner.command, [...runner.prefix, "--version"], root, signal);
   if (result.code !== 0) throw new Error(`${runner.name} preflight failed: ${result.stderr}`);
   return true;
 }
+var lintReports;
 var init_runners = __esm({
   "src/runners.ts"() {
     "use strict";
@@ -2692,21 +1823,21 @@ var init_runners = __esm({
     init_config();
     init_config_files();
     init_environment();
-    init_process();
-    init_config();
     init_files();
     init_lint_output();
     init_log();
+    init_process();
     init_metrics();
     init_prepared_tools();
     init_process_options();
     init_results();
     init_tool_resolution();
+    lintReports = /* @__PURE__ */ new Map();
   }
 });
 
 // src/identity.ts
-import { readdir as readdir2, readFile as readFile6, stat as stat4 } from "node:fs/promises";
+import { readdir as readdir2, readFile as readFile5, stat as stat4 } from "node:fs/promises";
 import { dirname as dirname4, extname as extname3, join as join8, resolve as resolve4 } from "node:path";
 async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const dirs = /* @__PURE__ */ new Set();
@@ -2738,7 +1869,7 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
       const path = join8(dir, name);
       try {
         if ((await stat4(path)).size > 1024 * 1024) throw new Error("Tool configuration exceeds 1 MiB");
-        contents.push(path, hash(await readFile6(path, { encoding: "utf8", signal })));
+        contents.push(path, hash(await readFile5(path, { encoding: "utf8", signal })));
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       }
@@ -2764,7 +1895,7 @@ var init_identity = __esm({
 // src/directory-lock.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile7, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile6, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join9 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 function alive(pid) {
@@ -2793,9 +1924,9 @@ async function directoryLock(lock, signal, budget = BUDGET.lock) {
         break;
       } catch (error) {
         if (!record(error) || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error["code"]))) throw error;
-        const raw = await readFile7(join9(lock, "owner"), "utf8").catch(() => "{}");
+        const raw = await readFile6(join9(lock, "owner"), "utf8").catch(() => "{}");
         const owner = JSON.parse(raw);
-        if (record(owner) && typeof owner["pid"] === "number" && typeof owner["nonce"] === "string" && !alive(owner["pid"]) && await readFile7(join9(lock, "owner"), "utf8").catch(() => "") === raw)
+        if (record(owner) && typeof owner["pid"] === "number" && typeof owner["nonce"] === "string" && !alive(owner["pid"]) && await readFile6(join9(lock, "owner"), "utf8").catch(() => "") === raw)
           await rename3(lock, `${lock}.abandoned-${owner["nonce"]}`).catch(() => void 0);
         if (Date.now() >= deadline) throw new Error("Directory lock busy; retry");
         await delay(10, void 0, { signal });
@@ -2819,11 +1950,11 @@ var init_directory_lock = __esm({
 });
 
 // src/service-identity.ts
-import { readFile as readFile8, realpath as realpath4 } from "node:fs/promises";
+import { readFile as readFile7, realpath as realpath3 } from "node:fs/promises";
 import { homedir as homedir4 } from "node:os";
 import { resolve as resolve5 } from "node:path";
 function bundleIdentity() {
-  bundle ??= readFile8(new URL(import.meta.url), "utf8").then(hash);
+  bundle ??= readFile7(new URL(import.meta.url), "utf8").then(hash);
   return bundle;
 }
 async function workspaceIdentity(root) {
@@ -2831,8 +1962,8 @@ async function workspaceIdentity(root) {
   return hash(
     JSON.stringify([
       process.getuid?.() ?? homedir4(),
-      await realpath4(root),
-      await realpath4(home).catch(() => home),
+      await realpath3(root),
+      await realpath3(home).catch(() => home),
       await bundleIdentity(),
       SERVICE_PROTOCOL
     ])
@@ -2850,7 +1981,7 @@ var init_service_identity = __esm({
 
 // src/metadata.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile9, realpath as realpath5, rename as rename4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
+import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile8, realpath as realpath4, rename as rename4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
 import { join as join10 } from "node:path";
 var empty, Metadata;
@@ -2897,14 +2028,14 @@ var init_metadata = __esm({
         const info = await lstat3(base);
         if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || (info.mode & 63) !== 0))
           throw new Error("Unsafe metadata permissions");
-        const dir = join10(base, await workspaceIdentity(await realpath5(this.root)));
+        const dir = join10(base, await workspaceIdentity(await realpath4(this.root)));
         await mkdir4(dir, { recursive: true, mode: 448 });
         if ((await lstat3(dir)).isSymbolicLink()) throw new Error("Unsafe metadata directory");
         return dir;
       }
       async load(path, id) {
         try {
-          const data = JSON.parse(await readFile9(path, "utf8"));
+          const data = JSON.parse(await readFile8(path, "utf8"));
           if (!record(data) || data["id"] !== id || typeof data["version"] !== "number" || typeof data["turn"] !== "string" || typeof data["generation"] !== "number" || typeof data["configuration"] !== "string" || !record(data["pendingChannels"]) || typeof data["edited"] !== "boolean" || !["delta", "full"].includes(String(data["automaticScope"])))
             throw new Error("Invalid metadata");
           for (const key of ["touched", "current", "pending", "delivery", "blocked"])
@@ -2946,7 +2077,7 @@ var init_metadata = __esm({
         for (const file of await readdir3(dir))
           if (file.endsWith(".json")) {
             try {
-              const value = JSON.parse(await readFile9(join10(dir, file), "utf8"));
+              const value = JSON.parse(await readFile8(join10(dir, file), "utf8"));
               if (record(value) && typeof value["id"] === "string" && value["turn"] !== "__ended__")
                 ids.push(value["id"]);
             } catch {
@@ -2967,7 +2098,7 @@ var init_metadata = __esm({
       }
       async readShared(reference) {
         if (!/^[a-f0-9]{64}$/.test(reference)) throw new Error("Invalid shared reference");
-        const content = await readFile9(join10(await this.dir(), "shared", `${reference}.json`), "utf8");
+        const content = await readFile8(join10(await this.dir(), "shared", `${reference}.json`), "utf8");
         if (hash(content) !== reference) throw new Error("Shared snapshot integrity mismatch");
         return JSON.parse(content);
       }
@@ -3006,13 +2137,13 @@ var init_metadata = __esm({
 });
 
 // src/hook-delivery.ts
-import { readFile as readFile10 } from "node:fs/promises";
+import { readFile as readFile9 } from "node:fs/promises";
 async function queueDelivery(store, state, output, bindings, configuration2, analysis) {
   if (output.kind !== "context" && output.kind !== "block") return;
   const content = output.kind === "context" ? output.context : output.reason;
-  const pages = [];
+  const pages = output.kind === "block" ? [content.slice(0, 8e3)] : [];
   let page = "";
-  for (const line of content.split("\n")) {
+  for (const line of output.kind === "block" ? [] : content.split("\n")) {
     if (page && Buffer.byteLength(`${page}
 ${line}`) > 3500) {
       pages.push(page);
@@ -3039,7 +2170,7 @@ async function consumeDelivery(root, session, event, signal) {
   const store = new Metadata(root);
   const state = await store.read(session);
   const config = await configuration(root);
-  if (!config.trusted || state.turn === "__ended__" || (event === "Stop" || event === "SubagentStop" ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
+  if (!config.valid || state.turn === "__ended__" || (event === "Stop" || event === "SubagentStop" ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
     return { output: { kind: "silent" } };
   const entries = Object.entries(state.outbox);
   if (event === "Stop" || event === "SubagentStop")
@@ -3056,7 +2187,7 @@ async function consumeDelivery(root, session, event, signal) {
       for (const path of paths) {
         signal.throwIfAborted();
         try {
-          if (hash(await readFile10(await workspacePath(root, path), { encoding: "utf8", signal })) !== item.bindings[path])
+          if (hash(await readFile9(await workspacePath(root, path), { encoding: "utf8", signal })) !== item.bindings[path])
             fresh = false;
         } catch (error) {
           signal.throwIfAborted();
@@ -3075,7 +2206,7 @@ async function consumeDelivery(root, session, event, signal) {
       });
       continue;
     }
-    if (item.output.kind === "block" && state.turn !== item.turn) {
+    if (item.output.kind === "block" && (state.turn !== item.turn || config.stopGate !== "introduced-errors")) {
       await acknowledgeDelivery(root, session, id, signal);
       continue;
     }
@@ -3111,7 +2242,7 @@ var init_hook_delivery = __esm({
 });
 
 // src/write-intent.ts
-import { isAbsolute as isAbsolute6, relative as relative3, resolve as resolve6 } from "node:path";
+import { isAbsolute as isAbsolute5, relative as relative3, resolve as resolve6 } from "node:path";
 function isShellTool(input) {
   return /^(?:bash|shell|exec_command|unified_exec)$/.test(
     text(input["tool_name"]).split(".").at(-1)?.toLowerCase() ?? ""
@@ -3148,7 +2279,7 @@ function writeIntent(root, input) {
   paths = [
     ...new Set(
       paths.map((path) => {
-        const absolute = isAbsolute6(path) ? path : resolve6(root, path);
+        const absolute = isAbsolute5(path) ? path : resolve6(root, path);
         if (!inside(root, absolute)) throw new Error("Write target outside workspace");
         return relative3(root, absolute);
       })
@@ -3166,18 +2297,10 @@ var init_write_intent = __esm({
 });
 
 // src/hook-engine.ts
-import { readFile as readFile11 } from "node:fs/promises";
+import { readFile as readFile10 } from "node:fs/promises";
 function renderHook(output) {
   if (output.kind === "silent") return void 0;
   if (output.kind === "block") return { decision: "block", reason: output.reason };
-  if (output.kind === "deny")
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: output.reason
-      }
-    };
   return output.event === "Stop" || output.event === "SubagentStop" || output.event === "SessionStart" ? { systemMessage: output.context } : { hookSpecificOutput: { hookEventName: output.event, additionalContext: output.context } };
 }
 var HookEngine;
@@ -3205,8 +2328,7 @@ var init_hook_engine = __esm({
       }
       hook(input, signal, background = false) {
         const event = text(input["hook_event_name"], "PostToolUse");
-        if (event === "PreToolUse" && (isShellTool(input) || writeIntent(this.root, input).kind !== "write"))
-          return Promise.resolve({ kind: "silent" });
+        if (event === "PreToolUse") return Promise.resolve({ kind: "silent" });
         const task = event === "SessionEnd" ? this.prepare(input, signal, background) : this.queue.then(() => this.prepare(input, signal, background));
         this.queue = task.then(
           () => void 0,
@@ -3216,6 +2338,7 @@ var init_hook_engine = __esm({
           if (typeof prepared === "function") return prepared();
           if (prepared.kind === "context" && text(input["session_id"])) {
             const config = await configuration(this.root);
+            if (prepared.configuration && prepared.configuration !== config.version) return { kind: "silent" };
             await this.store.update(text(input["session_id"]), signal, async (state) => {
               if (state.turn === "__ended__") return false;
               await queueDelivery(this.store, state, prepared, {}, config.version, "");
@@ -3231,10 +2354,14 @@ var init_hook_engine = __esm({
         const id = text(input["session_id"]);
         const event = text(input["hook_event_name"], "PostToolUse");
         const stopping = event === "Stop" || event === "SubagentStop";
-        const context = (value) => ({ kind: "context", event, context: `session=${id}
-${value}` });
-        if (!id)
-          return event === "PreToolUse" ? { kind: "deny", reason: "Codex CodeIntel: missing session_id; cannot establish a pre-edit baseline" } : context("Codex CodeIntel: missing session_id");
+        const context = (value) => ({
+          kind: "context",
+          event,
+          context: `session=${id}
+${value}`,
+          configuration: config.version
+        });
+        if (!id) return { kind: "silent" };
         if (event === "SessionEnd") {
           await this.store.end(id, signal);
           this.dependencies.end(id);
@@ -3244,12 +2371,24 @@ ${value}` });
         const initial = await this.store.read(id);
         if (initial.turn === "__ended__" && event !== "SessionStart") return { kind: "silent" };
         const config = await configuration(this.root);
+        if (initial.configuration && initial.configuration !== config.version) {
+          this.dependencies.end(id);
+          await this.store.update(id, signal, (state2) => {
+            state2.generation++;
+            state2.diagnosticBaseline = null;
+            state2.unresolved = {};
+            state2.shown = {};
+            state2.outbox = {};
+            state2.configuration = config.version;
+          });
+        }
         if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
           return { kind: "silent" };
         const turn = text(input["turn_id"], initial.turn);
         await this.store.update(id, signal, (state2) => {
           if (state2.epoch !== initial.epoch || state2.turn === "__ended__" && event !== "SessionStart") return false;
           if (event === "SessionStart" && state2.turn === "__ended__") state2.turn = "";
+          state2.configuration = config.version;
           if (turn !== state2.turn) {
             state2.turn = turn;
             state2.current = [];
@@ -3257,47 +2396,25 @@ ${value}` });
           }
           return true;
         });
-        if (event === "SessionStart" || event === "PreToolUse") {
-          const intent2 = event === "SessionStart" ? { kind: "read" } : writeIntent(this.root, input);
-          if (intent2.kind === "configuration") return { kind: "silent" };
+        if (event === "SessionStart") {
           try {
-            const baseline = await this.dependencies.projects.baseline(
-              id,
-              intent2.kind === "write" ? intent2.paths : [],
-              executionEnvironment(),
-              signal,
-              intent2.kind === "write" ? Math.max(1, BUDGET.postWait - (Date.now() - began)) : 0
-            );
-            if (intent2.kind === "write" && (baseline.failures.length || baseline.pending.length))
-              return {
-                kind: "deny",
-                reason: `Codex CodeIntel: pre-edit baseline unavailable. ${baseline.failures.join("; ")}${baseline.pending.length ? ` Pending: ${baseline.pending.join(", ")}; retry after check_project run=cached.` : ""} Repair checker configuration or set both automaticDiagnostics modes to off.`
-              };
-            if (!initial.baseline) {
-              const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
-              const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
-              await this.store.update(id, signal, (state2) => {
-                if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
-                state2.baseline ??= reference;
-                return true;
-              });
-            }
+            const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
+            if (!snapshot2.complete)
+              return context("Baseline inventory incomplete; current diagnostics cannot be attributed");
+            const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
+            await this.store.update(id, signal, (state2) => {
+              if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
+              state2.baseline ??= reference;
+              return true;
+            });
+            await this.dependencies.projects.baseline(id, void 0, executionEnvironment(), signal, 0);
             return { kind: "silent" };
           } catch (error) {
-            return intent2.kind === "write" ? { kind: "deny", reason: `Codex CodeIntel: pre-edit baseline unavailable: ${message(error)}` } : context(`Baseline pending: ${message(error)}`);
+            return context(`Baseline unavailable; current diagnostics cannot be attributed: ${message(error)}`);
           }
         }
         const stateBefore = await this.store.read(id);
-        if (!stateBefore.baseline || !stateBefore.diagnosticBaseline) {
-          if (event === "PostToolUse" && !isShellTool(input) && writeIntent(this.root, input).kind === "write")
-            await this.store.update(id, signal, (current) => {
-              current.edited = true;
-            });
-          return context(
-            "Pre-edit baseline missing; current diagnostics cannot be treated as an edit baseline. Run SessionStart/PreToolUse before editing, or disable automatic diagnostics."
-          );
-        }
-        const previous = await this.store.readShared(stateBefore.baseline);
+        const previous = stateBefore.baseline ? await this.store.readShared(stateBefore.baseline) : {};
         if (!record(previous)) throw new Error("Invalid shared snapshot");
         const intent = writeIntent(this.root, input);
         const forced = intent.kind === "write" || intent.kind === "configuration" ? intent.paths ?? [] : [];
@@ -3306,7 +2423,9 @@ ${value}` });
           return context("Change discovery incomplete; pending and unresolved diagnostics retained");
         const changed = [...snapshot.files].filter(([path, content]) => previous[path] !== content).map(([path]) => path);
         const deleted = Object.keys(previous).filter((path) => !snapshot.files.has(path));
-        const sourcePaths = changed.filter((path) => codeLanguage(config, path) && !configurationImpact(path).length);
+        const sourcePaths = [.../* @__PURE__ */ new Set([...changed, ...forced])].filter(
+          (path) => snapshot.files.has(path) && codeLanguage(config, path) && !configurationImpact(path).length
+        );
         const snapshotReference = await this.store.shared(Object.fromEntries(snapshot.files));
         const state = await this.store.update(id, signal, (current) => {
           if (current.generation !== stateBefore.generation || current.epoch !== stateBefore.epoch) return false;
@@ -3340,22 +2459,14 @@ ${value}` });
           return { kind: "silent" };
         const paths = stopping ? [.../* @__PURE__ */ new Set([...state.current, ...state.pending])] : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
         if (!paths.length) return { kind: "silent" };
-        const reliable = await this.dependencies.projects.baseline(id, paths, executionEnvironment(), signal, 0);
-        if (reliable.failures.length || reliable.pending.length) {
-          if (isShellTool(input) && !stateBefore.edited && reliable.failures.some((failure) => failure.includes("Project changed while establishing baseline"))) {
-            await this.store.update(id, signal, (current) => {
-              if (current.epoch !== state.epoch || current.generation !== state.generation) return false;
-              current.diagnosticBaseline = null;
-              delete current.shown["baselineJob"];
-              current.edited = false;
-              return true;
-            });
-          }
-          return context(
-            `Pre-edit diagnostic baseline is not reliable; introduced errors cannot be attributed. ${reliable.failures.join("; ")} Pending: ${reliable.pending.join(", ")}`
-          );
+        let reliable;
+        try {
+          reliable = await this.dependencies.projects.baseline(id, paths, executionEnvironment(), signal, 0);
+        } catch (error) {
+          reliable = { reference: "", findings: [], reliable: {}, covered: [], failures: [message(error)], pending: [] };
         }
-        state.diagnosticBaseline = reliable.reference;
+        state.diagnosticBaseline = reliable.reference || null;
+        const snapshotAnalysis = await analysisIdentity(this.root, paths, config, signal);
         return async () => {
           const output = await this.dependencies.check(
             paths,
@@ -3369,7 +2480,7 @@ ${value}` });
             signal
           );
           if (output.generation !== state.generation) return context("Stale diagnostic generation; pending retained");
-          const baselineData = await this.store.readShared(state.diagnosticBaseline ?? "");
+          const baselineData = state.diagnosticBaseline ? await this.store.readShared(state.diagnosticBaseline) : void 0;
           const baseline = record(baselineData) && Array.isArray(baselineData["results"]) ? baselineData["results"].flatMap(
             (item) => record(item) && Array.isArray(item["findings"]) ? item["findings"] : []
           ) : [];
@@ -3389,11 +2500,34 @@ ${value}` });
           const valid = [];
           for (const result of output.results) {
             try {
-              if (hash(await readFile11(await workspacePath(this.root, result.path), "utf8")) === snapshot.files.get(result.path))
+              if (hash(await readFile10(await workspacePath(this.root, result.path), "utf8")) === snapshot.files.get(result.path))
                 valid.push(result);
             } catch {
             }
           }
+          let gateFindings = [];
+          if (stopping && config.stopGate === "introduced-errors" && reliable.covered.length) {
+            try {
+              gateFindings = await this.dependencies.projects.introduced(
+                id,
+                paths,
+                executionEnvironment(),
+                signal,
+                Math.max(0, BUDGET.stopWait - (Date.now() - began))
+              );
+            } catch {
+            }
+          }
+          if (await analysisIdentity(this.root, paths, await configuration(this.root), signal) !== snapshotAnalysis)
+            return { kind: "silent" };
+          for (let index = valid.length - 1; index >= 0; index--) {
+            const result = valid[index];
+            if (!result) continue;
+            const content = await readFile10(await workspacePath(this.root, result.path), "utf8").catch(() => "");
+            if (hash(content) !== snapshot.files.get(result.path)) valid.splice(index, 1);
+          }
+          if ((await configuration(this.root)).version !== config.version)
+            return context("Configuration changed; diagnostic results stale");
           let feedback = { kind: "silent" };
           const bindings = Object.fromEntries(
             valid.map((result) => [result.path, snapshot.files.get(result.path) ?? ""])
@@ -3408,14 +2542,23 @@ ${value}` });
             if (current.generation !== state.generation || current.epoch !== state.epoch) return false;
             const fresh = [];
             const repaired = [];
+            let unattributed = 0;
+            let introduced = 0;
             for (const result of valid) {
-              const preceding = ledger[result.path] ?? baseline.filter((finding) => finding.path === result.path);
-              const added = addedFindings(preceding, result.findings);
+              const parsers = reliable.reliable[result.path] ?? [];
+              const attributable = result.findings.filter(
+                (finding) => attributableFinding(finding, parsers, baseline)
+              );
+              const unknown = result.findings.filter((finding) => !attributable.includes(finding));
+              const preceding = ledger[result.path] ?? baseline.filter(
+                (finding) => finding.path === result.path && attributableFinding(finding, parsers, baseline)
+              );
+              const added = addedFindings(preceding, attributable);
               const previousIssues = current.unresolved[result.path] ?? [];
               if (result.state === "complete") {
                 const historical = addedFindings(previousIssues, preceding);
-                current.unresolved[result.path] = addedFindings(historical, result.findings);
-                ledger[result.path] = result.findings;
+                current.unresolved[result.path] = addedFindings(historical, attributable);
+                ledger[result.path] = attributable;
                 current.pending = current.pending.filter((path) => path !== result.path);
                 current.delivery = current.delivery.filter((path) => path !== result.path);
                 if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
@@ -3425,18 +2568,24 @@ ${value}` });
               } else {
                 current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
               }
-              const signature = hash(JSON.stringify(added.map(diagnosticKey)));
-              if ((added.length || result.state !== "complete") && current.shown[result.path] !== signature)
-                fresh.push({ ...result, findings: added });
+              const reported = [...added, ...unknown];
+              const signature = hash(
+                JSON.stringify([reported.map(diagnosticKey), result.state, result.channels, result.note])
+              );
+              if ((reported.length || result.state !== "complete") && current.shown[result.path] !== signature) {
+                fresh.push({ ...result, findings: reported });
+                unattributed += unknown.length;
+                introduced += added.length;
+              }
               current.shown[result.path] = signature;
             }
             const unresolved = Object.entries(current.unresolved).filter(([path]) => current.current.includes(path)).flatMap(([, findings]) => findings).filter((finding) => finding.severity === "error");
-            const confirmed = unresolved.filter(
-              (finding) => valid.some(
-                (result) => result.path === finding.path && result.findings.some((item) => diagnosticKey(item) === diagnosticKey(finding))
+            const confirmed = gateFindings.filter(
+              (finding) => finding.severity === "error" && unresolved.some((item) => item.path === finding.path) && valid.some(
+                (result) => result.path === finding.path && result.state === "complete" && reliable.covered.includes(result.path) && result.findings.some((item) => item.severity === "error")
               )
             );
-            if (stopping && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
+            if (stopping && config.stopGate === "introduced-errors" && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
               current.blocked.push(turn || "__turn__");
               feedback = {
                 kind: "block",
@@ -3445,7 +2594,7 @@ ${render([{ path: ".", state: "complete", findings: confirmed }], 1e5, BUDGET.ou
               };
             } else if (fresh.length || repaired.length || stopping && current.pending.length)
               feedback = context(
-                `Automatic delta: introduced=${fresh.flatMap((result) => result.findings).length}; pending=${current.pending.length}
+                `Automatic diagnostics: introduced=${introduced}; unattributed=${unattributed}; pending=${current.pending.length}${unattributed || reliable.failures.length || reliable.pending.length ? "\nCurrent diagnostics cannot be attributed to this turn without a reliable pre-edit baseline for their checker and coverage; ending gate unavailable for these ranges." : ""}
 ${fresh.length ? render(fresh, 1e5, BUDGET.outputBytes) : ""}${repaired.join("\n")}${output.note ? `
 ${output.note}` : ""}`
               );
@@ -4783,9 +3932,995 @@ var init_cargo_manifest_snapshot = __esm({
   }
 });
 
+// node_modules/smol-toml/dist/date.js
+var DATE_TIME_RE, TomlDate;
+var init_date = __esm({
+  "node_modules/smol-toml/dist/date.js"() {
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+    DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
+    TomlDate = class _TomlDate extends Date {
+      #hasDate = false;
+      #hasTime = false;
+      #offset = null;
+      constructor(date) {
+        let hasDate = true;
+        let hasTime = true;
+        let offset = "Z";
+        if (typeof date === "string") {
+          let match = date.match(DATE_TIME_RE);
+          if (match) {
+            if (!match[1]) {
+              hasDate = false;
+              date = `0000-01-01T${date}`;
+            }
+            hasTime = !!match[2];
+            hasTime && date[10] === " " && (date = date.replace(" ", "T"));
+            if (match[2] && +match[2] > 23) {
+              date = "";
+            } else {
+              offset = match[3] || null;
+              date = date.toUpperCase();
+              if (!offset && hasTime)
+                date += "Z";
+            }
+          } else {
+            date = "";
+          }
+        }
+        super(date);
+        if (!isNaN(this.getTime())) {
+          this.#hasDate = hasDate;
+          this.#hasTime = hasTime;
+          this.#offset = offset;
+        }
+      }
+      isDateTime() {
+        return this.#hasDate && this.#hasTime;
+      }
+      isLocal() {
+        return !this.#hasDate || !this.#hasTime || !this.#offset;
+      }
+      isDate() {
+        return this.#hasDate && !this.#hasTime;
+      }
+      isTime() {
+        return this.#hasTime && !this.#hasDate;
+      }
+      isValid() {
+        return this.#hasDate || this.#hasTime;
+      }
+      toISOString() {
+        let iso = super.toISOString();
+        if (this.isDate())
+          return iso.slice(0, 10);
+        if (this.isTime())
+          return iso.slice(11, 23);
+        if (this.#offset === null)
+          return iso.slice(0, -1);
+        if (this.#offset === "Z")
+          return iso;
+        let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
+        offset = this.#offset[0] === "-" ? offset : -offset;
+        let offsetDate = new Date(this.getTime() - offset * 6e4);
+        return offsetDate.toISOString().slice(0, -1) + this.#offset;
+      }
+      static wrapAsOffsetDateTime(jsDate, offset = "Z") {
+        let date = new _TomlDate(jsDate);
+        date.#offset = offset;
+        return date;
+      }
+      static wrapAsLocalDateTime(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#offset = null;
+        return date;
+      }
+      static wrapAsLocalDate(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#hasTime = false;
+        date.#offset = null;
+        return date;
+      }
+      static wrapAsLocalTime(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#hasDate = false;
+        date.#offset = null;
+        return date;
+      }
+    };
+  }
+});
+
+// node_modules/smol-toml/dist/error.js
+function getLineColFromPtr(string2, ptr) {
+  let lines = string2.slice(0, ptr).split(/\r\n|\n|\r/g);
+  return [lines.length, lines.pop().length + 1];
+}
+function makeCodeBlock(string2, line, column) {
+  let lines = string2.split(/\r\n|\n|\r/g);
+  let codeblock = "";
+  let numberLen = (Math.log10(line + 1) | 0) + 1;
+  for (let i = line - 1; i <= line + 1; i++) {
+    let l = lines[i - 1];
+    if (!l)
+      continue;
+    codeblock += i.toString().padEnd(numberLen, " ");
+    codeblock += ":  ";
+    codeblock += l;
+    codeblock += "\n";
+    if (i === line) {
+      codeblock += " ".repeat(numberLen + column + 2);
+      codeblock += "^\n";
+    }
+  }
+  return codeblock;
+}
+var TomlError;
+var init_error = __esm({
+  "node_modules/smol-toml/dist/error.js"() {
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+    TomlError = class extends Error {
+      line;
+      column;
+      codeblock;
+      constructor(message2, options) {
+        const [line, column] = getLineColFromPtr(options.toml, options.ptr);
+        const codeblock = makeCodeBlock(options.toml, line, column);
+        super(`Invalid TOML document: ${message2}
+
+${codeblock}`, options);
+        this.line = line;
+        this.column = column;
+        this.codeblock = codeblock;
+      }
+    };
+  }
+});
+
+// node_modules/smol-toml/dist/primitive.js
+function parseString(str, ptr) {
+  let c = str[ptr++];
+  let first = c;
+  let isLiteral = c === "'";
+  let isMultiline = c === str[ptr] && c === str[ptr + 1];
+  if (isMultiline) {
+    if (str[ptr += 2] === "\n")
+      ptr++;
+    else if (str[ptr] === "\r" && str[ptr + 1] === "\n")
+      ptr += 2;
+  }
+  let parsed = "";
+  let sliceStart = ptr;
+  let state = 0;
+  for (let i = ptr; i < str.length; i++) {
+    c = str[i];
+    if (isMultiline && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
+      state = state && 3;
+    } else if (c < " " && c !== "	" || c === "\x7F") {
+      throw new TomlError("control characters are not allowed in strings", {
+        toml: str,
+        ptr: i
+      });
+    } else if ((!state || state === 3) && c === first && (!isMultiline || str[i + 1] === first && str[i + 2] === first)) {
+      if (isMultiline) {
+        if (str[i + 3] === first)
+          i++;
+        if (str[i + 3] === first)
+          i++;
+      }
+      return [
+        // If we're in a newline escape still, then there's nothing to add.
+        // Also try to avoid concat if there's nothing to add to parsed, or nothing has been added to parsed.
+        state ? parsed : parsed + str.slice(sliceStart, i),
+        i + (isMultiline ? 3 : 1)
+      ];
+    } else if (!state) {
+      if (!isLiteral && c === "\\") {
+        parsed += str.slice(sliceStart, sliceStart = i);
+        state = 1;
+      }
+    } else if (state === 1) {
+      if (c === "x" || c === "u" || c === "U") {
+        let value = 0;
+        let len = c === "x" ? 2 : c === "u" ? 4 : 8;
+        for (let j = 0; j < len; j++, i++) {
+          let hex = str.charCodeAt(i + 1);
+          let digit = (
+            /* 0-9 */
+            hex >= 48 && hex <= 57 ? hex - 48 : (
+              /* A-F */
+              hex >= 65 && hex <= 70 ? hex - 65 + 10 : (
+                /* a-f */
+                hex >= 97 && hex <= 102 ? hex - 97 + 10 : -1
+              )
+            )
+          );
+          if (digit < 0)
+            throw new TomlError("invalid non-hex character in unicode escape", { toml: str, ptr: i + 1 });
+          value = value << 4 | digit;
+        }
+        if (value < 0 || value > 1114111 || value >= 55296 && value <= 57343) {
+          throw new TomlError("invalid unicode escape", { toml: str, ptr: i });
+        }
+        parsed += String.fromCodePoint(value);
+        sliceStart = i + 1;
+        state = 0;
+      } else if (c === " " || c === "	") {
+        state = 2;
+      } else {
+        if (c === "b")
+          parsed += "\b";
+        else if (c === "t")
+          parsed += "	";
+        else if (c === "n")
+          parsed += "\n";
+        else if (c === "f")
+          parsed += "\f";
+        else if (c === "r")
+          parsed += "\r";
+        else if (c === "e")
+          parsed += "\x1B";
+        else if (c === '"')
+          parsed += '"';
+        else if (c === "\\")
+          parsed += "\\";
+        else
+          throw new TomlError("unrecognized escape sequence", { toml: str, ptr: i });
+        sliceStart = i + 1;
+        state = 0;
+      }
+    } else if (c !== " " && c !== "	") {
+      if (state === 2) {
+        throw new TomlError("invalid escape: only line-ending whitespace may be escaped", {
+          toml: str,
+          ptr: sliceStart
+        });
+      }
+      state = !isLiteral && c === "\\" ? 1 : 0;
+      sliceStart = i;
+    }
+  }
+  throw new TomlError("unfinished string", { toml: str, ptr });
+}
+function parseValue(value, toml, ptr, integersAsBigInt) {
+  if (value === "true")
+    return true;
+  if (value === "false")
+    return false;
+  if (value === "-inf")
+    return -Infinity;
+  if (value === "inf" || value === "+inf")
+    return Infinity;
+  if (value === "nan" || value === "+nan" || value === "-nan")
+    return NaN;
+  if (value === "-0")
+    return integersAsBigInt ? 0n : 0;
+  let isInt = INT_REGEX.test(value);
+  if (isInt || FLOAT_REGEX.test(value)) {
+    if (LEADING_ZERO.test(value)) {
+      throw new TomlError("leading zeroes are not allowed", {
+        toml,
+        ptr
+      });
+    }
+    value = value.replace(/_/g, "");
+    let numeric = +value;
+    if (isNaN(numeric)) {
+      throw new TomlError("invalid number", {
+        toml,
+        ptr
+      });
+    }
+    if (isInt) {
+      if ((isInt = !Number.isSafeInteger(numeric)) && !integersAsBigInt) {
+        throw new TomlError("integer value cannot be represented losslessly", {
+          toml,
+          ptr
+        });
+      }
+      if (isInt || integersAsBigInt === true)
+        numeric = BigInt(value);
+    }
+    return numeric;
+  }
+  const date = new TomlDate(value);
+  if (!date.isValid()) {
+    throw new TomlError("invalid value", {
+      toml,
+      ptr
+    });
+  }
+  return date;
+}
+var INT_REGEX, FLOAT_REGEX, LEADING_ZERO;
+var init_primitive = __esm({
+  "node_modules/smol-toml/dist/primitive.js"() {
+    init_date();
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+    INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
+    FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
+    LEADING_ZERO = /^[+-]?0[0-9_]/;
+  }
+});
+
+// node_modules/smol-toml/dist/util.js
+function indexOfNewline(str, start = 0, end = str.length) {
+  let idx = str.indexOf("\n", start);
+  if (str[idx - 1] === "\r")
+    idx--;
+  return idx <= end ? idx : -1;
+}
+function skipComment(str, ptr) {
+  for (let i = ptr; i < str.length; i++) {
+    let c = str[i];
+    if (c === "\n")
+      return i;
+    if (c === "\r" && str[i + 1] === "\n")
+      return i + 1;
+    if (c < " " && c !== "	" || c === "\x7F") {
+      throw new TomlError("control characters are not allowed in comments", {
+        toml: str,
+        ptr
+      });
+    }
+  }
+  return str.length;
+}
+function skipVoid(str, ptr, banNewLines, banComments) {
+  let c;
+  while (1) {
+    while ((c = str[ptr]) === " " || c === "	" || !banNewLines && (c === "\n" || c === "\r" && str[ptr + 1] === "\n"))
+      ptr++;
+    if (banComments || c !== "#")
+      break;
+    ptr = skipComment(str, ptr);
+  }
+  return ptr;
+}
+function skipUntil(str, ptr, sep4, end, banNewLines = false) {
+  if (!end) {
+    ptr = indexOfNewline(str, ptr);
+    return ptr < 0 ? str.length : ptr;
+  }
+  for (let i = ptr; i < str.length; i++) {
+    let c = str[i];
+    if (c === "#") {
+      i = indexOfNewline(str, i);
+    } else if (c === sep4) {
+      return i + 1;
+    } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
+      return i;
+    }
+  }
+  throw new TomlError("cannot find end of structure", {
+    toml: str,
+    ptr
+  });
+}
+var init_util = __esm({
+  "node_modules/smol-toml/dist/util.js"() {
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+  }
+});
+
+// node_modules/smol-toml/dist/extract.js
+function sliceAndTrimEndOf(str, startPtr, endPtr) {
+  let value = str.slice(startPtr, endPtr);
+  let commentIdx = value.indexOf("#");
+  if (commentIdx > -1) {
+    skipComment(str, commentIdx);
+    value = value.slice(0, commentIdx);
+  }
+  return [value.trimEnd(), commentIdx];
+}
+function extractValue(str, ptr, end, depth, integersAsBigInt) {
+  if (depth === 0) {
+    throw new TomlError("document contains excessively nested structures. aborting.", {
+      toml: str,
+      ptr
+    });
+  }
+  let c = str[ptr];
+  if (c === "[" || c === "{") {
+    let [value, endPtr2] = c === "[" ? parseArray(str, ptr, depth, integersAsBigInt) : parseInlineTable(str, ptr, depth, integersAsBigInt);
+    if (end) {
+      endPtr2 = skipVoid(str, endPtr2);
+      if (str[endPtr2] === ",")
+        endPtr2++;
+      else if (str[endPtr2] !== end) {
+        throw new TomlError("expected comma or end of structure", {
+          toml: str,
+          ptr: endPtr2
+        });
+      }
+    }
+    return [value, endPtr2];
+  }
+  if (c === '"' || c === "'") {
+    let [parsed, endPtr2] = parseString(str, ptr);
+    if (end) {
+      endPtr2 = skipVoid(str, endPtr2);
+      if (str[endPtr2] && str[endPtr2] !== "," && str[endPtr2] !== end && str[endPtr2] !== "\n" && str[endPtr2] !== "\r") {
+        throw new TomlError("unexpected character encountered", {
+          toml: str,
+          ptr: endPtr2
+        });
+      }
+      if (str[endPtr2] === ",")
+        endPtr2++;
+    }
+    return [parsed, endPtr2];
+  }
+  let endPtr = skipUntil(str, ptr, ",", end);
+  let slice = sliceAndTrimEndOf(str, ptr, endPtr - (str[endPtr - 1] === "," ? 1 : 0));
+  if (!slice[0]) {
+    throw new TomlError("incomplete key-value declaration: no value specified", {
+      toml: str,
+      ptr
+    });
+  }
+  if (end && slice[1] > -1) {
+    endPtr = skipVoid(str, ptr + slice[1]);
+    if (str[endPtr] === ",")
+      endPtr++;
+  }
+  return [
+    parseValue(slice[0], str, ptr, integersAsBigInt),
+    endPtr
+  ];
+}
+var init_extract = __esm({
+  "node_modules/smol-toml/dist/extract.js"() {
+    init_primitive();
+    init_struct();
+    init_util();
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+  }
+});
+
+// node_modules/smol-toml/dist/struct.js
+function parseKey(str, ptr, end = "=") {
+  let dot = ptr - 1;
+  let parsed = [];
+  let endPtr = str.indexOf(end, ptr);
+  if (endPtr < 0) {
+    throw new TomlError("incomplete key-value: cannot find end of key", {
+      toml: str,
+      ptr
+    });
+  }
+  do {
+    let c = str[ptr = ++dot];
+    if (c !== " " && c !== "	") {
+      if (c === '"' || c === "'") {
+        if (c === str[ptr + 1] && c === str[ptr + 2]) {
+          throw new TomlError("multiline strings are not allowed in keys", {
+            toml: str,
+            ptr
+          });
+        }
+        let [part, eos] = parseString(str, ptr);
+        dot = str.indexOf(".", eos);
+        let strEnd = str.slice(eos, dot < 0 || dot > endPtr ? endPtr : dot);
+        let newLine = indexOfNewline(strEnd);
+        if (newLine > -1) {
+          throw new TomlError("newlines are not allowed in keys", {
+            toml: str,
+            ptr: ptr + dot + newLine
+          });
+        }
+        if (strEnd.trimStart()) {
+          throw new TomlError("found extra tokens after the string part", {
+            toml: str,
+            ptr: eos
+          });
+        }
+        if (endPtr < eos) {
+          endPtr = str.indexOf(end, eos);
+          if (endPtr < 0) {
+            throw new TomlError("incomplete key-value: cannot find end of key", {
+              toml: str,
+              ptr
+            });
+          }
+        }
+        parsed.push(part);
+      } else {
+        dot = str.indexOf(".", ptr);
+        let part = str.slice(ptr, dot < 0 || dot > endPtr ? endPtr : dot);
+        if (!KEY_PART_RE.test(part)) {
+          throw new TomlError("only letter, numbers, dashes and underscores are allowed in keys", {
+            toml: str,
+            ptr
+          });
+        }
+        parsed.push(part.trimEnd());
+      }
+    }
+  } while (dot + 1 && dot < endPtr);
+  return [parsed, skipVoid(str, endPtr + 1, true, true)];
+}
+function parseInlineTable(str, ptr, depth, integersAsBigInt) {
+  let res = {};
+  let seen = /* @__PURE__ */ new Set();
+  let c;
+  ptr++;
+  while ((c = str[ptr++]) !== "}" && c) {
+    if (c === ",") {
+      throw new TomlError("expected value, found comma", {
+        toml: str,
+        ptr: ptr - 1
+      });
+    } else if (c === "#")
+      ptr = skipComment(str, ptr);
+    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
+      let k;
+      let t = res;
+      let hasOwn = false;
+      let [key, keyEndPtr] = parseKey(str, ptr - 1);
+      for (let i = 0; i < key.length; i++) {
+        if (i)
+          t = hasOwn ? t[k] : t[k] = {};
+        k = key[i];
+        if ((hasOwn = Object.hasOwn(t, k)) && (typeof t[k] !== "object" || seen.has(t[k]))) {
+          throw new TomlError("trying to redefine an already defined value", {
+            toml: str,
+            ptr
+          });
+        }
+        if (!hasOwn && k === "__proto__") {
+          Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
+        }
+      }
+      if (hasOwn) {
+        throw new TomlError("trying to redefine an already defined value", {
+          toml: str,
+          ptr
+        });
+      }
+      let [value, valueEndPtr] = extractValue(str, keyEndPtr, "}", depth - 1, integersAsBigInt);
+      seen.add(value);
+      t[k] = value;
+      ptr = valueEndPtr;
+    }
+  }
+  if (!c) {
+    throw new TomlError("unfinished table encountered", {
+      toml: str,
+      ptr
+    });
+  }
+  return [res, ptr];
+}
+function parseArray(str, ptr, depth, integersAsBigInt) {
+  let res = [];
+  let c;
+  ptr++;
+  while ((c = str[ptr++]) !== "]" && c) {
+    if (c === ",") {
+      throw new TomlError("expected value, found comma", {
+        toml: str,
+        ptr: ptr - 1
+      });
+    } else if (c === "#")
+      ptr = skipComment(str, ptr);
+    else if (c !== " " && c !== "	" && c !== "\n" && c !== "\r") {
+      let e = extractValue(str, ptr - 1, "]", depth - 1, integersAsBigInt);
+      res.push(e[0]);
+      ptr = e[1];
+    }
+  }
+  if (!c) {
+    throw new TomlError("unfinished array encountered", {
+      toml: str,
+      ptr
+    });
+  }
+  return [res, ptr];
+}
+var KEY_PART_RE;
+var init_struct = __esm({
+  "node_modules/smol-toml/dist/struct.js"() {
+    init_primitive();
+    init_extract();
+    init_util();
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+    KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
+  }
+});
+
+// node_modules/smol-toml/dist/parse.js
+function peekTable(key, table, meta, type) {
+  let t = table;
+  let m = meta;
+  let k;
+  let hasOwn = false;
+  let state;
+  for (let i = 0; i < key.length; i++) {
+    if (i) {
+      t = hasOwn ? t[k] : t[k] = {};
+      m = (state = m[k]).c;
+      if (type === 0 && (state.t === 1 || state.t === 2)) {
+        return null;
+      }
+      if (state.t === 2) {
+        let l = t.length - 1;
+        t = t[l];
+        m = m[l].c;
+      }
+    }
+    k = key[i];
+    if ((hasOwn = Object.hasOwn(t, k)) && m[k]?.t === 0 && m[k]?.d) {
+      return null;
+    }
+    if (!hasOwn) {
+      if (k === "__proto__") {
+        Object.defineProperty(t, k, { enumerable: true, configurable: true, writable: true });
+        Object.defineProperty(m, k, { enumerable: true, configurable: true, writable: true });
+      }
+      m[k] = {
+        t: i < key.length - 1 && type === 2 ? 3 : type,
+        d: false,
+        i: 0,
+        c: {}
+      };
+    }
+  }
+  state = m[k];
+  if (state.t !== type && !(type === 1 && state.t === 3)) {
+    return null;
+  }
+  if (type === 2) {
+    if (!state.d) {
+      state.d = true;
+      t[k] = [];
+    }
+    t[k].push(t = {});
+    state.c[state.i++] = state = { t: 1, d: false, i: 0, c: {} };
+  }
+  if (state.d) {
+    return null;
+  }
+  state.d = true;
+  if (type === 1) {
+    t = hasOwn ? t[k] : t[k] = {};
+  } else if (type === 0 && hasOwn) {
+    return null;
+  }
+  return [k, t, state.c];
+}
+function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
+  let res = {};
+  let meta = {};
+  let tbl = res;
+  let m = meta;
+  for (let ptr = skipVoid(toml, 0); ptr < toml.length; ) {
+    if (toml[ptr] === "[") {
+      let isTableArray = toml[++ptr] === "[";
+      let k = parseKey(toml, ptr += +isTableArray, "]");
+      if (isTableArray) {
+        if (toml[k[1] - 1] !== "]") {
+          throw new TomlError("expected end of table declaration", {
+            toml,
+            ptr: k[1] - 1
+          });
+        }
+        k[1]++;
+      }
+      let p = peekTable(
+        k[0],
+        res,
+        meta,
+        isTableArray ? 2 : 1
+        /* Type.EXPLICIT */
+      );
+      if (!p) {
+        throw new TomlError("trying to redefine an already defined table or value", {
+          toml,
+          ptr
+        });
+      }
+      m = p[2];
+      tbl = p[1];
+      ptr = k[1];
+    } else {
+      let k = parseKey(toml, ptr);
+      let p = peekTable(
+        k[0],
+        tbl,
+        m,
+        0
+        /* Type.DOTTED */
+      );
+      if (!p) {
+        throw new TomlError("trying to redefine an already defined table or value", {
+          toml,
+          ptr
+        });
+      }
+      let v = extractValue(toml, k[1], void 0, maxDepth, integersAsBigInt);
+      p[1][p[0]] = v[0];
+      ptr = v[1];
+    }
+    ptr = skipVoid(toml, ptr, true);
+    if (toml[ptr] && toml[ptr] !== "\n" && toml[ptr] !== "\r") {
+      throw new TomlError("each key-value declaration must be followed by an end-of-line", {
+        toml,
+        ptr
+      });
+    }
+    ptr = skipVoid(toml, ptr);
+  }
+  return res;
+}
+var init_parse = __esm({
+  "node_modules/smol-toml/dist/parse.js"() {
+    init_struct();
+    init_extract();
+    init_util();
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+  }
+});
+
+// node_modules/smol-toml/dist/stringify.js
+var init_stringify = __esm({
+  "node_modules/smol-toml/dist/stringify.js"() {
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+  }
+});
+
+// node_modules/smol-toml/dist/index.js
+var init_dist = __esm({
+  "node_modules/smol-toml/dist/index.js"() {
+    init_parse();
+    init_stringify();
+    init_date();
+    init_error();
+    /*!
+     * Copyright (c) Squirrel Chat et al., All rights reserved.
+     * SPDX-License-Identifier: BSD-3-Clause
+     *
+     * Redistribution and use in source and binary forms, with or without
+     * modification, are permitted provided that the following conditions are met:
+     *
+     * 1. Redistributions of source code must retain the above copyright notice, this
+     *    list of conditions and the following disclaimer.
+     * 2. Redistributions in binary form must reproduce the above copyright notice,
+     *    this list of conditions and the following disclaimer in the
+     *    documentation and/or other materials provided with the distribution.
+     * 3. Neither the name of the copyright holder nor the names of its contributors
+     *    may be used to endorse or promote products derived from this software without
+     *    specific prior written permission.
+     *
+     * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+     * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+     * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+     * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+     * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+     * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+     * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+     * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+     * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+     */
+  }
+});
+
 // src/lsp/cargo-metadata-parser.ts
 import { readFileSync as readFileSync4, realpathSync, statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute7, join as join12, relative as relative4, sep as sep2 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join12, relative as relative4, sep as sep2 } from "node:path";
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -4805,7 +4940,7 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile12(path) {
+function readFile11(path) {
   try {
     return readFileSync4(path, "utf8");
   } catch {
@@ -4813,7 +4948,7 @@ function readFile12(path) {
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile12(path);
+  const content = readFile11(path);
   if (content === void 0) return void 0;
   try {
     return Object.hasOwn(parse(content), "workspace") ? "workspace" : "ordinary";
@@ -4823,7 +4958,7 @@ function readCargoManifestKind(path) {
 }
 function isContainedPath(root, path) {
   const relativePath = relative4(root, path);
-  return relativePath === "" || !isAbsolute7(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
+  return relativePath === "" || !isAbsolute6(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
 }
 function parseCargoMetadata(output) {
   let parsed;
@@ -5303,7 +5438,7 @@ var init_workspace_root = __esm({
 });
 
 // src/language.ts
-import { readFile as readFile13, writeFile as writeFile5 } from "node:fs/promises";
+import { readFile as readFile12, writeFile as writeFile5 } from "node:fs/promises";
 import { dirname as dirname8, extname as extname5, relative as relative5, resolve as resolve9 } from "node:path";
 import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
 function diagnosticUriKey(uri) {
@@ -5336,6 +5471,7 @@ var init_language = __esm({
     Client = class extends LspClient {
       constructor() {
         super(...arguments);
+        this.diagnosticsVerified = false;
         this.stopping = false;
         this.published = /* @__PURE__ */ new Map();
         this.capabilities = {};
@@ -5347,6 +5483,9 @@ var init_language = __esm({
         this.proven = /* @__PURE__ */ new Set();
         this.versions = /* @__PURE__ */ new Map();
         this.dirty = /* @__PURE__ */ new Set();
+      }
+      workspaceRoot() {
+        return this.root;
       }
       serverIdentity() {
         return this.server.id;
@@ -5481,7 +5620,7 @@ var init_language = __esm({
       }
       async openFile(path) {
         const uri = pathToFileURL3(path).href;
-        const content = await readFile13(path, "utf8");
+        const content = await readFile12(path, "utf8");
         const previous = this.versions.get(uri);
         if (previous?.content === content && !this.dirty.has(uri)) return;
         this.dirty.delete(uri);
@@ -5634,7 +5773,7 @@ var init_language = __esm({
       }
       async update(config) {
         for (const managed of this.manager.getSnapshot()) {
-          if (config.trusted !== this.config.trusted || Object.keys(this.config.servers).some((language) => {
+          if (Object.keys(this.config.servers).some((language) => {
             const previous = this.config.servers[language];
             return previous && managed.serverId.startsWith(`${previous.id}:`) && JSON.stringify(previous) !== JSON.stringify(config.servers[language]);
           }))
@@ -5655,19 +5794,49 @@ var init_language = __esm({
         }
       }
       async status(path) {
-        const resolved = await resolveServer(this.root, path, this.config);
-        const failure = [...this.failures.values()].filter((entry) => entry.identity === resolved.tool.identity && inside(entry.root, resolve9(this.root, path))).sort((a, b) => b.root.length - a.root.length)[0];
+        let resolved;
+        let reason = "";
+        try {
+          resolved = await resolveServer(this.root, path, this.config);
+        } catch (error) {
+          reason = message(error);
+        }
+        const failure = resolved ? [...this.failures.values()].filter(
+          (entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve9(this.root, path))
+        ).sort((a, b) => b.root.length - a.root.length)[0] : void 0;
+        const identity = resolved ? `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}` : "";
+        const client = [...this.clients].find(
+          (client2) => client2.isAlive() && client2.serverIdentity() === identity && inside(client2.workspaceRoot(), resolve9(this.root, path))
+        );
+        let lint;
+        try {
+          lint = await select(this.root, resolve9(this.root, path), false, this.config) ?? {
+            unavailable: "Lint disabled or no matching runner"
+          };
+        } catch (error) {
+          lint = { unavailable: message(error) };
+        }
+        const lintHealth = await lintAvailability(this.root, path, this.config);
+        const formatter = await select(this.root, resolve9(this.root, path), true, this.config).catch(() => void 0);
+        const unavailable = !this.config.valid || !resolved || resolved.tool.source === "missing" || !!failure;
+        const status = (operation) => unavailable ? "unavailable" : !client ? "unverified" : client.supports(operation) ? "available" : "unsupported";
         return {
+          path,
           ...resolved,
-          lint: this.config.trusted ? await select(this.root, resolve9(this.root, path), false, this.config).catch((error) => ({
-            unavailable: message(error)
-          })) ?? { unavailable: "No configured lint runner" } : { unavailable: "Workspace trust required" },
-          running: [...this.clients].some(
-            (client) => client.isAlive() && client.serverIdentity() === `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}`
-          ),
-          failure: failure && Date.now() < failure.retryAt ? failure.reason : void 0,
+          language: resolved?.language ?? codeLanguage(this.config, path),
+          lint: record(lint) ? { ...lint, verification: lintHealth } : lint,
+          capabilities: {
+            diagnostics: unavailable ? "unavailable" : client?.diagnosticsVerified ? "available" : "unverified",
+            navigation: status("definition"),
+            rename: status("rename"),
+            formatting: !this.config.valid ? "unavailable" : !this.config.formattingEnabled ? "disabled" : formatter && formatter.name !== "eslint" ? "unverified" : status("format"),
+            lint: !this.config.valid || record(lint) && lint["unavailable"] ? "unavailable" : lintHealth.state
+          },
+          running: !!client,
+          verified: !!client,
+          failure: !this.config.valid ? "Configuration error; execution disabled" : failure?.reason ?? (resolved?.tool.source === "missing" ? resolved.tool.note : reason || void 0),
           retryAt: failure?.retryAt,
-          recovery: "Install or repair the local tool, then lsp_status refresh=true; failure cooldown is 30/60/120 seconds, capped at 300 seconds"
+          recovery: "Use $setup-lsp to configure, install or repair tools; then lsp_status refresh=true. Status does not start or download tools. Existing commands that fail never fall back."
         };
       }
       async preflight(path, signal, operation) {
@@ -5687,8 +5856,6 @@ var init_language = __esm({
       async withLspClient(path, fn, _tool, options) {
         const resolved = await resolveServer(this.root, path, this.config);
         if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
-        if (resolved.tool.source === "temporary" && !this.config.trusted)
-          throw new Error("Temporary tool execution requires workspace trust in Codex user config.toml");
         let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
         if (!inside(this.root, root)) root = this.root;
         if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
@@ -5737,6 +5904,7 @@ var init_language = __esm({
               if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
               const absolute = await workspacePath(this.root, path);
               const result = await measured("diagnostics/wait", () => client.collect(absolute, signal));
+              client.diagnosticsVerified = result.ready;
               return {
                 path,
                 state: result.ready ? "complete" : "pending",
@@ -5837,13 +6005,13 @@ var init_language = __esm({
         for (const [uri, edits] of changes) {
           const path = await workspacePath(this.root, fileURLToPath2(uri));
           await this.preflight(path, signal);
-          const before = await readFile13(path, "utf8");
+          const before = await readFile12(path, "utf8");
           pending.push({ path, before, after: applyTextChanges(before, edits) });
         }
         if ((await inventory(this.root, 1e4, signal)).version !== version)
           throw new Error("Workspace changed during rename; retry");
         for (const item of pending)
-          if (await readFile13(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
+          if (await readFile12(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
         signal.throwIfAborted();
         const modified = [];
         try {
@@ -5859,7 +6027,7 @@ var init_language = __esm({
       }
       async format(path, signal) {
         const absolute = await workspacePath(this.root, path);
-        const before = await readFile13(absolute, "utf8");
+        const before = await readFile12(absolute, "utf8");
         const edits = await this.withLspClient(
           absolute,
           async (client) => {
@@ -5870,7 +6038,7 @@ var init_language = __esm({
           { manager: this.manager, signal }
         );
         const after = applyTextChanges(before, edits);
-        if (await readFile13(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
+        if (await readFile12(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
         if (after === before) return { status: "unchanged", path, modifiedPaths: [] };
         signal.throwIfAborted();
         await writeFile5(absolute, after);
@@ -5883,504 +6051,10 @@ var init_language = __esm({
   }
 });
 
-// src/project-output.ts
-import { readFile as readFile14 } from "node:fs/promises";
-import { relative as relative6, resolve as resolve10 } from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
-async function projectOutput(check, output, root, cwd) {
-  const pathOf = (file) => {
-    const absolute = resolve10(cwd, file);
-    if (!inside(root, absolute)) throw new Error("Checker diagnostic outside workspace");
-    return relative6(root, absolute);
-  };
-  if (check.parser === "sarif") {
-    if (!output.trim()) return [];
-    const data = JSON.parse(output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1));
-    if (!record(data) || !Array.isArray(data["runs"])) throw new Error("Malformed SARIF checker output");
-    const findings2 = [];
-    for (const run2 of data["runs"]) {
-      if (!record(run2) || !Array.isArray(run2["results"])) throw new Error("Malformed SARIF run");
-      for (const result of run2["results"]) {
-        if (!record(result) || !["error", "warning"].includes(String(result["level"]))) continue;
-        const locations = result["locations"];
-        const first = Array.isArray(locations) ? locations[0] : void 0;
-        const physical = record(first) && record(first["physicalLocation"]) ? first["physicalLocation"] : {};
-        const artifact = record(physical["artifactLocation"]) ? physical["artifactLocation"] : {};
-        const region = record(physical["region"]) ? physical["region"] : {};
-        const uri = text(artifact["uri"]);
-        if (!uri || !record(result["message"])) throw new Error("Unlocated SARIF diagnostic");
-        findings2.push({
-          path: pathOf(uri.startsWith("file:") ? fileURLToPath3(uri) : decodeURI(uri)),
-          line: Number(region["startLine"] ?? 1),
-          column: Number(region["startColumn"] ?? 1),
-          severity: result["level"] === "error" ? "error" : "warning",
-          source: `compiler/${text(result["ruleId"], "diagnostic")}`,
-          message: text(result["message"]["text"])
-        });
-      }
-    }
-    return findings2;
-  }
-  if (["ruff", "eslint", "biome"].includes(check.parser)) {
-    const split = splitLint(check.parser, JSON.parse(output), root, cwd);
-    const findings2 = [];
-    for (const [path, data] of split)
-      findings2.push(...parseLint(check.parser, data, path, await readFile14(resolve10(root, path), "utf8")));
-    return findings2;
-  }
-  if (check.parser === "json") {
-    const data = JSON.parse(output);
-    if (!record(data) || !Array.isArray(data["diagnostics"]))
-      throw new Error("Custom checker requires {diagnostics: [...]} output");
-    return data["diagnostics"].map((item) => {
-      if (!record(item) || typeof item["path"] !== "string" || typeof item["message"] !== "string" || !["error", "warning"].includes(String(item["severity"])) || !Number.isInteger(item["line"]) || Number(item["line"]) < 1 || !Number.isInteger(item["column"]) || Number(item["column"]) < 1)
-        throw new Error("Malformed custom diagnostic");
-      return {
-        path: pathOf(item["path"]),
-        message: item["message"],
-        line: Number(item["line"]),
-        column: Number(item["column"]),
-        severity: item["severity"] === "error" ? "error" : "warning",
-        source: text(item["source"], check.name)
-      };
-    });
-  }
-  const findings = [];
-  if (check.parser === "cargo") {
-    for (const line of output.split("\n").filter(Boolean)) {
-      const item = JSON.parse(line);
-      if (!record(item) || item["reason"] !== "compiler-message" || !record(item["message"])) continue;
-      const diagnostic = item["message"];
-      if (!["error", "warning"].includes(String(diagnostic["level"]))) continue;
-      const spans = diagnostic["spans"];
-      const span = Array.isArray(spans) ? spans.find((entry) => record(entry) && entry["is_primary"] === true) : void 0;
-      if (!record(span) || typeof span["file_name"] !== "string")
-        throw new Error(text(diagnostic["message"], "Cargo diagnostic without location"));
-      findings.push({
-        path: pathOf(span["file_name"]),
-        line: Number(span["line_start"]),
-        column: Number(span["column_start"]),
-        severity: diagnostic["level"] === "error" ? "error" : "warning",
-        message: text(diagnostic["message"]),
-        source: `rust/${record(diagnostic["code"]) ? text(diagnostic["code"]["code"], "compiler") : "compiler"}`
-      });
-    }
-    return findings;
-  }
-  for (const line of output.split("\n")) {
-    const match = check.parser === "tsc" ? /^(.*?)\((\d+),(\d+)\): (error|warning) TS(\d+): (.*)$/.exec(line) : /^(.*?):(\d+):(\d+): (error|warning)\[([^\]]+)\] (.*)$/.exec(line);
-    if (match)
-      findings.push({
-        path: pathOf(match[1] ?? ""),
-        line: Number(match[2]),
-        column: Number(match[3]),
-        severity: match[4] === "error" ? "error" : "warning",
-        source: `${check.parser === "tsc" ? "ts" : "ty"}/${match[5]}`,
-        message: match[6] ?? ""
-      });
-    else if (/^(?:error|warning)(?: TS\d+|\[)/.test(line.trim()))
-      throw new Error(`Unlocated checker diagnostic: ${line}`);
-  }
-  return findings;
-}
-var init_project_output = __esm({
-  "src/project-output.ts"() {
-    "use strict";
-    init_files();
-    init_lint_output();
-    init_results();
-    init_runners();
-  }
-});
-
-// src/project-checks.ts
-import { randomUUID as randomUUID5 } from "node:crypto";
-import { readdir as readdir4, readFile as readFile15, stat as stat5 } from "node:fs/promises";
-import * as nodePath2 from "node:path";
-import { join as join15, relative as relative7, resolve as resolve11 } from "node:path";
-import { setTimeout as delay2 } from "node:timers/promises";
-function normalizedPattern(pattern) {
-  return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
-}
-function includePattern(pattern) {
-  const normalized = normalizedPattern(pattern);
-  if (normalized === "." || normalized === "") return "**/*";
-  if (/[*?{}[\]]/.test(normalized) || /\.(?:[cm]?[jt]sx?|pyi?)$/.test(normalized)) return normalized;
-  return `${normalized}/**/*`;
-}
-function covers(check, path) {
-  if ((check.parser === "ty" || check.parser === "ruff") && !/\.pyi?$/.test(path)) return false;
-  if (check.parser === "tsc" && !/\.[cm]?[jt]sx?$/.test(path)) return false;
-  if (check.parser === "cargo" && !/\.rs$/.test(path)) return false;
-  const local = relative7(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
-  return local !== ".." && !local.startsWith("../") && check.coverage.some((pattern) => nodePath2.matchesGlob(local, pattern)) && !check.excluded?.some((pattern) => {
-    const normalized = normalizedPattern(pattern);
-    return normalized === "." || normalized === "" || nodePath2.matchesGlob(local, normalized) || nodePath2.matchesGlob(local, `${normalized}/**`);
-  });
-}
-var ProjectChecks;
-var init_project_checks = __esm({
-  "src/project-checks.ts"() {
-    "use strict";
-    init_dist();
-    init_budgets();
-    init_config();
-    init_config_files();
-    init_environment();
-    init_files();
-    init_identity();
-    init_metadata();
-    init_project_output();
-    init_results();
-    init_runners();
-    init_tool_resolution();
-    ProjectChecks = class {
-      constructor(root) {
-        this.root = root;
-        this.jobs = /* @__PURE__ */ new Map();
-        this.sessionJobs = /* @__PURE__ */ new Map();
-      }
-      cancelSession(session) {
-        const id = this.sessionJobs.get(session);
-        if (id) this.jobs.get(id)?.controller.abort();
-        this.sessionJobs.delete(session);
-      }
-      get active() {
-        return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
-      }
-      async discover(config, signal) {
-        if (config.projectChecks !== "auto") return [...config.projectChecks];
-        const checks = [];
-        const names = await readdir4(this.root);
-        const has = async (name) => (await stat5(join15(this.root, name)).catch(() => void 0))?.isFile();
-        if (await has("tsconfig.json")) {
-          checks.push({
-            name: "typescript",
-            cwd: ".",
-            command: ["tsc", "--noEmit", "--pretty", "false"],
-            parser: "tsc",
-            coverage: ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"]
-          });
-        }
-        if (names.some((name) => ["pyproject.toml", "ty.toml", "ruff.toml", ".ruff.toml"].includes(name)))
-          checks.push({
-            name: "python",
-            cwd: ".",
-            command: ["ty", "check", "--output-format", "concise", "--color", "never"],
-            parser: "ty",
-            coverage: ["**/*.{py,pyi}"]
-          });
-        if (await has("Cargo.toml"))
-          checks.push({
-            name: "rust",
-            cwd: ".",
-            command: ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"],
-            parser: "cargo",
-            coverage: ["**/*.rs"]
-          });
-        for (const path of ["representative.py", "representative.ts"]) {
-          const enabled = path.endsWith("py") ? checks.some((check) => check.name === "python") : checks.some((check) => check.name === "typescript") || names.some(
-            (name) => configurationImpact(name).includes("lint") && configurationLanguages(name).includes("typescript") && !/^(?:package|pnpm-lock|yarn\.lock)/.test(name)
-          );
-          if (!enabled) continue;
-          const expected = path.endsWith("py") ? "ruff" : config.javascript === "eslint" || !await has("biome.json") && !await has("biome.jsonc") ? "eslint" : "biome";
-          const runner = await select(this.root, join15(this.root, path), false, config, false, signal).catch(() => ({
-            name: expected,
-            command: expected,
-            prefix: []
-          }));
-          if (runner)
-            checks.push({
-              name: runner.name,
-              cwd: ".",
-              command: [
-                runner.command,
-                ...runner.prefix,
-                ...runner.name === "ruff" ? ["check", "--no-fix", "--no-fix-only", "--output-format", "json", "."] : runner.name === "biome" ? ["lint", "--reporter=json", "--max-diagnostics=none", "."] : ["--format", "json", "."]
-              ],
-              parser: runner.name,
-              coverage: path.endsWith("py") ? ["**/*.{py,pyi}"] : ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"]
-            });
-        }
-        return checks;
-      }
-      async identity(checks, config, signal) {
-        const identities = await Promise.all(
-          checks.map(async (check) => {
-            const cwd = await workspacePath(this.root, check.cwd);
-            const tool2 = await resolveTool(
-              config.projectChecks === "auto" ? this.root : cwd,
-              join15(cwd, "representative"),
-              check.command,
-              config.projectChecks !== "auto",
-              false
-            );
-            return [
-              check,
-              tool2,
-              await Promise.all(
-                tool2.command.slice(1).map(async (arg) => {
-                  const info = await stat5(resolve11(cwd, arg)).catch(() => void 0);
-                  return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
-                })
-              ),
-              await analysisIdentity(
-                this.root,
-                [relative7(this.root, join15(cwd, "representative"))],
-                config,
-                signal,
-                false
-              )
-            ];
-          })
-        );
-        return hash(JSON.stringify([config.version, identities]));
-      }
-      output(job, cursor = 0) {
-        const diagnostics = job.results.flatMap((result) => result.findings);
-        const state = job.results.some((result) => result.state === "running") ? "running" : job.results.some((result) => result.state === "stale") ? "stale" : job.results.some((result) => result.state === "failed") || !job.checks.length ? "failed" : "complete";
-        return {
-          operation: "check_project",
-          job: job.id,
-          state,
-          checkers: job.results.map((result) => ({ ...result, findings: [] })),
-          diagnostics: diagnostics.slice(cursor, cursor + 100),
-          errors: diagnostics.filter((item) => item.severity === "error").length,
-          warnings: diagnostics.filter((item) => item.severity === "warning").length,
-          ...state === "running" || diagnostics.length > cursor + 100 ? {
-            next: {
-              workspace: this.root,
-              run: "cached",
-              job: job.id,
-              cursor: diagnostics.length > cursor + 100 ? String(cursor + 100) : "0"
-            }
-          } : {}
-        };
-      }
-      async request(args, environment, signal) {
-        const cached = args["run"] === "cached";
-        const id = text(args["job"], this.latest);
-        let job = id ? this.jobs.get(id) : void 0;
-        if (cached)
-          return job ? this.output(job, this.cursor(args)) : {
-            operation: "check_project",
-            job: id,
-            state: "missing",
-            checkers: [],
-            diagnostics: [],
-            errors: 0,
-            warnings: 0
-          };
-        const config = await configuration(this.root);
-        if (!config.trusted) throw new Error("Project checks require workspace trust in Codex config.toml");
-        const checks = await this.discover(config, signal);
-        const identity = await this.identity(checks, config, signal);
-        const before = await inventory(this.root, BUDGET.files, signal, config.exclude);
-        if (!before.complete) throw new Error("Project snapshot incomplete; baseline unavailable");
-        if (!job || args["refresh"] === true || job.identity !== identity || job.before !== before.version) {
-          job = await this.start(checks, config, environment, identity, before.version);
-        }
-        const wait = typeof args["waitMs"] === "number" ? Math.min(BUDGET.stopWait, Math.max(0, args["waitMs"])) : BUDGET.postWait;
-        await Promise.race([Promise.allSettled(job.done), delay2(wait, void 0, { signal }).catch(() => void 0)]);
-        return this.output(job, this.cursor(args));
-      }
-      cursor(args) {
-        const cursor = Number(text(args["cursor"], "0"));
-        if (!Number.isInteger(cursor) || cursor < 0) throw new Error("Invalid project cursor");
-        return cursor;
-      }
-      async start(checks, config, environment, identity, before) {
-        const job = {
-          id: randomUUID5(),
-          identity,
-          before,
-          checks,
-          controller: new AbortController(),
-          results: checks.map((check) => ({
-            name: check.name,
-            parser: check.parser,
-            cwd: check.cwd,
-            coverage: check.coverage,
-            state: "running",
-            findings: []
-          })),
-          done: []
-        };
-        this.jobs.set(job.id, job);
-        this.latest = job.id;
-        for (const [index, check] of checks.entries())
-          job.done.push(
-            withExecution(environment, true, async () => {
-              const result = job.results[index];
-              if (!result) return;
-              const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.project)]);
-              try {
-                const cwd = await workspacePath(this.root, check.cwd);
-                const checkIdentity = await this.identity([check], config, signal);
-                const beforeFiles = await inventory(this.root, BUDGET.files, signal, config.exclude);
-                const tool2 = await resolveTool(
-                  config.projectChecks === "auto" ? this.root : cwd,
-                  join15(cwd, "representative"),
-                  check.command,
-                  config.projectChecks !== "auto",
-                  false
-                );
-                if (tool2.source === "missing") throw new Error(tool2.note ?? "Checker missing");
-                if (config.projectChecks === "auto" && check.parser === "tsc") {
-                  const shown = await run(tool2.command[0] ?? "", ["--showConfig"], cwd, signal, void 0, {
-                    timeout: BUDGET.project,
-                    environment
-                  });
-                  const data = JSON.parse(shown.stdout);
-                  if (shown.code !== 0 || !record(data))
-                    throw new Error("TypeScript effective configuration unavailable");
-                  const pkg = JSON.parse(
-                    await readFile15(join15(cwd, "package.json"), "utf8").catch(() => "{}")
-                  );
-                  if (Array.isArray(data["references"]) && data["references"].length || record(pkg) && pkg["workspaces"])
-                    throw new Error("TypeScript references/multi-package projects require explicit projectChecks");
-                  const includes = data["include"];
-                  const files = data["files"];
-                  const excluded = data["exclude"];
-                  result.coverage = Array.isArray(includes) ? includes.filter((item) => typeof item === "string").map(includePattern) : Array.isArray(files) ? files.filter((item) => typeof item === "string").map((item) => item.replace(/^\.\//, "")) : ["**/*.{ts,tsx,mts,cts}"];
-                  result.excluded = Array.isArray(excluded) ? excluded.filter((item) => typeof item === "string") : [];
-                  const compiler = record(data["compilerOptions"]) ? data["compilerOptions"] : {};
-                  if (compiler["allowJs"] !== true || compiler["checkJs"] !== true)
-                    result.excluded.push("**/*.{js,jsx,mjs,cjs}");
-                }
-                if (config.projectChecks === "auto" && check.parser === "ty") {
-                  const content = await readFile15(join15(cwd, "ty.toml"), "utf8").catch(() => void 0);
-                  const data = content ? parse(content) : parse(await readFile15(join15(cwd, "pyproject.toml"), "utf8").catch(() => ""));
-                  const toolConfig = content ? data : record(data["tool"]) && record(data["tool"]["ty"]) ? data["tool"]["ty"] : {};
-                  const src = record(toolConfig["src"]) ? toolConfig["src"] : {};
-                  if (Array.isArray(src["include"]))
-                    result.coverage = src["include"].filter((item) => typeof item === "string").map(includePattern);
-                  if (Array.isArray(src["exclude"]))
-                    result.excluded = src["exclude"].filter((item) => typeof item === "string");
-                }
-                const output = await run(tool2.command[0] ?? "", tool2.command.slice(1), cwd, signal, void 0, {
-                  timeout: BUDGET.project,
-                  environment
-                });
-                result.findings = await projectOutput(
-                  check,
-                  output.stdout + (["tsc", "ty", "sarif"].includes(check.parser) ? output.stderr : ""),
-                  this.root,
-                  cwd
-                );
-                if (output.code !== 0 && !(result.findings.length && (output.code === 1 || check.parser === "tsc" && output.code === 2 || check.parser === "cargo" && output.code === 101)))
-                  throw new Error(output.stderr || `Checker exit ${output.code} without located diagnostics`);
-                if (await this.identity([check], await configuration(this.root), signal) !== checkIdentity)
-                  throw new Error("Checker configuration/tool changed during baseline");
-                const afterFiles = await inventory(this.root, BUDGET.files, signal, config.exclude);
-                const relevant = [.../* @__PURE__ */ new Set([...beforeFiles.files.keys(), ...afterFiles.files.keys()])].filter(
-                  (path) => covers(result, path) || configurationImpact(path).length > 0
-                );
-                if (!afterFiles.complete || relevant.some((path) => beforeFiles.files.get(path) !== afterFiles.files.get(path)))
-                  throw new Error("Project changed while establishing baseline; retry before editing");
-                result.state = "complete";
-              } catch (error) {
-                result.state = "failed";
-                result.note = message(error);
-              }
-            })
-          );
-        while (this.jobs.size > 32) {
-          const first = [...this.jobs.values()].find(
-            (entry) => entry.id !== job.id && entry.results.every((result) => result.state !== "running")
-          );
-          if (!first) break;
-          this.jobs.delete(first.id);
-        }
-        return job;
-      }
-      async baseline(session, paths, environment, signal, wait) {
-        const config = await configuration(this.root);
-        if (!config.trusted) throw new Error("Project baseline requires workspace trust");
-        const store = new Metadata(this.root);
-        const state = await store.read(session);
-        const checks = await this.discover(config, signal);
-        const identity = await this.identity(checks, config, signal);
-        let job;
-        let recovered;
-        if (state.diagnosticBaseline) {
-          const data = await store.readShared(state.diagnosticBaseline);
-          if (record(data) && data["identity"] === identity && Array.isArray(data["results"]))
-            recovered = data;
-        }
-        if (recovered?.results.some((result) => result.state === "running")) recovered = void 0;
-        if (!recovered) {
-          job = [...this.jobs.values()].find(
-            (entry) => entry.id === state.shown["baselineJob"] && entry.identity === identity
-          );
-          if (!job) {
-            if (state.edited && !state.diagnosticBaseline)
-              throw new Error(
-                "Editing has already occurred; cannot create a pre-edit diagnostic baseline. Restart the session or explicitly disable automatic diagnostics"
-              );
-            const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
-            if (!snapshot2.complete) throw new Error("Baseline inventory incomplete");
-            job = await this.start(checks, config, environment, identity, snapshot2.version);
-            this.sessionJobs.set(session, job.id);
-            await store.update(session, signal, (current) => {
-              if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-              current.shown["baselineJob"] = job?.id ?? "";
-              return true;
-            });
-          }
-          const selected = job.checks.map((check, index) => ({ check, index })).filter(({ check }) => !paths || paths.some((path) => covers(check, path)));
-          await Promise.race([
-            Promise.allSettled(selected.map(({ index }) => job?.done[index])),
-            delay2(wait, void 0, { signal }).catch(() => void 0)
-          ]);
-          recovered = { identity, results: job.results, before: job.before };
-        }
-        const results = recovered.results;
-        const reference = await store.shared(recovered);
-        await store.update(session, signal, (current) => {
-          if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-          current.diagnosticBaseline = reference;
-          current.configuration = config.version;
-          return true;
-        });
-        const snapshot = paths ? void 0 : await inventory(this.root, BUDGET.files, signal, config.exclude);
-        const targets = paths ?? [...snapshot?.files.keys() ?? []].filter(
-          (path) => codeLanguage(config, path) && !/(?:json|yaml|css|html)$/.test(codeLanguage(config, path) ?? "")
-        );
-        const failures = [];
-        const pending = [];
-        for (const path of targets) {
-          if (!codeLanguage(config, path)) continue;
-          const related = results.filter((result) => covers(result, path));
-          const language = codeLanguage(config, path);
-          const required = language === "typescript" && /\.[cm]?tsx?$/.test(path) ? "tsc" : language === "python" ? "ty" : language === "rust" ? "cargo" : void 0;
-          if (config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
-            failures.push(`${path}: no type checker coverage; configure projectChecks`);
-          if (!related.length) failures.push(`${path}: no project checker coverage; configure projectChecks`);
-          for (const result of related) {
-            if (result.state === "running") pending.push(result.name);
-            else if (result.state !== "complete") failures.push(`${result.name}: ${result.note ?? result.state}`);
-          }
-        }
-        return {
-          reference,
-          findings: results.filter((result) => result.state === "complete").flatMap((result) => result.findings),
-          failures: [...new Set(failures)],
-          pending: [...new Set(pending)]
-        };
-      }
-      async dispose() {
-        for (const job of this.jobs.values()) job.controller.abort();
-        await Promise.allSettled([...this.jobs.values()].flatMap((job) => job.done));
-      }
-    };
-  }
-});
-
 // src/engine.ts
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { readFile as readFile16, stat as stat6 } from "node:fs/promises";
-import { dirname as dirname9, relative as relative8, sep as sep3 } from "node:path";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { readFile as readFile13, stat as stat5 } from "node:fs/promises";
+import { dirname as dirname9, relative as relative6, sep as sep3 } from "node:path";
 var Engine;
 var init_engine = __esm({
   "src/engine.ts"() {
@@ -6394,7 +6068,6 @@ var init_engine = __esm({
     init_language();
     init_metadata();
     init_metrics();
-    init_project_checks();
     init_results();
     init_runners();
     init_tool_resolution();
@@ -6426,10 +6099,9 @@ var init_engine = __esm({
           }
           return results;
         }
-      }, projects = new ProjectChecks(root)) {
+      }) {
         this.root = root;
         this.dependencies = dependencies;
-        this.projects = projects;
         this.identities = /* @__PURE__ */ new Map();
         this.cache = /* @__PURE__ */ new Map();
         this.sessions = /* @__PURE__ */ new Map();
@@ -6440,8 +6112,7 @@ var init_engine = __esm({
       }
       async warmup(signal) {
         const config = await configuration(this.root);
-        if (!config.trusted || config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
-          return;
+        if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off") return;
         const snapshot = latestInventory(this.root);
         if (!snapshot?.complete) return;
         const representatives = /* @__PURE__ */ new Map();
@@ -6513,16 +6184,16 @@ var init_engine = __esm({
           signal.throwIfAborted();
           try {
             const absolute = await workspacePath(this.root, requested);
-            const path = relative8(this.root, absolute);
+            const path = relative6(this.root, absolute);
             session.touched.add(path);
             session.current.add(path);
-            if ((await stat6(absolute)).size > BUDGET.fileBytes) {
+            if ((await stat5(absolute)).size > BUDGET.fileBytes) {
               results.set(path, { path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
               continue;
             }
             const identity = await analysisIdentity(this.root, [path], config, signal);
             this.identities.set(path, identity);
-            const content = hash(await readFile16(absolute, { encoding: "utf8", signal }));
+            const content = hash(await readFile13(absolute, { encoding: "utf8", signal }));
             const key = `${source === "both" ? "" : `${source}:`}${path}`;
             const cached = this.cache.get(key);
             if (snapshot.complete && cached?.version === this.projectVersion(snapshot, path, config) && cached.identity === identity && cached.content === content && cached.result.state === "complete")
@@ -6549,7 +6220,7 @@ var init_engine = __esm({
             note: "Checker returned no result"
           };
           try {
-            if (hash(await readFile16(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
+            if (hash(await readFile13(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
               result.state = "stale";
               result.note = "File/tool/configuration changed during diagnostics; retry";
             }
@@ -6608,7 +6279,7 @@ var init_engine = __esm({
           if (typeof value !== "string") continue;
           signal.throwIfAborted();
           const absolute = await workspacePath(this.root, value);
-          if ((await stat6(absolute)).isFile()) paths.add(relative8(this.root, absolute));
+          if ((await stat5(absolute)).isFile()) paths.add(relative6(this.root, absolute));
           else {
             const scoped = await inventory(this.root, BUDGET.files, signal, config.exclude, absolute);
             complete &&= scoped.complete;
@@ -6631,11 +6302,18 @@ var init_engine = __esm({
           return { operation };
         }
         const config = await configuration(this.root);
-        if (this.configVersion !== config.version || args["refresh"] === true) {
-          if (args["refresh"] === true) await this.close();
-          else await this.language?.update(config);
+        if (config.valid && (this.configVersion !== config.version || args["refresh"] === true)) {
+          if (args["refresh"] === true) {
+            clearLintAvailability(this.root);
+            await this.close();
+          } else await this.language?.update(config);
           this.cache.clear();
           this.pages.clear();
+          this.configVersion = config.version;
+        }
+        if (config.valid) this.lastConfig = config;
+        if (!config.valid && operation === "lsp_status") {
+          await this.language?.update(config);
           this.configVersion = config.version;
         }
         const store = new Metadata(this.root);
@@ -6654,12 +6332,14 @@ var init_engine = __esm({
         }
         if (operation === "lsp_status") {
           this.language ??= new Languages(this.root, config);
-          const targets = args["path"] ? [text(args["path"])] : Object.values(config.servers).filter((server2) => !!server2).map((server2) => server2 ? `status${server2.extensions[0]}` : "");
+          const targets = args["path"] ? [text(args["path"])] : Object.entries(config.extensions).map(([, extensions]) => `status${extensions[0]}`);
           return {
             operation,
             workspace: this.root,
-            trusted: config.trusted,
             configuration: config,
+            configurationSources: config.sources,
+            configurationIssues: config.issues,
+            projectChecks: { state: "unverified", configured: config.projectChecks },
             tools: await Promise.all(
               targets.map((path) => this.language?.status(path).catch((error) => ({ path, reason: message(error) })))
             ),
@@ -6670,9 +6350,8 @@ var init_engine = __esm({
             sessions: [...this.sessions.keys()]
           };
         }
+        if (!(operation === "check_diagnostics" && args["run"] === "cached")) assertConfiguration(config);
         if (operation === "automatic_batch") {
-          if (!config.trusted)
-            throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
           const paths2 = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [];
           return {
             operation,
@@ -6689,16 +6368,28 @@ var init_engine = __esm({
           };
         }
         const id = args["scope"] === "paths" || args["scope"] === void 0 ? text(args["session"], "manual") : this.id(args["session"]);
-        if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
-        if ((operation === "lsp_rename" || operation === "lsp_format") && (config.automaticDiagnostics.postToolUse !== "off" || config.automaticDiagnostics.stop !== "off")) {
-          const paths2 = operation === "lsp_rename" ? void 0 : (await this.paths(args, signal)).paths;
-          const baseline = await this.projects.baseline(id, paths2, executionEnvironment(), signal, BUDGET.stopWait);
-          if (baseline.pending.length || baseline.failures.length)
-            throw new Error(`Pre-edit baseline unavailable: ${[...baseline.pending, ...baseline.failures].join("; ")}`);
+        if (operation === "check_diagnostics") {
+          if (!config.valid && args["run"] === "cached" && this.lastConfig) {
+            const output = await this.diagnostics(args, id, signal, this.lastConfig, store);
+            return {
+              ...output,
+              operation: "check_diagnostics",
+              partial: true,
+              configurationIssues: config.issues,
+              errors: Number(output["errors"]),
+              warnings: Number(output["warnings"]),
+              results: output["results"].map((result) => ({
+                ...result,
+                state: "stale",
+                note: "Configuration error; cached diagnostics only"
+              }))
+            };
+          }
+          return this.diagnostics(args, id, signal, config, store);
         }
         if (operation === "lsp_rename") args = { ...args, operation: "rename" };
         if (operation === "lsp_navigation" || operation === "lsp_rename") {
-          const path = relative8(this.root, await workspacePath(this.root, text(args["path"])));
+          const path = relative6(this.root, await workspacePath(this.root, text(args["path"])));
           const identity = await analysisIdentity(this.root, [path], config, signal);
           if (this.identities.has(path) && this.identities.get(path) !== identity) {
             for (const key of this.cache.keys()) if (key.replace(/^(?:lsp|lint):/, "") === path) this.cache.delete(key);
@@ -6716,23 +6407,9 @@ var init_engine = __esm({
             if (before) this.cache.clear();
           }
           if (before) {
-            const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
             this.cache.clear();
-            const after = await inventory(this.root, BUDGET.files, signal).catch((error) => {
-              throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
-            });
-            const changed = [...after.files].filter(([path2, version]) => before.files.get(path2) !== version).map(([path2]) => path2);
-            try {
-              await this.check(
-                [.../* @__PURE__ */ new Set([text(args["path"]), ...changed])],
-                id,
-                this.session(id).turn,
-                false,
-                signal
-              );
-            } catch (error) {
-              throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
-            }
+            const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
+            return { ...output, operation, diagnostics: await this.afterWrite(modifiedPaths, id, signal) };
           }
           return { ...output, operation };
         }
@@ -6741,10 +6418,12 @@ var init_engine = __esm({
         if (operation === "lsp_format") {
           if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
           if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
+          if (!config.formattingEnabled)
+            throw new Error("Configuration error: formatting disabled; repair formatting configuration");
           this.language ??= new Languages(this.root, config);
           for (const path of paths) {
             const runner = await preflightRunner(this.root, path, config, signal);
-            await this.language.preflight(path, signal, runner ? void 0 : "format");
+            if (!runner) await this.language.preflight(path, signal, "format");
           }
           const writes = [];
           const modifiedPaths = [];
@@ -6756,15 +6435,26 @@ var init_engine = __esm({
               );
               if (writes.at(-1)?.status === "formatted") modifiedPaths.push(path);
             }
-            await this.check(paths, id, "manual", false, signal);
           } catch (error) {
             throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(writes)}`, modifiedPaths);
           } finally {
             this.cache.clear();
           }
-          return { operation, modifiedPaths, results: writes };
+          return { operation, modifiedPaths, results: writes, diagnostics: await this.afterWrite(paths, id, signal) };
         }
         throw new Error("Unknown tool");
+      }
+      async afterWrite(paths, id, signal) {
+        try {
+          const results = await this.check(paths, id, this.session(id).turn, false, signal);
+          return { state: results.every((result) => result.state === "complete") ? "complete" : "partial", results };
+        } catch (error) {
+          return {
+            state: "unavailable",
+            note: message(error),
+            recovery: "Writes completed; inspect modifiedPaths. Do not replay the write to retry diagnostics."
+          };
+        }
       }
       async diagnostics(args, id, signal, config, store) {
         for (const key of ["mode", "start", "offset", "revision"])
@@ -6831,8 +6521,8 @@ var init_engine = __esm({
             for (const value of values) {
               if (typeof value !== "string") throw new Error("paths requires strings");
               const absolute = await workspacePath(this.root, value);
-              const path = relative8(this.root, absolute);
-              if ((await stat6(absolute)).isFile()) {
+              const path = relative6(this.root, absolute);
+              if ((await stat5(absolute)).isFile()) {
                 if (!codeLanguage(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
                 selected2.add(path);
               } else
@@ -6890,7 +6580,7 @@ var init_engine = __esm({
         }
         let next;
         if (index + selected.length < results.length) {
-          const cursor = randomUUID6();
+          const cursor = randomUUID5();
           this.pages.set(cursor, {
             version: snapshot.version,
             results,
@@ -6956,9 +6646,9 @@ var init_engine = __esm({
         if (existing) return existing;
         try {
           const absolute = await workspacePath(this.root, path);
-          const info = await stat6(absolute);
+          const info = await stat5(absolute);
           if (info.size > BUDGET.fileBytes) return "oversized";
-          return hash(await readFile16(absolute, { encoding: "utf8", signal }));
+          return hash(await readFile13(absolute, { encoding: "utf8", signal }));
         } catch {
           signal.throwIfAborted();
           return "unavailable";
@@ -6985,30 +6675,30 @@ var init_engine = __esm({
 
 // src/ipc.ts
 import { spawn as spawn4 } from "node:child_process";
-import { randomUUID as randomUUID7 } from "node:crypto";
-import { chmod, lstat as lstat4, mkdir as mkdir5, readFile as readFile17, rename as rename5, writeFile as writeFile6 } from "node:fs/promises";
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { chmod, lstat as lstat4, mkdir as mkdir5, readFile as readFile14, rename as rename5, writeFile as writeFile6 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
-import { join as join16 } from "node:path";
-import { setTimeout as delay3 } from "node:timers/promises";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { join as join15 } from "node:path";
+import { setTimeout as delay2 } from "node:timers/promises";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 async function serviceLocation(root) {
   const user = process.getuid?.() ?? hash(homedir6()).slice(0, 10);
-  const directory2 = join16(tmpdir3(), `clsp6-${user}`);
+  const directory2 = join15(tmpdir3(), `clsp6-${user}`);
   await mkdir5(directory2, { recursive: true, mode: 448 });
   const info = await lstat4(directory2);
   if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
     throw new Error("Unsafe service directory permissions");
   const identity = await workspaceIdentity(root);
-  const address = process.platform === "win32" ? `\\\\.\\pipe\\codex-lsp-${user}-${identity}` : join16(directory2, `${identity.slice(0, 32)}.sock`);
-  return { directory: directory2, identity, address, endpoint: join16(directory2, `${identity}.endpoint`) };
+  const address = process.platform === "win32" ? `\\\\.\\pipe\\codex-lsp-${user}-${identity}` : join15(directory2, `${identity.slice(0, 32)}.sock`);
+  return { directory: directory2, identity, address, endpoint: join15(directory2, `${identity}.endpoint`) };
 }
 async function readEndpoint(location) {
   try {
     const info = await lstat4(location.endpoint);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
       throw new Error("Unsafe service endpoint permissions");
-    const value = JSON.parse(await readFile17(location.endpoint, "utf8"));
+    const value = JSON.parse(await readFile14(location.endpoint, "utf8"));
     if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["pid"] !== "number" || typeof value["token"] !== "string" || value["address"] !== location.address)
       throw new Error("Invalid service endpoint");
     return value;
@@ -7114,7 +6804,7 @@ async function ensureService(root, signal) {
   if (previous && alive(previous.pid)) throw new Error("Service process alive but handshake unavailable; retry later");
   const child = spawn4(
     process.execPath,
-    [...process.execArgv, fileURLToPath4(import.meta.url), "service", root, location.identity, randomUUID7()],
+    [...process.execArgv, fileURLToPath3(import.meta.url), "service", root, location.identity, randomUUID6()],
     {
       ...HIDDEN_PROCESS,
       cwd: root,
@@ -7138,12 +6828,12 @@ async function ensureService(root, signal) {
       return endpoint;
     }
     if (child.exitCode !== null) throw new Error("Shared service failed to start");
-    await delay3(25, void 0, { signal: startup });
+    await delay2(25, void 0, { signal: startup });
   }
 }
 async function publishEndpoint(location, token) {
   if (process.platform !== "win32") await chmod(location.address, 384);
-  const temporary2 = `${location.endpoint}.${randomUUID7()}`;
+  const temporary2 = `${location.endpoint}.${randomUUID6()}`;
   await writeFile6(
     temporary2,
     JSON.stringify({
@@ -7171,14 +6861,14 @@ var init_ipc = __esm({
 });
 
 // src/hook-inbox.ts
-import { randomUUID as randomUUID8 } from "node:crypto";
-import { lstat as lstat5, readdir as readdir5, readFile as readFile18, rm as rm4, writeFile as writeFile7 } from "node:fs/promises";
-import { join as join17 } from "node:path";
+import { randomUUID as randomUUID7 } from "node:crypto";
+import { lstat as lstat5, readdir as readdir4, readFile as readFile15, rm as rm4, writeFile as writeFile7 } from "node:fs/promises";
+import { join as join16 } from "node:path";
 async function registerHook(root, input, signal) {
   const location = await serviceLocation(root);
   const session = text(input["session_id"]);
   const state = await new Metadata(root).update(session, signal, () => void 0);
-  const path = join17(location.directory, `${location.identity}.${Date.now()}.${randomUUID8()}.hook`);
+  const path = join16(location.directory, `${location.identity}.${Date.now()}.${randomUUID7()}.hook`);
   await writeFile7(
     path,
     JSON.stringify({
@@ -7194,14 +6884,14 @@ async function registerHook(root, input, signal) {
 async function registeredHooks(root) {
   const location = await serviceLocation(root);
   const result = [];
-  for (const name of (await readdir5(location.directory)).sort()) {
+  for (const name of (await readdir4(location.directory)).sort()) {
     if (!name.startsWith(`${location.identity}.`) || !name.endsWith(".hook")) continue;
-    const path = join17(location.directory, name);
+    const path = join16(location.directory, name);
     try {
       const info = await lstat5(path);
       if (info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
         throw new Error("Unsafe hook registration");
-      const value = JSON.parse(await readFile18(path, "utf8"));
+      const value = JSON.parse(await readFile15(path, "utf8"));
       if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["epoch"] !== "string" || !record(value["input"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string"))
         throw new Error("Invalid hook registration");
       result.push({
@@ -7228,13 +6918,14 @@ var init_hook_inbox = __esm({
 });
 
 // src/runtime.ts
-import { realpath as realpath6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute8 } from "node:path";
+import { realpath as realpath5 } from "node:fs/promises";
+import { isAbsolute as isAbsolute7 } from "node:path";
 var Runtime;
 var init_runtime = __esm({
   "src/runtime.ts"() {
     "use strict";
     init_budgets();
+    init_config();
     init_engine();
     init_hook_inbox();
     init_ipc();
@@ -7247,10 +6938,15 @@ var init_runtime = __esm({
       }
       async request(root, operation, args, signal) {
         const event = operation === "hook" ? text(args["hook_event_name"], "PostToolUse") : "";
-        if (event === "PreToolUse" && (isShellTool(args) || writeIntent(root, args).kind !== "write"))
-          return { operation: "hook", output: { kind: "silent" } };
-        if (!isAbsolute8(root)) throw new Error("workspace must be an absolute project directory");
-        root = await realpath6(root);
+        if (event === "PreToolUse") return { operation: "hook", output: { kind: "silent" } };
+        if (!isAbsolute7(root)) throw new Error("workspace must be an absolute project directory");
+        root = await realpath5(root);
+        if (operation === "hook" && event !== "SessionEnd") {
+          const config = await configuration(root);
+          if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+            return { operation: "hook", output: { kind: "silent" } };
+          if (!text(args["session_id"])) return { operation: "hook", output: { kind: "silent" } };
+        }
         const controller = new AbortController();
         this.active.add(controller);
         signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(BUDGET.request)]);
@@ -7300,7 +6996,7 @@ var init_runtime = __esm({
 });
 
 // src/codex-hook.ts
-import { realpath as realpath7 } from "node:fs/promises";
+import { realpath as realpath6 } from "node:fs/promises";
 import { stdin } from "node:process";
 async function runHookCli() {
   stdin.setEncoding("utf8");
@@ -7318,15 +7014,15 @@ async function runHookCli() {
   }
   if (!record(parsed)) throw new Error("Hook input must be an object");
   const event = text(parsed["hook_event_name"], "PostToolUse");
+  if (event === "PreToolUse") return;
   const cwd = text(parsed["cwd"], process.cwd());
   const shell = isShellTool(parsed);
   const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? BUDGET.stop : event === "SessionStart" || event === "PostToolUse" && shell ? BUDGET.quickHook : BUDGET.hook;
   let signal = AbortSignal.timeout(budget);
   try {
     const intent = shell ? void 0 : writeIntent(cwd, parsed);
-    if (event === "PreToolUse" && (shell || intent?.kind !== "write")) return;
     if (event === "PostToolUse" && intent?.kind === "read") signal = AbortSignal.timeout(BUDGET.quickHook);
-    const root = await realpath7(cwd);
+    const root = await realpath6(cwd);
     const runtime = new Runtime();
     try {
       const result = await runtime.request(root, "hook", parsed, signal);
@@ -7351,7 +7047,7 @@ async function runHookCli() {
   } catch (error) {
     const context = signal.aborted ? "Codex CodeIntel: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results." : `Codex CodeIntel unavailable: ${message(error).slice(0, 300)}`;
     process.stdout.write(
-      `${JSON.stringify(event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: context } } : event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}
+      `${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}
 `
     );
   }
@@ -7428,7 +7124,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-codeintel", version: "0.8.0" },
+        serverInfo: { name: "codex-codeintel", version: "0.9.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -7575,7 +7271,7 @@ var init_protocol = __esm({
       ),
       tool(
         "lsp_status",
-        "Explain configuration, trust, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
+        "Explain configuration issues, per-capability availability, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
         { workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
         [],
         true
@@ -7624,7 +7320,7 @@ var init_protocol = __esm({
 });
 
 // src/automatic.ts
-import { setTimeout as delay4, setImmediate as yieldBatch } from "node:timers/promises";
+import { setTimeout as delay3, setImmediate as yieldBatch } from "node:timers/promises";
 var Automatic;
 var init_automatic = __esm({
   "src/automatic.ts"() {
@@ -7687,10 +7383,7 @@ var init_automatic = __esm({
         if (state.turn === "__ended__" || state.generation !== args["generation"])
           return { generation: -1, scope: "delta", total: 0, note: "", results: [], pending: [], state: "stale" };
         const config = await configuration(this.root);
-        if (!config.trusted) {
-          this.cancel();
-          throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
-        }
+        assertConfiguration(config);
         const requested = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : state.pending;
         const analysis = await analysisIdentity(this.root, requested, config, signal);
         let job = this.jobs.get(session);
@@ -7730,7 +7423,7 @@ var init_automatic = __esm({
         const wait = typeof args["waitMs"] === "number" ? Math.max(0, Math.min(BUDGET.project, args["waitMs"])) : BUDGET.postWait;
         if (wait === 0) return this.result(target);
         const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait))]);
-        await Promise.race([target.done, delay4(wait, void 0, { signal: waiting }).catch(() => void 0)]);
+        await Promise.race([target.done, delay3(wait, void 0, { signal: waiting }).catch(() => void 0)]);
         return this.result(target);
       }
       async run(job) {
@@ -7746,9 +7439,9 @@ var init_automatic = __esm({
               signal.throwIfAborted();
               const state = await store.read(job.session);
               const config = await configuration(this.root);
-              if (state.turn === "__ended__" || state.epoch !== job.epoch || state.generation !== job.generation || config.version !== job.configuration || await analysisIdentity(this.root, job.paths, config, signal) !== job.analysis || !config.trusted) {
+              if (state.turn === "__ended__" || state.epoch !== job.epoch || state.generation !== job.generation || config.version !== job.configuration || await analysisIdentity(this.root, job.paths, config, signal) !== job.analysis) {
                 job.state = "cancelled";
-                job.note = "Generation/configuration/trust changed; results stale";
+                job.note = "Generation/configuration changed; results stale";
                 return;
               }
               const paths = remaining.slice(start, start + BUDGET.batch);
@@ -7785,7 +7478,7 @@ var init_automatic = __esm({
               await yieldBatch();
             }
             remaining = retry;
-            if (remaining.length) await delay4(1e3, void 0, { signal });
+            if (remaining.length) await delay3(1e3, void 0, { signal });
           }
           job.state = job.paths.every((path) => job.results.get(path)?.state === "complete") ? "complete" : "pending";
         } catch (error) {
@@ -7800,7 +7493,7 @@ var init_automatic = __esm({
             try {
               const config = await configuration(this.root);
               const state = await new Metadata(this.root).read(job.session);
-              if (!config.trusted || config.version !== job.configuration || state.generation !== job.generation || state.epoch !== job.epoch || state.turn === "__ended__")
+              if (config.version !== job.configuration || state.generation !== job.generation || state.epoch !== job.epoch || state.turn === "__ended__")
                 this.cancel(job.session);
             } catch {
               this.cancel(job.session);
@@ -7935,7 +7628,7 @@ var init_hook_coordinator = __esm({
         const key = `${session}:${event}`;
         const job = this.jobs.get(key);
         let pending = false;
-        if (job) {
+        if (job && (event === "Stop" || event === "SubagentStop")) {
           const wait = event === "Stop" || event === "SubagentStop" ? BUDGET.stopWait : BUDGET.postWait;
           const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait - (Date.now() - began)))]);
           try {
@@ -7945,6 +7638,7 @@ var init_hook_coordinator = __esm({
             pending = true;
           }
         }
+        if (job && event === "PostToolUse") pending = true;
         const delivery = await consumeDelivery(this.root, session, event, signal);
         return pending && delivery.output.kind === "silent" ? {
           output: {
@@ -7958,6 +7652,559 @@ var init_hook_coordinator = __esm({
         this.disposed = true;
         for (const job of this.tasks) job.controller.abort();
         await Promise.allSettled([...this.tasks].map((job) => job.done));
+      }
+    };
+  }
+});
+
+// src/project-output.ts
+import { readFile as readFile16 } from "node:fs/promises";
+import { relative as relative7, resolve as resolve10 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
+async function projectOutput(check, output, root, cwd) {
+  const pathOf = (file) => {
+    const absolute = resolve10(cwd, file);
+    if (!inside(root, absolute)) throw new Error("Checker diagnostic outside workspace");
+    return relative7(root, absolute);
+  };
+  if (check.parser === "sarif") {
+    if (!output.trim()) return [];
+    const data = JSON.parse(output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1));
+    if (!record(data) || !Array.isArray(data["runs"])) throw new Error("Malformed SARIF checker output");
+    const findings2 = [];
+    for (const run2 of data["runs"]) {
+      if (!record(run2) || !Array.isArray(run2["results"])) throw new Error("Malformed SARIF run");
+      for (const result of run2["results"]) {
+        if (!record(result) || !["error", "warning"].includes(String(result["level"]))) continue;
+        const locations = result["locations"];
+        const first = Array.isArray(locations) ? locations[0] : void 0;
+        const physical = record(first) && record(first["physicalLocation"]) ? first["physicalLocation"] : {};
+        const artifact = record(physical["artifactLocation"]) ? physical["artifactLocation"] : {};
+        const region = record(physical["region"]) ? physical["region"] : {};
+        const uri = text(artifact["uri"]);
+        if (!uri || !record(result["message"])) throw new Error("Unlocated SARIF diagnostic");
+        findings2.push({
+          path: pathOf(uri.startsWith("file:") ? fileURLToPath4(uri) : decodeURI(uri)),
+          line: Number(region["startLine"] ?? 1),
+          column: Number(region["startColumn"] ?? 1),
+          severity: result["level"] === "error" ? "error" : "warning",
+          source: `compiler/${text(result["ruleId"], "diagnostic")}`,
+          message: text(result["message"]["text"])
+        });
+      }
+    }
+    return findings2;
+  }
+  if (["ruff", "eslint", "biome"].includes(check.parser)) {
+    const split = splitLint(check.parser, JSON.parse(output), root, cwd);
+    const findings2 = [];
+    for (const [path, data] of split)
+      findings2.push(...parseLint(check.parser, data, path, await readFile16(resolve10(root, path), "utf8")));
+    return findings2;
+  }
+  if (check.parser === "json") {
+    const data = JSON.parse(output);
+    if (!record(data) || !Array.isArray(data["diagnostics"]))
+      throw new Error("Custom checker requires {diagnostics: [...]} output");
+    return data["diagnostics"].map((item) => {
+      if (!record(item) || typeof item["path"] !== "string" || typeof item["message"] !== "string" || !["error", "warning"].includes(String(item["severity"])) || !Number.isInteger(item["line"]) || Number(item["line"]) < 1 || !Number.isInteger(item["column"]) || Number(item["column"]) < 1)
+        throw new Error("Malformed custom diagnostic");
+      return {
+        path: pathOf(item["path"]),
+        message: item["message"],
+        line: Number(item["line"]),
+        column: Number(item["column"]),
+        severity: item["severity"] === "error" ? "error" : "warning",
+        source: text(item["source"], check.name)
+      };
+    });
+  }
+  const findings = [];
+  if (check.parser === "cargo") {
+    for (const line of output.split("\n").filter(Boolean)) {
+      const item = JSON.parse(line);
+      if (!record(item) || item["reason"] !== "compiler-message" || !record(item["message"])) continue;
+      const diagnostic = item["message"];
+      if (!["error", "warning"].includes(String(diagnostic["level"]))) continue;
+      const spans = diagnostic["spans"];
+      const span = Array.isArray(spans) ? spans.find((entry) => record(entry) && entry["is_primary"] === true) : void 0;
+      if (!record(span) || typeof span["file_name"] !== "string")
+        throw new Error(text(diagnostic["message"], "Cargo diagnostic without location"));
+      findings.push({
+        path: pathOf(span["file_name"]),
+        line: Number(span["line_start"]),
+        column: Number(span["column_start"]),
+        severity: diagnostic["level"] === "error" ? "error" : "warning",
+        message: text(diagnostic["message"]),
+        source: `rust/${record(diagnostic["code"]) ? text(diagnostic["code"]["code"], "compiler") : "compiler"}`
+      });
+    }
+    return findings;
+  }
+  for (const line of output.split("\n")) {
+    const match = check.parser === "tsc" ? /^(.*?)\((\d+),(\d+)\): (error|warning) TS(\d+): (.*)$/.exec(line) : /^(.*?):(\d+):(\d+): (error|warning)\[([^\]]+)\] (.*)$/.exec(line);
+    if (match)
+      findings.push({
+        path: pathOf(match[1] ?? ""),
+        line: Number(match[2]),
+        column: Number(match[3]),
+        severity: match[4] === "error" ? "error" : "warning",
+        source: `${check.parser === "tsc" ? "ts" : "ty"}/${match[5]}`,
+        message: match[6] ?? ""
+      });
+    else if (/^(?:error|warning)(?: TS\d+|\[)/.test(line.trim()))
+      throw new Error(`Unlocated checker diagnostic: ${line}`);
+  }
+  return findings;
+}
+var init_project_output = __esm({
+  "src/project-output.ts"() {
+    "use strict";
+    init_files();
+    init_lint_output();
+    init_results();
+    init_runners();
+  }
+});
+
+// src/project-checks.ts
+import { randomUUID as randomUUID8 } from "node:crypto";
+import { readdir as readdir5, readFile as readFile17, stat as stat6 } from "node:fs/promises";
+import * as nodePath2 from "node:path";
+import { basename as basename5, join as join17, relative as relative8, resolve as resolve11 } from "node:path";
+import { setTimeout as delay4 } from "node:timers/promises";
+function normalizedPattern(pattern) {
+  return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
+}
+function includePattern(pattern) {
+  const normalized = normalizedPattern(pattern);
+  if (normalized === "." || normalized === "") return "**/*";
+  if (/[*?{}[\]]/.test(normalized) || /\.(?:[cm]?[jt]sx?|pyi?)$/.test(normalized)) return normalized;
+  return `${normalized}/**/*`;
+}
+function covers(check, path) {
+  if ((check.parser === "ty" || check.parser === "ruff") && !/\.pyi?$/.test(path)) return false;
+  if (check.parser === "tsc" && !/\.[cm]?[jt]sx?$/.test(path)) return false;
+  if (check.parser === "cargo" && !/\.rs$/.test(path)) return false;
+  const local = relative8(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
+  return local !== ".." && !local.startsWith("../") && check.coverage.some((pattern) => nodePath2.matchesGlob(local, pattern)) && !check.excluded?.some((pattern) => {
+    const normalized = normalizedPattern(pattern);
+    return normalized === "." || normalized === "" || nodePath2.matchesGlob(local, normalized) || nodePath2.matchesGlob(local, `${normalized}/**`);
+  });
+}
+var ProjectChecks;
+var init_project_checks = __esm({
+  "src/project-checks.ts"() {
+    "use strict";
+    init_dist();
+    init_budgets();
+    init_config();
+    init_config_files();
+    init_diagnostic_delta();
+    init_environment();
+    init_files();
+    init_identity();
+    init_metadata();
+    init_project_output();
+    init_results();
+    init_runners();
+    init_tool_resolution();
+    ProjectChecks = class {
+      constructor(root) {
+        this.root = root;
+        this.jobs = /* @__PURE__ */ new Map();
+        this.sessionJobs = /* @__PURE__ */ new Map();
+      }
+      cancelSession(session) {
+        const id = this.sessionJobs.get(session);
+        if (id) this.jobs.get(id)?.controller.abort();
+        this.sessionJobs.delete(session);
+      }
+      status(configuration2) {
+        const job = this.latest ? this.jobs.get(this.latest) : void 0;
+        return job ? this.cachedOutput(job, 0, configuration2) : { state: "unverified", checkers: [] };
+      }
+      get active() {
+        return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
+      }
+      async discover(config, signal) {
+        if (config.projectChecks !== "auto") return [...config.projectChecks];
+        const checks = [];
+        const names = await readdir5(this.root);
+        const has = async (name) => (await stat6(join17(this.root, name)).catch(() => void 0))?.isFile();
+        if (await has("tsconfig.json")) {
+          checks.push({
+            name: "typescript",
+            cwd: ".",
+            command: ["tsc", "--noEmit", "--pretty", "false"],
+            parser: "tsc",
+            coverage: ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"]
+          });
+        }
+        if (names.some((name) => ["pyproject.toml", "ty.toml", "ruff.toml", ".ruff.toml"].includes(name)))
+          checks.push({
+            name: "python",
+            cwd: ".",
+            command: ["ty", "check", "--output-format", "concise", "--color", "never"],
+            parser: "ty",
+            coverage: ["**/*.{py,pyi}"]
+          });
+        if (await has("Cargo.toml"))
+          checks.push({
+            name: "rust",
+            cwd: ".",
+            command: ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"],
+            parser: "cargo",
+            coverage: ["**/*.rs"]
+          });
+        for (const path of ["representative.py", "representative.ts"]) {
+          const enabled = path.endsWith("py") ? checks.some((check) => check.name === "python") : checks.some((check) => check.name === "typescript") || names.some(
+            (name) => configurationImpact(name).includes("lint") && configurationLanguages(name).includes("typescript") && !/^(?:package|pnpm-lock|yarn\.lock)/.test(name)
+          );
+          if (!enabled) continue;
+          const expected = path.endsWith("py") ? "ruff" : config.javascript === "eslint" || !await has("biome.json") && !await has("biome.jsonc") ? "eslint" : "biome";
+          const runner = await select(this.root, join17(this.root, path), false, config, false, signal).catch(() => ({
+            name: expected,
+            command: expected,
+            prefix: []
+          }));
+          if (runner)
+            checks.push({
+              name: runner.name,
+              cwd: ".",
+              command: [
+                runner.command,
+                ...runner.prefix,
+                ...runner.name === "ruff" ? ["check", "--no-fix", "--no-fix-only", "--no-cache", "--output-format", "json", "."] : runner.name === "biome" ? ["lint", "--reporter=json", "--max-diagnostics=none", "."] : ["--format", "json", "."]
+              ],
+              parser: runner.name,
+              coverage: path.endsWith("py") ? ["**/*.{py,pyi}"] : ["**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"]
+            });
+        }
+        return checks;
+      }
+      async identity(checks, config, signal) {
+        const identities = await Promise.all(
+          checks.map(async (check) => {
+            const cwd = await workspacePath(this.root, check.cwd);
+            const tool2 = await resolveTool(
+              config.projectChecks === "auto" ? this.root : cwd,
+              join17(cwd, "representative"),
+              check.command,
+              config.projectChecks !== "auto",
+              false
+            );
+            return [
+              check,
+              tool2,
+              await Promise.all(
+                // Source arguments and directory mtimes change on ordinary edits.
+                // Only interpreter launch scripts belong to the tool identity.
+                tool2.command.slice(1).filter(
+                  (arg, index, args) => /^(?:node|python(?:\d+(?:\.\d+)*)?|bash|sh)(?:\.exe)?$/.test(
+                    basename5(tool2.command[0] ?? "")
+                  ) && /\.(?:[cm]?js|py|sh)$/.test(arg) && !args.slice(0, index).some((previous) => /\.(?:[cm]?js|py|sh)$/.test(previous))
+                ).map(async (arg) => {
+                  const info = await stat6(resolve11(cwd, arg)).catch(() => void 0);
+                  return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
+                })
+              ),
+              await analysisIdentity(
+                this.root,
+                [relative8(this.root, join17(cwd, "representative"))],
+                config,
+                signal,
+                false
+              )
+            ];
+          })
+        );
+        return hash(JSON.stringify([config.version, identities]));
+      }
+      output(job, cursor = 0) {
+        const diagnostics = job.results.flatMap((result) => result.findings);
+        const state = job.results.some((result) => result.state === "running") ? "running" : job.results.some((result) => result.state === "stale") ? "stale" : job.results.some((result) => result.state === "failed") || !job.checks.length ? "failed" : "complete";
+        return {
+          operation: "check_project",
+          job: job.id,
+          state,
+          checkers: job.results.map((result) => ({ ...result, findings: [] })),
+          diagnostics: diagnostics.slice(cursor, cursor + 100),
+          errors: diagnostics.filter((item) => item.severity === "error").length,
+          warnings: diagnostics.filter((item) => item.severity === "warning").length,
+          ...state === "running" || diagnostics.length > cursor + 100 ? {
+            next: {
+              workspace: this.root,
+              run: "cached",
+              job: job.id,
+              cursor: diagnostics.length > cursor + 100 ? String(cursor + 100) : "0"
+            }
+          } : {}
+        };
+      }
+      cachedOutput(job, cursor, configuration2) {
+        const output = this.output(job, cursor);
+        if (configuration2 === void 0 || configuration2 === job.configuration) return output;
+        return {
+          ...output,
+          state: "stale",
+          checkers: output.checkers.map((result) => ({
+            ...result,
+            state: "stale",
+            note: "Configuration changed; cached diagnostics only"
+          }))
+        };
+      }
+      async request(args, environment, signal) {
+        const cached = args["run"] === "cached";
+        const id = text(args["job"], this.latest);
+        let job = id ? this.jobs.get(id) : void 0;
+        if (cached)
+          return job ? this.cachedOutput(job, this.cursor(args), (await configuration(this.root)).version) : {
+            operation: "check_project",
+            job: id,
+            state: "missing",
+            checkers: [],
+            diagnostics: [],
+            errors: 0,
+            warnings: 0
+          };
+        const config = await configuration(this.root);
+        assertConfiguration(config);
+        const checks = await this.discover(config, signal);
+        const identity = await this.identity(checks, config, signal);
+        const before = await inventory(this.root, BUDGET.files, signal, config.exclude);
+        if (!before.complete) throw new Error("Project snapshot incomplete; baseline unavailable");
+        if (!job || args["refresh"] === true || job.identity !== identity || job.before !== before.version) {
+          job = await this.start(checks, config, environment, identity, before);
+        }
+        const wait = typeof args["waitMs"] === "number" ? Math.min(BUDGET.stopWait, Math.max(0, args["waitMs"])) : BUDGET.postWait;
+        await Promise.race([Promise.allSettled(job.done), delay4(wait, void 0, { signal }).catch(() => void 0)]);
+        return this.output(job, this.cursor(args));
+      }
+      cursor(args) {
+        const cursor = Number(text(args["cursor"], "0"));
+        if (!Number.isInteger(cursor) || cursor < 0) throw new Error("Invalid project cursor");
+        return cursor;
+      }
+      async start(checks, config, environment, identity, before) {
+        const job = {
+          id: randomUUID8(),
+          identity,
+          configuration: config.version,
+          environment,
+          before: before.version,
+          checks,
+          controller: new AbortController(),
+          results: checks.map((check) => ({
+            name: check.name,
+            parser: check.parser,
+            cwd: check.cwd,
+            coverage: check.coverage,
+            state: "running",
+            findings: []
+          })),
+          done: []
+        };
+        this.jobs.set(job.id, job);
+        this.latest = job.id;
+        for (const [index, check] of checks.entries())
+          job.done.push(
+            withExecution(environment, true, async () => {
+              const result = job.results[index];
+              if (!result) return;
+              const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.project)]);
+              try {
+                const cwd = await workspacePath(this.root, check.cwd);
+                const checkIdentity = await this.identity([check], config, signal);
+                const beforeFiles = before;
+                const tool2 = await resolveTool(
+                  config.projectChecks === "auto" ? this.root : cwd,
+                  join17(cwd, "representative"),
+                  check.command,
+                  config.projectChecks !== "auto",
+                  false
+                );
+                if (tool2.source === "missing") throw new Error(tool2.note ?? "Checker missing");
+                if (config.projectChecks === "auto" && check.parser === "tsc") {
+                  const shown = await run(tool2.command[0] ?? "", ["--showConfig"], cwd, signal, void 0, {
+                    timeout: BUDGET.project,
+                    environment
+                  });
+                  const data = JSON.parse(shown.stdout);
+                  if (shown.code !== 0 || !record(data))
+                    throw new Error("TypeScript effective configuration unavailable");
+                  const pkg = JSON.parse(
+                    await readFile17(join17(cwd, "package.json"), "utf8").catch(() => "{}")
+                  );
+                  if (Array.isArray(data["references"]) && data["references"].length || record(pkg) && pkg["workspaces"])
+                    throw new Error("TypeScript references/multi-package projects require explicit projectChecks");
+                  const includes = data["include"];
+                  const files = data["files"];
+                  const excluded = data["exclude"];
+                  result.coverage = Array.isArray(includes) ? includes.filter((item) => typeof item === "string").map(includePattern) : Array.isArray(files) ? files.filter((item) => typeof item === "string").map((item) => item.replace(/^\.\//, "")) : ["**/*.{ts,tsx,mts,cts}"];
+                  result.excluded = Array.isArray(excluded) ? excluded.filter((item) => typeof item === "string") : [];
+                  const compiler = record(data["compilerOptions"]) ? data["compilerOptions"] : {};
+                  if (compiler["allowJs"] !== true || compiler["checkJs"] !== true)
+                    result.excluded.push("**/*.{js,jsx,mjs,cjs}");
+                }
+                if (config.projectChecks === "auto" && check.parser === "ty") {
+                  const content = await readFile17(join17(cwd, "ty.toml"), "utf8").catch(() => void 0);
+                  const data = content ? parse(content) : parse(await readFile17(join17(cwd, "pyproject.toml"), "utf8").catch(() => ""));
+                  const toolConfig = content ? data : record(data["tool"]) && record(data["tool"]["ty"]) ? data["tool"]["ty"] : {};
+                  const src = record(toolConfig["src"]) ? toolConfig["src"] : {};
+                  if (Array.isArray(src["include"]))
+                    result.coverage = src["include"].filter((item) => typeof item === "string").map(includePattern);
+                  if (Array.isArray(src["exclude"]))
+                    result.excluded = src["exclude"].filter((item) => typeof item === "string");
+                }
+                const output = await run(tool2.command[0] ?? "", tool2.command.slice(1), cwd, signal, void 0, {
+                  timeout: BUDGET.project,
+                  environment
+                });
+                result.findings = await projectOutput(
+                  check,
+                  output.stdout + (["tsc", "ty", "sarif"].includes(check.parser) ? output.stderr : ""),
+                  this.root,
+                  cwd
+                );
+                if (output.code !== 0 && !(result.findings.length && (output.code === 1 || check.parser === "tsc" && output.code === 2 || check.parser === "cargo" && output.code === 101)))
+                  throw new Error(output.stderr || `Checker exit ${output.code} without located diagnostics`);
+                if (await this.identity([check], await configuration(this.root), signal) !== checkIdentity)
+                  throw new Error("Checker configuration/tool changed during baseline");
+                const afterFiles = await inventory(this.root, BUDGET.files, signal, config.exclude);
+                const relevant = [.../* @__PURE__ */ new Set([...beforeFiles.files.keys(), ...afterFiles.files.keys()])].filter(
+                  (path) => covers(result, path) || configurationImpact(path).length > 0
+                );
+                if (!afterFiles.complete || relevant.some((path) => beforeFiles.files.get(path) !== afterFiles.files.get(path)))
+                  throw new Error("Project changed while establishing baseline; retry before editing");
+                result.state = "complete";
+              } catch (error) {
+                result.state = "failed";
+                result.note = message(error);
+              }
+            })
+          );
+        while (this.jobs.size > 32) {
+          const first = [...this.jobs.values()].find(
+            (entry) => entry.id !== job.id && entry.results.every((result) => result.state !== "running")
+          );
+          if (!first) break;
+          this.jobs.delete(first.id);
+        }
+        return job;
+      }
+      async baseline(session, paths, environment, signal, wait) {
+        const config = await configuration(this.root);
+        assertConfiguration(config);
+        const store = new Metadata(this.root);
+        const state = await store.read(session);
+        const checks = await this.discover(config, signal);
+        const identity = await this.identity(checks, config, signal);
+        let job;
+        let recovered;
+        if (state.diagnosticBaseline) {
+          const data = await store.readShared(state.diagnosticBaseline);
+          if (record(data) && data["identity"] === identity && Array.isArray(data["results"]))
+            recovered = data;
+        }
+        if (recovered?.results.some((result) => result.state === "running")) recovered = void 0;
+        if (!recovered) {
+          job = [...this.jobs.values()].find(
+            (entry) => entry.id === state.shown["baselineJob"] && entry.identity === identity
+          );
+          if (!job) {
+            if (state.edited)
+              throw new Error(
+                "Editing has already occurred; cannot create a pre-edit diagnostic baseline. Restart the session or explicitly disable automatic diagnostics"
+              );
+            const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
+            if (!snapshot2.complete) throw new Error("Baseline inventory incomplete");
+            job = await this.start(checks, config, environment, identity, snapshot2);
+            this.sessionJobs.set(session, job.id);
+            await store.update(session, signal, (current) => {
+              if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
+              current.shown["baselineJob"] = job?.id ?? "";
+              return true;
+            });
+          }
+          const selected = job.checks.map((check, index) => ({ check, index })).filter(({ check }) => !paths || paths.some((path) => covers(check, path)));
+          await Promise.race([
+            Promise.allSettled(selected.map(({ index }) => job?.done[index])),
+            delay4(wait, void 0, { signal }).catch(() => void 0)
+          ]);
+          recovered = { identity, results: job.results, before: job.before };
+        }
+        const results = recovered.results;
+        const reference = await store.shared(recovered);
+        await store.update(session, signal, (current) => {
+          if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
+          current.diagnosticBaseline = reference;
+          current.configuration = config.version;
+          return true;
+        });
+        const snapshot = paths ? void 0 : await inventory(this.root, BUDGET.files, signal, config.exclude);
+        const targets = paths ?? [...snapshot?.files.keys() ?? []].filter(
+          (path) => codeLanguage(config, path) && !/(?:json|yaml|css|html)$/.test(codeLanguage(config, path) ?? "")
+        );
+        const failures = [];
+        const pending = [];
+        const reliable = {};
+        const covered = [];
+        for (const path of targets) {
+          if (!codeLanguage(config, path)) continue;
+          const related = results.filter((result) => covers(result, path));
+          reliable[path] = related.filter((result) => result.state === "complete").map((result) => result.parser);
+          const language = codeLanguage(config, path);
+          const required = language === "typescript" && /\.[cm]?tsx?$/.test(path) ? "tsc" : language === "python" ? "ty" : language === "rust" ? "cargo" : void 0;
+          if (config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
+            failures.push(`${path}: no type checker coverage; configure projectChecks`);
+          if (!related.length) failures.push(`${path}: no project checker coverage; configure projectChecks`);
+          if (related.length && related.every((result) => result.state === "complete") && !(config.projectChecks === "auto" && required && !related.some((result) => result.parser === required)))
+            covered.push(path);
+          for (const result of related) {
+            if (result.state === "running") pending.push(result.name);
+            else if (result.state !== "complete") failures.push(`${result.name}: ${result.note ?? result.state}`);
+          }
+        }
+        return {
+          reference,
+          reliable,
+          covered,
+          findings: results.filter((result) => result.state === "complete").flatMap((result) => result.findings),
+          failures: [...new Set(failures)],
+          pending: [...new Set(pending)]
+        };
+      }
+      async introduced(session, paths, environment, signal, wait) {
+        const baseline = await this.baseline(session, paths, environment, signal, 0);
+        const store = new Metadata(this.root);
+        const data = await store.readShared(baseline.reference);
+        if (!record(data) || !Array.isArray(data["results"])) return [];
+        const before = data["results"];
+        const output = await this.request({ waitMs: wait }, environment, signal);
+        const job = this.jobs.get(output.job);
+        if (!job || job.identity !== data["identity"]) return [];
+        return job.results.flatMap((result) => {
+          const old = before.find((item) => item.name === result.name && item.parser === result.parser);
+          if (result.state !== "complete" || old?.state !== "complete") return [];
+          return addedFindings(old.findings, result.findings).filter(
+            (finding) => paths.includes(finding.path) && baseline.covered.includes(finding.path) && covers(result, finding.path)
+          );
+        });
+      }
+      async revalidate() {
+        for (const job of this.jobs.values()) {
+          if (!job.results.some((result) => result.state === "running")) continue;
+          await withExecution(job.environment, true, async () => {
+            const config = await configuration(this.root);
+            if (config.version !== job.configuration || !config.valid) job.controller.abort();
+          });
+        }
+      }
+      async dispose() {
+        for (const job of this.jobs.values()) job.controller.abort();
+        await Promise.allSettled([...this.jobs.values()].flatMap((job) => job.done));
       }
     };
   }
@@ -7985,7 +8232,7 @@ async function runService(root, identity, token) {
 async function serve(root, identity, token) {
   const location = await serviceLocation(root);
   const projects = new ProjectChecks(root);
-  const engine = new Engine(root, void 0, projects);
+  const engine = new Engine(root);
   const automatic = new Automatic(root, engine);
   const hooks = new HookEngine(root, {
     projects,
@@ -8089,12 +8336,14 @@ async function serve(root, identity, token) {
             ))
               throw new Error("Unknown service operation");
             const config = await configuration(root);
-            if (!config.trusted) automatic.cancel();
+            if (!config.valid || config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
+              automatic.cancel();
             const output2 = await engine.dispatch(operation, args, controller.signal);
             if (operation === "lsp_status")
               return {
                 ...output2,
                 service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
+                projectChecks: projects.status(config.version),
                 automaticDiagnostics: config.automaticDiagnostics,
                 automaticTasks: automatic.status(),
                 hookTasks: coordinator.status()
@@ -8154,7 +8403,7 @@ async function serve(root, identity, token) {
   const idle = setInterval(() => {
     void coordinator.ingest().catch(() => void 0);
     if (!revalidation)
-      revalidation = automatic.revalidate().catch(() => void 0).finally(() => {
+      revalidation = Promise.all([automatic.revalidate(), projects.revalidate()]).then(() => void 0).catch(() => void 0).finally(() => {
         revalidation = void 0;
       });
     if (requests || coordinator.active || automatic.active || projects.active || warming || warmupTimer && !warmupTask)
@@ -8258,16 +8507,12 @@ if (major < 22 || major === 22 && minor < 12) {
       const parsed = JSON.parse(input);
       if (parsed && typeof parsed === "object" && "hook_event_name" in parsed && typeof parsed.hook_event_name === "string") {
         event = parsed.hook_event_name;
-        const tool2 = "tool_name" in parsed && typeof parsed.tool_name === "string" ? parsed.tool_name : "";
-        passthrough = event === "PreToolUse" && (/^(?:bash|shell|exec_command|unified_exec)$/i.test(tool2.split(".").at(-1) ?? "") || /read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool2));
+        passthrough = event === "PreToolUse";
       }
     } catch {
     }
-    if (!passthrough)
-      process.stdout.write(
-        `${JSON.stringify({ systemMessage: reason, ...event === "PreToolUse" ? { hookSpecificOutput: { hookEventName: event, permissionDecision: "deny", permissionDecisionReason: reason } } : {} })}
-`
-      );
+    if (!passthrough) process.stdout.write(`${JSON.stringify({ systemMessage: reason })}
+`);
   } else {
     process.stderr.write(`${reason}
 `);

@@ -37,7 +37,8 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 	});
 	expect(await readFile(join(root, "a.js"), "utf8")).not.toBe(before);
 });
-it("does not execute repository tools unless trusted by the user", async () => {
+it("reports unavailable lint without requiring directory trust", async () => {
+	vi.stubEnv("PATH", "");
 	const root = await mkdtemp(join(tmpdir(), "codex-untrusted-"));
 	roots.push(root);
 	await mkdir(join(root, "home"));
@@ -45,5 +46,5 @@ it("does not execute repository tools unless trusted by the user", async () => {
 
 	await writeFile(join(root, "biome.json"), "{}");
 	await writeFile(join(root, "a.js"), "var bad=1;");
-	expect(await lint(root, "a.js", new AbortController().signal)).toBeUndefined();
+	expect((await lint(root, "a.js", new AbortController().signal))?.note).toContain("not installed");
 });

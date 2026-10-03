@@ -3,16 +3,15 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, relative, sep } from "node:path";
 import type { AutomaticResult } from "./automatic.js";
 import { BUDGET } from "./budgets.js";
-import { type Config, configuration } from "./config.js";
+import { assertConfiguration, type Config, configuration } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
-import { automaticExecution, executionEnvironment } from "./environment.js";
+import { automaticExecution } from "./environment.js";
 import { hash, type Inventory, indexStatistics, inventory, latestInventory, workspacePath } from "./files.js";
 import type { HookOutput } from "./hook-engine.js";
 import { analysisIdentity } from "./identity.js";
 import { Languages } from "./language.js";
 import { Metadata } from "./metadata.js";
 import { timings } from "./metrics.js";
-import { ProjectChecks } from "./project-checks.js";
 import type { ProjectResult } from "./project-types.js";
 import {
 	type FileResult,
@@ -23,7 +22,7 @@ import {
 	text,
 	WriteFailure,
 } from "./results.js";
-import { formatWithRunner, lintBatch, preflightRunner } from "./runners.js";
+import { clearLintAvailability, formatWithRunner, lintBatch, preflightRunner } from "./runners.js";
 import { codeLanguage, withToolResolution } from "./tool-resolution.js";
 
 export interface EngineDependencies {
@@ -41,7 +40,7 @@ export type ToolOutput = Record<string, unknown> &
 		| { operation: "hook"; output: HookOutput }
 		| ({ operation: "automatic" } & AutomaticResult)
 		| { operation: "automatic_batch"; results: FileResult[] }
-		| { operation: "lsp_status"; workspace: string; trusted: boolean; configuration: Config }
+		| { operation: "lsp_status"; workspace: string; configuration: Config }
 		| { operation: "check_diagnostics"; results: FileResult[]; partial: boolean; errors: number; warnings: number }
 		| ({ operation: "lsp_navigation" | "lsp_rename" } & NavigationResult)
 		| { operation: "lsp_format"; results: FormatResult[]; modifiedPaths: string[] }
@@ -65,16 +64,13 @@ export class Engine {
 	private readonly sessions = new Map<string, Session>();
 	private language: Languages | undefined;
 	private configVersion = "";
+	private lastConfig: Config | undefined;
 	private previousSnapshot: Inventory | undefined;
 	private queue: Promise<unknown> = Promise.resolve();
 	private generation = 0;
 	async warmup(signal: AbortSignal): Promise<void> {
 		const config = await configuration(this.root);
-		if (
-			!config.trusted ||
-			(config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
-		)
-			return;
+		if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off") return;
 		const snapshot = latestInventory(this.root);
 		if (!snapshot?.complete) return;
 		const representatives = new Map<string, { path: string; count: number }>();
@@ -150,7 +146,6 @@ export class Engine {
 				return results;
 			},
 		},
-		private readonly projects = new ProjectChecks(root),
 	) {}
 	private session(id: string, turn?: string): Session {
 		let session = this.sessions.get(id);
@@ -357,11 +352,18 @@ export class Engine {
 			return { operation };
 		}
 		const config = await configuration(this.root);
-		if (this.configVersion !== config.version || args["refresh"] === true) {
-			if (args["refresh"] === true) await this.close();
-			else await this.language?.update(config);
+		if (config.valid && (this.configVersion !== config.version || args["refresh"] === true)) {
+			if (args["refresh"] === true) {
+				clearLintAvailability(this.root);
+				await this.close();
+			} else await this.language?.update(config);
 			this.cache.clear();
 			this.pages.clear();
+			this.configVersion = config.version;
+		}
+		if (config.valid) this.lastConfig = config;
+		if (!config.valid && operation === "lsp_status") {
+			await this.language?.update(config);
 			this.configVersion = config.version;
 		}
 		const store = new Metadata(this.root);
@@ -382,14 +384,14 @@ export class Engine {
 			this.language ??= new Languages(this.root, config);
 			const targets = args["path"]
 				? [text(args["path"])]
-				: Object.values(config.servers)
-						.filter((server) => !!server)
-						.map((server) => (server ? `status${server.extensions[0]}` : ""));
+				: Object.entries(config.extensions).map(([, extensions]) => `status${extensions[0]}`);
 			return {
 				operation,
 				workspace: this.root,
-				trusted: config.trusted,
 				configuration: config,
+				configurationSources: config.sources,
+				configurationIssues: config.issues,
+				projectChecks: { state: "unverified", configured: config.projectChecks },
 				tools: await Promise.all(
 					targets.map((path) => this.language?.status(path).catch((error) => ({ path, reason: message(error) }))),
 				),
@@ -400,9 +402,8 @@ export class Engine {
 				sessions: [...this.sessions.keys()],
 			};
 		}
+		if (!(operation === "check_diagnostics" && args["run"] === "cached")) assertConfiguration(config);
 		if (operation === "automatic_batch") {
-			if (!config.trusted)
-				throw new Error("Automatic LSP/lint requires workspace trust; lint requires workspace trust");
 			const paths = Array.isArray(args["paths"])
 				? args["paths"].filter((path): path is string => typeof path === "string")
 				: [];
@@ -424,15 +425,24 @@ export class Engine {
 			args["scope"] === "paths" || args["scope"] === undefined
 				? text(args["session"], "manual")
 				: this.id(args["session"]);
-		if (operation === "check_diagnostics") return this.diagnostics(args, id, signal, config, store);
-		if (
-			(operation === "lsp_rename" || operation === "lsp_format") &&
-			(config.automaticDiagnostics.postToolUse !== "off" || config.automaticDiagnostics.stop !== "off")
-		) {
-			const paths = operation === "lsp_rename" ? undefined : (await this.paths(args, signal)).paths;
-			const baseline = await this.projects.baseline(id, paths, executionEnvironment(), signal, BUDGET.stopWait);
-			if (baseline.pending.length || baseline.failures.length)
-				throw new Error(`Pre-edit baseline unavailable: ${[...baseline.pending, ...baseline.failures].join("; ")}`);
+		if (operation === "check_diagnostics") {
+			if (!config.valid && args["run"] === "cached" && this.lastConfig) {
+				const output = await this.diagnostics(args, id, signal, this.lastConfig, store);
+				return {
+					...output,
+					operation: "check_diagnostics",
+					partial: true,
+					configurationIssues: config.issues,
+					errors: Number(output["errors"]),
+					warnings: Number(output["warnings"]),
+					results: (output["results"] as FileResult[]).map((result) => ({
+						...result,
+						state: "stale",
+						note: "Configuration error; cached diagnostics only",
+					})),
+				};
+			}
+			return this.diagnostics(args, id, signal, config, store);
 		}
 
 		if (operation === "lsp_rename") args = { ...args, operation: "rename" };
@@ -456,25 +466,9 @@ export class Engine {
 				if (before) this.cache.clear();
 			}
 			if (before) {
-				const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
 				this.cache.clear();
-				const after = await inventory(this.root, BUDGET.files, signal).catch((error: unknown) => {
-					throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
-				});
-				const changed = [...after.files]
-					.filter(([path, version]) => before.files.get(path) !== version)
-					.map(([path]) => path);
-				try {
-					await this.check(
-						[...new Set([text(args["path"]), ...changed])],
-						id,
-						this.session(id).turn,
-						false,
-						signal,
-					);
-				} catch (error) {
-					throw new WriteFailure(`${message(error)}; ${JSON.stringify(output)}`, modifiedPaths);
-				}
+				const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
+				return { ...output, operation, diagnostics: await this.afterWrite(modifiedPaths, id, signal) };
 			}
 			return { ...output, operation };
 		}
@@ -483,10 +477,12 @@ export class Engine {
 		if (operation === "lsp_format") {
 			if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
 			if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
+			if (!config.formattingEnabled)
+				throw new Error("Configuration error: formatting disabled; repair formatting configuration");
 			this.language ??= new Languages(this.root, config);
 			for (const path of paths) {
 				const runner = await preflightRunner(this.root, path, config, signal);
-				await this.language.preflight(path, signal, runner ? undefined : "format");
+				if (!runner) await this.language.preflight(path, signal, "format");
 			}
 			const writes: FormatResult[] = [];
 			const modifiedPaths: string[] = [];
@@ -499,17 +495,28 @@ export class Engine {
 					);
 					if (writes.at(-1)?.status === "formatted") modifiedPaths.push(path);
 				}
-				await this.check(paths, id, "manual", false, signal);
 			} catch (error) {
 				throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(writes)}`, modifiedPaths);
 			} finally {
 				this.cache.clear();
 			}
-			return { operation, modifiedPaths, results: writes };
+			return { operation, modifiedPaths, results: writes, diagnostics: await this.afterWrite(paths, id, signal) };
 		}
 		throw new Error("Unknown tool");
 	}
 
+	private async afterWrite(paths: string[], id: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+		try {
+			const results = await this.check(paths, id, this.session(id).turn, false, signal);
+			return { state: results.every((result) => result.state === "complete") ? "complete" : "partial", results };
+		} catch (error) {
+			return {
+				state: "unavailable",
+				note: message(error),
+				recovery: "Writes completed; inspect modifiedPaths. Do not replay the write to retry diagnostics.",
+			};
+		}
+	}
 	private async diagnostics(
 		args: Record<string, unknown>,
 		id: string,
