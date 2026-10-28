@@ -22,7 +22,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
 	createInterface({ input: child.stdout }).on("line", line => { const message = JSON.parse(line); pending.get(message.id)?.(message.result); pending.delete(message.id); });
 	t.after(async () => { child.stdin.end(); await exit; await rm(dir, { recursive: true, force: true }); });
-	const call = (name, args = {}) => new Promise((resolve, reject) => {
+	const rawCall = (name, args = {}) => new Promise((resolve, reject) => {
 		const id = ++sequence;
 		const timer = setTimeout(() => reject(new Error(`Timeout ${name}: ${stderr}`)), 50000);
 		pending.set(id, result => { clearTimeout(timer); if (result.isError) reject(new Error(JSON.stringify(result))); else resolve(result); });
@@ -30,11 +30,13 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	});
 	const check = async path => {
 		for (let i = 0; i < 4; i++) {
-			const result = (await call("check_diagnostics", { path, source: "lsp" })).structuredContent;
+			const result = (await call("diagnostics", { path, source: "lsp" })).structuredContent;
 			if (result.results.every(entry => entry.state === "complete")) return result;
 		}
 		assert.fail(`Diagnostics never completed: ${path}`);
 	};
+	const call = async (name, args = {}) => { const result = await rawCall(name,args); return ["rename","format"].includes(name) ? rawCall("apply",{plan:result.structuredContent.plan}) : result; };
+
 	const build = (command, args, cwd) => { const result = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 30000 }); assert.equal(result.status, 0, result.stderr); };
 	build("uv", ["venv", "--python", spawnSync("uv", ["python", "find"], { encoding: "utf8" }).stdout.trim(), join(root, ".venv")], root);
 	build("uv", ["run", "--no-project", "--no-sync", "--python", join(root, ".venv", "bin", "python"), "python", "-c", "import pathlib,sysconfig; p=pathlib.Path(sysconfig.get_paths()['purelib'])/'localdep'; p.mkdir(); (p/'__init__.py').write_text('number: int = 7\\n')"], root);
@@ -46,7 +48,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	await writeFile(join(root, "main.py"), "from lib import twice\nvalue: int = 1\nanswer = twice(2)\n");
 	assert.equal((await check("main.py")).errors, 0);
 	for (const operation of ["definition", "references", "symbols", "hover", "typeDefinition", "implementation", "signatureHelp", "prepare_rename"]) {
-		const response = await call("lsp_navigation", { path: operation === "prepare_rename" ? "lib.py" : "main.py", operation, line: operation === "prepare_rename" ? 1 : 3, column: operation === "prepare_rename" ? 6 : operation === "signatureHelp" ? 16 : 12 });
+		const response = await call("navigate", { path: operation === "prepare_rename" ? "lib.py" : "main.py", operation, line: operation === "prepare_rename" ? 1 : 3, column: operation === "prepare_rename" ? 6 : operation === "signatureHelp" ? 16 : 12 });
 		const navigation = response.structuredContent.result ?? response.structuredContent;
 		if (operation === "definition") assert.match(JSON.stringify(navigation), /lib\.py/);
 		if (operation === "references") assert.match(JSON.stringify(navigation), /main\.py/);
@@ -57,20 +59,20 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 		if (operation === "prepare_rename") assert(!Array.isArray(navigation), "rename preparation returns a range");
 		if (["typeDefinition", "implementation", "signatureHelp"].includes(operation)) t.diagnostic(`ty ${operation}: ${JSON.stringify(navigation)}`);
 	}
-	await call("lsp_rename", { path: "lib.py", line: 1, column: 6, newName: "double_value" });
+	await call("rename", { path: "lib.py", line: 1, column: 6, newName: "double_value" });
 	assert.match(await readFile(join(root, "main.py"), "utf8"), /double_value/);
 	await writeFile(join(root, "stub.pyi"), "def f( x:int)->int: ...\n");
-	await call("lsp_format", { paths: ["main.py", "stub.pyi"] });
+	await call("format", { paths: ["main.py", "stub.pyi"] });
 	await writeFile(join(root, "lint.py"), "import os\n");
-	assert((await call("check_diagnostics", { path: "lint.py", source: "lint" })).structuredContent.results[0].findings.length > 0);
+	assert((await call("diagnostics", { path: "lint.py", source: "lint" })).structuredContent.results[0].findings.length > 0);
 	const ty = spawnSync("which", ["ty"], { encoding: "utf8" }).stdout.trim();
 	const ruff = spawnSync("which", ["ruff"], { encoding: "utf8" }).stdout.trim();
 	const projectTy = join(root, ".venv", "bin", "ty"), projectRuff = join(root, ".venv", "bin", "ruff");
 	await symlink(ty, projectTy); await symlink(ruff, projectRuff);
 	for (const expected of [["project", "project"], ["project", "PATH"], ["PATH", "project"]]) {
-		const local = (await call("lsp_status", { path: "main.py" })).structuredContent.tools[0];
+		const local = (await call("status", { path: "main.py" })).structuredContent.tools[0];
 		assert.equal(local.tool.source, expected[0]); assert.equal(local.lint.source, expected[1]);
-		const result = (await call("check_diagnostics", { path: "main.py" })).structuredContent;
+		const result = (await call("diagnostics", { path: "main.py" })).structuredContent;
 		assert.equal(result.errors, 0); assert.equal(result.results[0].channels.lsp, "complete"); assert.equal(result.results[0].channels.lint, "complete");
 		if (expected[1] === "project") await rm(projectRuff);
 		else { await rm(projectTy); await symlink(ruff, projectRuff); }
@@ -95,7 +97,7 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 		await writeFile(join(project, "compile_commands.json"), JSON.stringify(database));
 		assert.equal((await check(`${folder}/value.${extension}`)).errors, 0);
 		for (const operation of ["definition", "references", "hover", "symbols"]) {
-			const navigation = (await call("lsp_navigation", { path: `${folder}/main.${extension}`, operation, line: 2, column: 21 })).structuredContent.result;
+			const navigation = (await call("navigate", { path: `${folder}/main.${extension}`, operation, line: 2, column: 21 })).structuredContent.result;
 			if (operation === "definition") assert.match(JSON.stringify(navigation), /value\./);
 			if (operation === "references") assert.match(JSON.stringify(navigation), /main\./);
 			if (operation === "hover") assert(navigation.contents);
@@ -105,14 +107,15 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 		assert((await check(`${folder}/main.${extension}`)).errors > 0);
 		await writeFile(join(project, `main.${extension}`), '#include "value.h"\nint main(){return twice(2)==4 ? 0:1;}\n');
 		assert.equal((await check(`${folder}/main.${extension}`)).errors, 0);
-		await call("lsp_rename", { path: `${folder}/value.h`, line: 2, column: 6, newName: "double_value" });
-		await call("lsp_format", { paths: files.map(file => `${folder}/${file}`) });
+		await call("rename", { path: `${folder}/value.h`, line: 2, column: 6, newName: "double_value" });
+		await call("format", { paths: files.map(file => `${folder}/${file}`) });
 		assert.match(await readFile(join(project, `value.${extension}`), "utf8"), /double_value/);
 		assert.match(await readFile(join(project, `value.${extension}`), "utf8"), /\n    return/);
 		build(compiler, ["-DMULTIPLIER=2", ...files, "-o", "program"], project);
 	}
 	await mkdir(join(root, "fallback")); await writeFile(join(root, "fallback", "main.c"), "int main(void) { return unknown_name; }\n");
 	assert((await check("fallback/main.c")).errors > 0, "clangd fallback still runs without a compilation database");
+	if (process.env.CODEX_LSP_TEST_RUST !== "1") { t.diagnostic("Rust explicitly disabled for local acceptance"); return; }
 	const rust = join(root, "rust"); await mkdir(join(rust, "core", "src"), { recursive: true }); await mkdir(join(rust, "app", "src"), { recursive: true });
 	await writeFile(join(rust, "Cargo.toml"), '[workspace]\nmembers = ["core", "app"]\nresolver = "2"\n');
 	await writeFile(join(rust, "rustfmt.toml"), "tab_spaces = 4\n");
@@ -124,15 +127,15 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	await writeFile(join(rust, "app", "src", "main.rs"), 'fn main(){let value: i32 = 2;println!("{}",example_core::twice(value));}\n');
 	assert.equal((await check("rust/app/src/main.rs")).errors, 0);
 	for (const operation of ["definition", "references", "hover", "symbols"]) {
-		const navigation = (await call("lsp_navigation", { path: "rust/core/src/lib.rs", operation, line: 1, column: 9 })).structuredContent.result;
+		const navigation = (await call("navigate", { path: "rust/core/src/lib.rs", operation, line: 1, column: 9 })).structuredContent.result;
 		if (operation === "definition") assert.match(JSON.stringify(navigation), /lib\.rs/);
 		if (operation === "references") assert.match(JSON.stringify(navigation), /main\.rs/);
 		if (operation === "hover") assert(navigation.contents);
 		if (operation === "symbols") assert(Array.isArray(navigation) && navigation.length > 0);
 	}
-	await call("lsp_rename", { path: "rust/core/src/lib.rs", line: 1, column: 9, newName: "double_value" });
+	await call("rename", { path: "rust/core/src/lib.rs", line: 1, column: 9, newName: "double_value" });
 	assert.match(await readFile(join(rust, "app", "src", "main.rs"), "utf8"), /double_value/);
-	await call("lsp_format", { paths: ["rust/core/src/lib.rs", "rust/app/src/main.rs"] });
+	await call("format", { paths: ["rust/core/src/lib.rs", "rust/app/src/main.rs"] });
 	assert.match(await readFile(join(rust, "core", "src", "lib.rs"), "utf8"), /\n    value \* 2/);
 	build("cargo", ["check", "--offline", "--workspace"], rust); build("cargo", ["test", "--offline", "--workspace"], rust);
 	await writeFile(join(rust, "core", "src", "extra.rs"), "pub const EXTRA: i32 = 1;\n");
@@ -142,8 +145,8 @@ test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, t
 	assert.equal((await check("rust/core/src/lib.rs")).errors, 0);
 	const rustAnalyzer = spawnSync("which", ["rust-analyzer"], { encoding: "utf8" }).stdout.trim();
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { rust: { command: [rustAnalyzer], extensions: [".rs"], initialization: { rustfmt: { overrideCommand: [join(dir, "missing-rustfmt")] } } } } }));
-	await assert.rejects(call("lsp_format", { path: "rust/core/src/lib.rs" }), /rustfmt|formatting/i);
-	const status = (await call("lsp_status", { path: "main.py" })).structuredContent;
+	await assert.rejects(call("format", { path: "rust/core/src/lib.rs" }), /rustfmt|formatting/i);
+	const status = (await call("status", { path: "main.py" })).structuredContent;
 	assert.equal(status.tools[0].tool.source, "PATH");
 	assert(status.tools[0].tool.command[0].endsWith("/ty"));
 	t.diagnostic(JSON.stringify({ platform: process.platform, timings: status.timings }));

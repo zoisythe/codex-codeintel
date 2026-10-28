@@ -32,13 +32,13 @@ try {
 			const counts = async () => { const value = once(client.child, "message"); client.child.send("counts"); return (await value)[0]; };
 			try {
 				const active = revision === "before" ? { mode: "full", path: "a.fake", session: "bench" } : { path: "a.fake", session: "bench", source: "lsp" };
-				await client.call("check_diagnostics", active); await counts();
+				await client.call("diagnostics", active); await counts();
 				for (const run of ["active", "cached"]) {
 					const ms = [], scans = [];
 					for (let i = 0; i < 10; i++) {
 						if (run === "active") await writeFile(join(root, "a.fake"), `broken ${i}\n`);
 						const start = performance.now();
-						const response = await client.call("check_diagnostics", run === "active" ? active : revision === "before" ? { mode: "all", session: "bench" } : { path: "a.fake", session: "bench", source: "lsp", run: "cached" });
+						const response = await client.call("diagnostics", run === "active" ? active : revision === "before" ? { mode: "all", session: "bench" } : { path: "a.fake", session: "bench", source: "lsp", run: "cached" });
 						if (response.isError) throw new Error(JSON.stringify(response));
 						ms.push(performance.now() - start); scans.push((await counts()) / (count - 1));
 					}

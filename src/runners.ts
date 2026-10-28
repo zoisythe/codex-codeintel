@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { BUDGET } from "./budgets.js";
 import { type Config, configuration } from "./config.js";
@@ -12,7 +12,7 @@ import { createSpawnCommand, terminateProcessTree } from "./lsp/process.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
 import { HIDDEN_PROCESS } from "./process-options.js";
-import { type FileResult, type FormatResult, message, record } from "./results.js";
+import { type FileResult, message, record } from "./results.js";
 import { codeLanguage, resolveTool } from "./tool-resolution.js";
 
 export async function run(
@@ -239,6 +239,15 @@ export async function lint(
 ): Promise<FileResult | undefined> {
 	return (await lintBatch(root, [path], signal, provided, active)).get(path);
 }
+export async function lintDirectory(root: string, absolute: string): Promise<string> {
+	let cwd = dirname(absolute);
+	while (cwd !== root && inside(root, cwd)) {
+		const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
+		if (names.some((name) => configurationImpact(name).includes("lint"))) break;
+		cwd = dirname(cwd);
+	}
+	return cwd;
+}
 export async function lintBatch(
 	root: string,
 	paths: string[],
@@ -264,12 +273,7 @@ export async function lintBatch(
 				});
 				continue;
 			}
-			let cwd = dirname(absolute);
-			while (cwd !== root && inside(root, cwd)) {
-				const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
-				if (names.some((name) => configurationImpact(name).includes("lint"))) break;
-				cwd = dirname(cwd);
-			}
+			const cwd = await lintDirectory(root, absolute);
 			const key = JSON.stringify([
 				runner,
 				cwd,
@@ -375,7 +379,7 @@ export async function formatWithRunner(
 	path: string,
 	signal: AbortSignal,
 	provided?: Config,
-): Promise<FormatResult | undefined> {
+): Promise<{ before: string; after: string } | undefined> {
 	const config = provided ?? (await configuration(root));
 	const absolute = await workspacePath(root, path);
 	const runner = await select(root, absolute, true, config, true, signal);
@@ -388,10 +392,7 @@ export async function formatWithRunner(
 	const result = await run(runner.command, [...runner.prefix, ...args], dirname(absolute), signal, before);
 	if (result.code !== 0) throw new Error(result.stderr || "Format failed");
 	if ((await readFile(absolute, "utf8")) !== before) throw new Error("File changed during format; retry");
-	if (before === result.stdout) return { status: "unchanged", path, modifiedPaths: [] };
-	signal.throwIfAborted();
-	await writeFile(absolute, result.stdout);
-	return { status: "formatted", path, modifiedPaths: [path] };
+	return { before, after: result.stdout };
 }
 
 export async function preflightRunner(

@@ -36,7 +36,7 @@ it("persists scope metadata without diagnostic findings", async () => {
 	expect(await hook.hook({ session_id: "s" }, new AbortController().signal)).toContain("private finding");
 	const engine = new Engine(root);
 	const output = await engine.dispatch(
-		"check_diagnostics",
+		"diagnostics",
 		{ scope: "session", run: "cached" },
 		new AbortController().signal,
 	);
@@ -67,12 +67,12 @@ it("requires revision on continuation and rejects changed content", async () => 
 	await Promise.all(Array.from({ length: 60 }, (_, i) => writeFile(join(root, `page${i}.ts`), "x")));
 	const args = { scope: "paths", paths: Array.from({ length: 60 }, (_, i) => `page${i}.ts`), session: "s" };
 	const signal = new AbortController().signal;
-	const first = await engine.dispatch("check_diagnostics", args, signal);
+	const first = await engine.dispatch("diagnostics", args, signal);
 	const cursor = (JSON.parse(first) as { next: { cursor: string } }).next.cursor;
 	expect(cursor).toBeTruthy();
-	await expect(engine.dispatch("check_diagnostics", { ...args, cursor: "invalid" }, signal)).rejects.toThrow("Cursor");
+	await expect(engine.dispatch("diagnostics", { ...args, cursor: "invalid" }, signal)).rejects.toThrow("Cursor");
 	await writeFile(join(root, "a.ts"), "changed");
-	await expect(engine.dispatch("check_diagnostics", { ...args, cursor }, signal)).rejects.toThrow("Cursor");
+	await expect(engine.dispatch("diagnostics", { ...args, cursor }, signal)).rejects.toThrow("Cursor");
 	expect(await readFile(join(root, "a.ts"), "utf8")).toBe("changed");
 	await engine.close();
 });

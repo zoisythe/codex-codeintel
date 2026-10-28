@@ -28,71 +28,137 @@ function tool(
 		annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, openWorldHint: false },
 	};
 }
+
+const selector = {
+	line: { type: "integer", minimum: 1 },
+	column: { type: "integer", minimum: 1 },
+	symbol: string,
+	pattern: string,
+};
+const cursor = { cursor: string };
+const choice = (...values: string[]) => ({ type: "string", enum: values });
+export const LEGACY_TOOLS: Record<string, string> = {
+	check_project: "check",
+	check_diagnostics: "diagnostics",
+	lsp_status: "status",
+	lsp_navigation: "navigate",
+	lsp_rename: "rename",
+	lsp_format: "format",
+	lsp_diagnostics: "diagnostics",
+};
 export const TOOLS = [
 	tool(
-		"check_project",
-		"Run project CLI checkers; active starts background checks, cached reads a job without launching tools. Use for workspace checks.",
-		{ workspace: scope.workspace, run: { type: "string", enum: ["active", "cached"] }, job: string, ...paging },
+		"check",
+		"Run or read project checks. Follow next until finished.",
+		{ workspace: scope.workspace, run: choice("active", "cached"), job: string, ...paging },
 		[],
 		true,
 	),
 	tool(
-		"check_diagnostics",
-		"Check paths (explicit paths), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
+		"diagnostics",
+		"Check explicit paths or turn/session; cached reads never analyze. Filters affect display only.",
 		{
 			...scope,
 			...paging,
-			scope: { type: "string", enum: ["paths", "turn", "session"] },
-			source: { type: "string", enum: ["lsp", "lint", "both"] },
-			run: { type: "string", enum: ["active", "cached"] },
+			scope: choice("paths", "turn", "session"),
+			source: choice("lsp", "lint", "both"),
+			run: choice("active", "cached"),
+			rule: string,
+			severity: choice("error", "warning"),
 		},
 		[],
 		true,
 	),
 	tool(
-		"lsp_status",
-		"Explain configuration issues, per-capability availability, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
-		{ workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
+		"status",
+		"Report tool/configuration/capability status without starting servers or downloading tools.",
+		{ workspace: scope.workspace, path: string, refresh: { type: "boolean" }, ...cursor },
 		[],
 		true,
 	),
 	tool(
-		"lsp_navigation",
-		"Read-only LSP navigation. Positions are 1-based; unsupported capabilities are reported explicitly.",
+		"navigate",
+		"Read-only navigation; 1-based UTF-16 positions, symbol path or @@ anchor. Follow next for large results.",
 		{
 			...scope,
-			operation: {
-				type: "string",
-				enum: [
-					"definition",
-					"references",
-					"symbols",
-					"prepare_rename",
-					"hover",
-					"typeDefinition",
-					"implementation",
-					"signatureHelp",
-				],
-			},
-			line: { type: "integer", minimum: 1 },
-			column: { type: "integer", minimum: 1 },
+			...selector,
+			...cursor,
+			operation: choice(
+				"definition",
+				"declaration",
+				"references",
+				"symbols",
+				"prepare_rename",
+				"hover",
+				"typeDefinition",
+				"implementation",
+				"signatureHelp",
+				"incoming",
+				"outgoing",
+				"supertypes",
+				"subtypes",
+				"completion",
+			),
 			query: string,
 		},
 		["path", "operation"],
 		true,
 	),
 	tool(
-		"lsp_rename",
-		"Rename across workspace files. Preflight all targets, detect conflicts, write sequentially; never replay partial writes.",
-		{ ...scope, line: { type: "integer", minimum: 1 }, column: { type: "integer", minimum: 1 }, newName: string },
+		"rename",
+		"Preview a cross-file rename. Returns a plan; only apply writes files.",
+		{ ...scope, ...selector, ...cursor, newName: string },
 		["path", "newName"],
-		false,
+		true,
 	),
 	tool(
-		"lsp_format",
-		"Format explicit paths using Ruff for Python or project formatter/LSP. Preflight before writes.",
-		scope,
+		"format",
+		"Preview formatting of explicit files. Returns a plan; only apply writes files.",
+		{ ...scope, ...cursor },
 		[],
+		true,
+	),
+	tool(
+		"inspect",
+		"Explore a symbol or affected files, callers and candidate tests. Source is opt-in; test links are not coverage.",
+		{
+			...scope,
+			...selector,
+			...cursor,
+			operation: choice("symbol", "impact"),
+			symbols: {
+				type: "array",
+				items: string,
+				maxItems: 200,
+				description: "Explicit symbol paths for impact within path/paths.",
+			},
+			source: { type: "boolean" },
+			transitive: { type: "boolean" },
+		},
+		["operation"],
+		true,
+	),
+	tool(
+		"actions",
+		"List, explain or preview lint/LSP fixes. Batch preview selects only vendor-safe fixes; select ids for other actions.",
+		{
+			...scope,
+			...selector,
+			...cursor,
+			operation: choice("list", "explain", "preview"),
+			source: choice("lint", "lsp", "both"),
+			rule: string,
+			ids: { type: "array", items: string, maxItems: 200 },
+			details: { type: "boolean" },
+		},
+		["operation"],
+		true,
+	),
+	tool(
+		"apply",
+		"Apply one existing plan once. Conflicts reject before writes; inspect modifiedPaths after cancellation or failure.",
+		{ workspace: scope.workspace, session: scope.session, plan: string, ...cursor },
+		["plan"],
 		false,
 	),
 ];
@@ -100,12 +166,13 @@ export const TOOLS = [
 function validateArguments(name: string, args: Record<string, unknown>): void {
 	if (
 		args["refresh"] !== undefined &&
-		!(name === "lsp_status" || (["check_diagnostics", "check_project"].includes(name) && args["run"] !== "cached"))
+		!(name === "status" || (["diagnostics", "check"].includes(name) && args["run"] !== "cached"))
 	)
-		throw new Error("refresh requires active diagnostics or lsp_status");
+		throw new Error("refresh requires active diagnostics or status");
 	const definition = TOOLS.find((entry) => entry.name === name);
 	if (!definition) throw new Error("Unknown tool");
-	for (const key of definition.inputSchema.required) if (args[key] === undefined) throw new Error(`${key} required`);
+	for (const key of definition.inputSchema.required)
+		if (args[key] === undefined && (key === "workspace" || !args["cursor"])) throw new Error(`${key} required`);
 	for (const [key, value] of Object.entries(args)) {
 		const schema = definition.inputSchema.properties[key];
 		if (!record(schema))
@@ -163,7 +230,7 @@ export async function runMcp(
 		if (method === "initialize") {
 			ok({
 				protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-				serverInfo: { name: "codex-codeintel", version: "0.9.0" }, // keep in sync with package.json
+				serverInfo: { name: "codex-codeintel", version: "0.10.0" }, // keep in sync with package.json
 				capabilities: { tools: { listChanged: false } },
 			});
 			return;
@@ -196,28 +263,33 @@ export async function runMcp(
 		controllers.set(id, controller);
 		try {
 			const name = text(params["name"]);
-			if (name === "lsp_diagnostics")
-				throw new Error("Migration required: use check_diagnostics source=lsp; see docs/usage.md#upgrade");
+			if (LEGACY_TOOLS[name])
+				throw new Error(
+					"Migration required: " +
+						name +
+						" was removed; use " +
+						LEGACY_TOOLS[name] +
+						(name === "lsp_rename" || name === "lsp_format" ? " to preview, then apply the plan" : ""),
+				);
 			if (!TOOLS.some((entry) => entry.name === name)) throw new Error("Unknown tool");
 			if (!record(params["arguments"])) throw new Error("Tool arguments required");
 			const args = params["arguments"];
 			validateArguments(name, args);
 			const result = await runtime.request(text(args["workspace"]), name, args, controller.signal);
 			const structured = result;
+
 			const rendered =
-				name === "check_diagnostics" && Array.isArray(result["results"])
-					? `${render(result["results"] as FileResult[])}${result["next"] ? "\nMore results: follow structured next arguments." : ""}${result["inventoryComplete"] === false ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : ""}`
-					: name === "lsp_format" && Array.isArray(result["results"])
-						? result["results"]
-								.map((item: unknown) =>
-									record(item)
-										? `${item["status"] === "formatted" ? "Formatted" : "Unchanged"}: ${item["path"]}`
-										: "",
-								)
-								.join("\n")
-						: name === "lsp_rename" && Array.isArray(result["modifiedPaths"])
-							? `Renamed: ${result["modifiedPaths"].join(", ")}`
-							: JSON.stringify(result);
+				name === "diagnostics" && Array.isArray(result["results"])
+					? render(result["results"] as FileResult[], 3, 600) + (result["next"] ? "\nContinue with next." : "")
+					: [
+							String(result["status"] ?? result["state"] ?? (result["partial"] ? "partial" : "complete")),
+							result["plan"] ? `plan=${result["plan"]}` : "",
+							Array.isArray(result["modifiedPaths"]) ? `modified=${result["modifiedPaths"].length}` : "",
+							result["reason"] ? String(result["reason"]).slice(0, 200) : "",
+							result["next"] ? "Continue with next." : "",
+						]
+							.filter(Boolean)
+							.join("; ");
 
 			ok({
 				...(record(structured)

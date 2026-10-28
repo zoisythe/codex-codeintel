@@ -11,6 +11,7 @@ node_modules/
 .eslintcache
 *.tsbuildinfo
 coverage/
+/test-results/
 .venv/
 venv/
 __pycache__/

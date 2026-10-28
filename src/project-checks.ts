@@ -7,14 +7,15 @@ import { parse as parseToml } from "smol-toml";
 import { BUDGET } from "./budgets.js";
 import { assertConfiguration, type Config, configuration } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
-import { addedFindings } from "./diagnostic-delta.js";
+import { addedFindings, attributableFinding } from "./diagnostic-delta.js";
 import { withExecution } from "./environment.js";
 import { hash, type Inventory, inventory, workspacePath } from "./files.js";
+import { goFiles } from "./go-output.js";
 import { analysisIdentity } from "./identity.js";
 import { Metadata } from "./metadata.js";
 import { projectOutput } from "./project-output.js";
 import type { CheckerResult, ProjectCheck, ProjectResult } from "./project-types.js";
-import { type Finding, message, record, text } from "./results.js";
+import { type FileResult, type Finding, message, record, text } from "./results.js";
 import { run, select } from "./runners.js";
 import { codeLanguage, resolveTool } from "./tool-resolution.js";
 
@@ -45,6 +46,7 @@ export function covers(
 	if ((check.parser === "ty" || check.parser === "ruff") && !/\.pyi?$/.test(path)) return false;
 	if (check.parser === "tsc" && !/\.[cm]?[jt]sx?$/.test(path)) return false;
 	if (check.parser === "cargo" && !/\.rs$/.test(path)) return false;
+	if (check.parser === "go" && !/\.go$/.test(path)) return false;
 	const local = relative(check.cwd === "." ? "" : check.cwd, path)
 		.split("\\")
 		.join("/");
@@ -77,6 +79,54 @@ export class ProjectChecks {
 		return job ? this.cachedOutput(job, 0, configuration) : { state: "unverified", checkers: [] };
 	}
 	constructor(private readonly root: string) {}
+	async attribution(
+		session: string,
+		results: FileResult[],
+		args: Record<string, unknown>,
+		signal: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const findings = results.flatMap((result) => result.findings);
+		const unknown = { introduced: 0, resolved: 0, unattributed: findings.length };
+		const store = new Metadata(this.root);
+		const state = await store.read(session);
+		const config = await configuration(this.root);
+		if (
+			!state.diagnosticBaseline ||
+			state.configuration !== config.version ||
+			results.some((result) => result.state !== "complete")
+		)
+			return unknown;
+		const baseline = await store.readShared(state.diagnosticBaseline);
+		if (
+			!record(baseline) ||
+			!Array.isArray(baseline["results"]) ||
+			baseline["identity"] !== (await this.identity(await this.discover(config, signal), config, signal))
+		)
+			return unknown;
+		let introduced = 0;
+		let resolved = 0;
+		let unattributed = 0;
+		const matches = (finding: Finding) =>
+			(!args["rule"] || finding.rule === args["rule"] || finding.source === args["rule"]) &&
+			(!args["severity"] || finding.severity === args["severity"]) &&
+			(args["source"] !== "lint" || !/^(?:ts|ty|go|rust|cargo|compiler)(?:\/|$)/.test(finding.source)) &&
+			(args["source"] !== "lsp" || !/^(?:ruff|eslint|biome)\//.test(finding.source));
+		for (const result of results) {
+			const checks = (baseline["results"] as CheckerResult[]).filter(
+				(check) => check.state === "complete" && covers(check, result.path),
+			);
+			const parsers = checks.map((check) => check.parser);
+			const before = checks
+				.flatMap((check) => check.findings)
+				.filter((finding) => finding.path === result.path && matches(finding));
+			const after = result.findings.filter((finding) => attributableFinding(finding, parsers, before));
+			const comparable = before.filter((finding) => attributableFinding(finding, parsers, before));
+			introduced += addedFindings(comparable, after).length;
+			resolved += addedFindings(after, comparable).length;
+			unattributed += result.findings.length - after.length;
+		}
+		return { introduced, resolved, unattributed };
+	}
 	get active(): boolean {
 		return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
 	}
@@ -101,6 +151,14 @@ export class ProjectChecks {
 				command: ["ty", "check", "--output-format", "concise", "--color", "never"],
 				parser: "ty",
 				coverage: ["**/*.{py,pyi}"],
+			});
+		if (await has("go.mod"))
+			checks.push({
+				name: "go",
+				cwd: ".",
+				command: ["go", "vet", "-mod=readonly", "-json", "./..."],
+				parser: "go",
+				coverage: ["**/*.go"],
 			});
 		if (await has("Cargo.toml"))
 			checks.push({
@@ -204,7 +262,7 @@ export class ProjectChecks {
 					? "failed"
 					: "complete";
 		return {
-			operation: "check_project",
+			operation: "check",
 			job: job.id,
 			state,
 			checkers: job.results.map((result) => ({ ...result, findings: [] })),
@@ -248,7 +306,7 @@ export class ProjectChecks {
 			return job
 				? this.cachedOutput(job, this.cursor(args), (await configuration(this.root)).version)
 				: {
-						operation: "check_project",
+						operation: "check",
 						job: id,
 						state: "missing",
 						checkers: [],
@@ -320,6 +378,18 @@ export class ProjectChecks {
 							false,
 						);
 						if (tool.source === "missing") throw new Error(tool.note ?? "Checker missing");
+						if (config.projectChecks === "auto" && check.parser === "go") {
+							const shown = await run(
+								tool.command[0] ?? "go",
+								["list", "-json", "-mod=readonly", "./..."],
+								cwd,
+								signal,
+								undefined,
+								{ timeout: BUDGET.project, environment },
+							);
+							if (shown.code !== 0) throw new Error(`Go package discovery failed: ${shown.stderr}`);
+							result.coverage = goFiles(shown.stdout).map((path) => relative(cwd, path).replaceAll("\\", "/"));
+						}
 						if (config.projectChecks === "auto" && check.parser === "tsc") {
 							const shown = await run(tool.command[0] ?? "", ["--showConfig"], cwd, signal, undefined, {
 								timeout: BUDGET.project,
@@ -378,7 +448,7 @@ export class ProjectChecks {
 						});
 						result.findings = await projectOutput(
 							check,
-							output.stdout + (["tsc", "ty", "sarif"].includes(check.parser) ? output.stderr : ""),
+							output.stdout + (["tsc", "ty", "go", "sarif"].includes(check.parser) ? output.stderr : ""),
 							this.root,
 							cwd,
 						);
@@ -459,6 +529,18 @@ export class ProjectChecks {
 					);
 				const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude);
 				if (!snapshot.complete) throw new Error("Baseline inventory incomplete");
+				const current = await store.read(session);
+				if (current.epoch !== state.epoch || current.edited || current.turn === "__ended__")
+					throw new Error("Session changed before baseline started; diagnostics remain unattributed");
+				if (current.baseline) {
+					const before = await store.readShared(current.baseline);
+					if (
+						!record(before) ||
+						Object.keys(before).length !== snapshot.files.size ||
+						[...snapshot.files].some(([path, content]) => before[path] !== content)
+					)
+						throw new Error("Files changed before baseline started; diagnostics remain unattributed");
+				}
 				job = await this.start(checks, config, environment, identity, snapshot);
 				this.sessionJobs.set(session, job.id);
 				await store.update(session, signal, (current) => {
@@ -504,9 +586,11 @@ export class ProjectChecks {
 					? "tsc"
 					: language === "python"
 						? "ty"
-						: language === "rust"
-							? "cargo"
-							: undefined;
+						: language === "go"
+							? "go"
+							: language === "rust"
+								? "cargo"
+								: undefined;
 			if (config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
 				failures.push(`${path}: no type checker coverage; configure projectChecks`);
 			if (!related.length) failures.push(`${path}: no project checker coverage; configure projectChecks`);

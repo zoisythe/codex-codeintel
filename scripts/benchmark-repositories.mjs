@@ -30,19 +30,19 @@ for(const target of [{name:"vite",root:"/tmp/codeintel-bench-vite",path:"package
 		for(let i=0;i<100;i++){gate=await hook({hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{path:target.path}});if(!gate.value.hookSpecificOutput?.permissionDecision)break;await delay(500);}
 		assert.equal(gate.value.hookSpecificOutput?.permissionDecision,undefined,JSON.stringify(gate.value));
 		const baselineMs=performance.now()-before;
-		const project=(await client.call("check_project")).structuredContent;
-		const status=(await client.call("lsp_status",{path:target.path})).structuredContent;servicePid=status.service.pid;
+		const project=(await client.call("check")).structuredContent;
+		const status=(await client.call("status",{path:target.path})).structuredContent;servicePid=status.service.pid;
 		const post=[],empty=[],stop=[],reads=[],scans=[];
 		for(let i=0;i<5;i++){
 			await writeFile(path,original+(target.parser==="ty"?`\n# codeintel benchmark ${i}\n`:`\n// codeintel benchmark ${i}\n`));
 			const update=await hook({hook_event_name:"PostToolUse",tool_name:"Write",tool_input:{path:target.path}});assert(!/baseline missing|discovery incomplete/.test(JSON.stringify(update.value)));post.push(update.ms);
 			stop.push((await hook({hook_event_name:"Stop"})).ms);
-			const first=(await client.call("lsp_status",{path:target.path})).structuredContent.index;
+			const first=(await client.call("status",{path:target.path})).structuredContent.index;
 			empty.push((await hook({hook_event_name:"PostToolUse",tool_name:"exec_command",tool_input:{cmd:"git status --short"}})).ms);
-			const second=(await client.call("lsp_status",{path:target.path})).structuredContent.index;reads.push(second.contentReads-first.contentReads);scans.push(second.scans-first.scans);
+			const second=(await client.call("status",{path:target.path})).structuredContent.index;reads.push(second.contentReads-first.contentReads);scans.push(second.scans-first.scans);
 		}
-		const final=(await client.call("lsp_status",{path:target.path})).structuredContent;
-		assert(reads.every(read=>read===0));if(final.clients.processStarts!==1) console.log(JSON.stringify({name:target.name,status:final,pending:(await client.call("check_diagnostics",{path:target.path,run:"cached"})).structuredContent}));
+		const final=(await client.call("status",{path:target.path})).structuredContent;
+		assert(reads.every(read=>read===0));if(final.clients.processStarts!==1) console.log(JSON.stringify({name:target.name,status:final,pending:(await client.call("diagnostics",{path:target.path,run:"cached"})).structuredContent}));
 		assert.equal(final.clients.processStarts,1);
 		const result={...target,lsp:undefined,commit:spawnSync("git",["rev-parse","HEAD"],{cwd:target.root,encoding:"utf8"}).stdout.trim(),command,...(target.parser==="tsc"?{sourceFiles:coverage.length}:{}),baselineMs,projectState:project.state,projectErrors:project.errors,postMs:summarize(post),emptyShellMs:summarize(empty),stopMs:summarize(stop),emptyContentReads:reads,emptyScans:scans,lspStarts:final.clients.processStarts,unresolvedScope:final.automaticTasks};results.repositories.push(result);console.log(JSON.stringify(result));
 	}finally{await writeFile(path,original);if(servicePid)try{process.kill(servicePid,"SIGTERM")}catch{}await client.close();await delay(800);}

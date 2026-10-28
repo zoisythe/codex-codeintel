@@ -1,6 +1,6 @@
-# Codex CodeIntel 使用手册
+# Codex CodeIntel 使用指南
 
-本文对应当前 **0.9.0** 实现。Codex CodeIntel 通过 MCP 工具提供项目检查、LSP/lint 诊断、符号导航、重命名和格式化，通过可选 Hooks 在后台建立基线并反馈诊断。运行要求 **Node.js >=22.12.0**；发布包包含可直接运行的 `dist/cli.js`，使用插件无需安装本仓库的开发依赖。
+本文对应 **0.10.0**。插件提供九个 MCP 工具，Hooks 与 MCP 共享本地 LSP、项目检查和诊断缓存。运行要求 Node.js >=22.12.0；交付 bundle 不需要安装运行时依赖。
 
 ## 安装与首次使用
 
@@ -9,294 +9,218 @@ codex plugin marketplace add https://github.com/zoisythe/codex-codeintel
 codex plugin add codex-codeintel@codex-codeintel
 ```
 
-安装或更新后启动新的 Codex 会话，通过 `/hooks` 查看并信任当前安装包的 Hook 定义。插件不再检查目录信任；宿主对 Hook 定义的审阅仍需完成。
-
-在用户项目中开始会话，先调用 `lsp_status`，将 `workspace` 设置为该项目的绝对路径，并传入一个代表性的源文件 `path`。确认配置问题、所选工具和配置来源后，用 `check_project` 检查整个项目，或用 `check_diagnostics` 检查具体文件。可以在对话中要求使用 `$code-intelligence` Skill 选择工具和处理反馈。
-
-使用 **setupLSP**（`$setup-lsp`）配置、安装或修复当前项目的语言工具；明确要求全局时才修改用户全局配置。普通编码遇到缺失能力时仍可继续编辑。setup 默认配置非阻塞自动反馈，不会自动开启结束门禁。也可手动准备类型检查器、语言服务器和 lint 工具；C/C++ 与 Rust 需要本地工具链。Python 的类型检查与导航使用 ty，lint 与格式化使用 Ruff；两者独立，缺少 Ruff 时仍可使用 ty。
+开启新会话并通过 `/hooks` 检查 Hook 定义。使用 setupLSP（`$setup-lsp`）配置、安装或修复所需工具。普通编码中能力缺失只需报告一次并继续其他工作。
 
 <a id="configuration"></a>
 ## 配置位置与覆盖规则
 
-插件只读取以下配置文件；文件不存在时使用默认值：
-
-| 文件 | 用途 |
-| --- | --- |
-| `$CODEX_HOME/lsp-client.json` | 用户全局默认；未设置 `CODEX_HOME` 时为 `~/.codex/lsp-client.json` |
-| `<workspace>/.codex/lsp-client.json` | 项目覆盖 |
-
-每份 `lsp-client.json` 都必须是合法 JSON，包含 `"schemaVersion": 1`。不支持注释。覆盖顺序是内置默认、全局、项目；`lsp` 按语言合并，但同一语言的对象整体替换。`lint`、`formatting` 和 `automaticDiagnostics` 按字段合并；`exclude` 和 `projectChecks` 数组整体替换，项目数组不会追加到全局数组后。
-
-插件不读取 Codex `config.toml` 或目录信任记录。父/子工作区均可加载自己的项目配置；路径边界、符号链接防护与写入冲突检测保持有效。`CODEX_HOME` 仍用于配置、缓存及服务隔离。旧信任字段和环境变量只产生迁移说明。
-
-配置损坏不会阻断 Hooks。完整 JSON/schema 损坏时，状态与缓存仍可读取，执行请求返回配置错误；可定位的语言、lint 或检查定义错误只停用相关部分。状态返回 `configurationSources`、`configurationIssues` 以及语言能力状态，未实际启动的能力标为 `unverified`。状态查询不启动 LSP、不下载工具。
-
-### 可复制的配置示例
-
-| 示例 | 适用场景与修改要求 |
-| --- | --- |
-| [显式启用自动反馈](examples/lsp-client.default.json) | 自动发现检查器、默认语言服务器、非阻塞反馈；未配置时自动反馈仍为 off；可直接作为全局或项目配置 |
-| [显式项目检查](examples/lsp-client.project-checks.json) | `web/` TypeScript + ESLint、`api/` ty + Ruff；按实际目录、工具位置和检查范围修改 |
-| [自定义语言服务器](examples/lsp-client.custom-server.json) | 修改 Python 绝对工具路径；本地 TypeScript 7 原生 LSP；关闭 Rust LSP |
-| [全局结束门禁](examples/lsp-client.stop-gate.global.json) | 仅写入用户全局配置，明确选择门禁时使用；setup 不会自动启用 |
-| [关闭自动检查](examples/lsp-client.automatic-off.json) | 关闭两个自动反馈模式；仍可显式使用 MCP 工具 |
-
-从插件仓库复制配置到自己的项目，例如：
-
-```sh
-mkdir -p /absolute/path/to/project/.codex
-cp docs/examples/lsp-client.default.json /absolute/path/to/project/.codex/lsp-client.json
-```
-
-文件名必须改为 `lsp-client.json`，示例不会被自动加载。项目 `.codex/` 在本仓库的 Git 忽略范围内；不要将个人路径或凭据混入共享示例。
-
-### 配置字段
-
-| 字段 | 接受值与默认行为 |
-| --- | --- |
-| `schemaVersion` | 必须为数字 `1` |
-| `projectChecks` | 默认 `"auto"`，或完整检查定义数组 |
-| `automaticDiagnostics.postToolUse` | 默认 `"off"`，可设为 `"delta"` |
-| `automaticDiagnostics.stop` | 默认 `"off"`，可设为 `"errors"`，只控制结束反馈 |
-| `stopGate` | 仅用户全局有效；`"off"`（默认）或 `"introduced-errors"`；项目字段被忽略并说明 |
-| `lsp` | 语言名到内置服务器名、自定义对象或 `false` 的映射 |
-| `lint.javascript` | `"auto"`、`"biome"`、`"eslint"`、`"off"`；默认 `"auto"` |
-| `lint.python` | `"auto"`、`"ruff"`、`"off"`；默认 `"auto"` |
-| `formatting.tabSize` | 整数 1–16，默认 `4` |
-| `formatting.insertSpaces` | 布尔值，默认 `true` |
-| `exclude` | 默认 `[]`；相对工作区的正斜杠 glob，如 `generated/**`，不支持绝对路径、`..`、反斜杠或 `!` 否定规则 |
-
-`lint.python="off"` 只关闭 Python lint，显式格式化仍可使用 Ruff。关闭某语言 LSP 使用该语言的 `false` 值；这不会替代对应的项目 CLI 检查配置。
-
-### 语言服务器与本地工具
-
-| 语言键 | 默认服务器 | 常用选择 |
-| --- | --- | --- |
-| `python` | `ty` | `ty`、`basedpyright`、`pyright` 或自定义对象 |
-| `typescript` | `typescript` | 传统 `typescript-language-server`；`tsc` 为 TypeScript 7 原生 LSP，`tsgo` 为预览入口 |
-| `cpp` | `clangd` | C 与 C++ 共用该语言键 |
-| `rust` | `rust` | 启动 `rust-analyzer` |
-| `bash`、`yaml` | `bash`、`yaml-ls` | Shell、YAML |
-| `html`、`css`、`json` | 同名服务器 | HTML、CSS/SCSS/Less、JSON/JSONC |
-| `svelte`、`astro`、`go`、`lua`、`java` | `svelte`、`astro`、`gopls`、`lua-ls`、`jdtls` | 安装对应本地服务器 |
-
-也可按新语言键选择已注册服务器或定义完整自定义对象。自定义对象需要非空 `command` 参数数组与带点的 `extensions` 数组，可提供字符串环境变量映射 `env` 和初始化对象 `initialization`。不同启用语言不得争用同一扩展名；先关闭或替换原语言条目。
-
-工具解析顺序为：显式命令、最近的项目环境（如 `.venv` 或 `node_modules/.bin`）、PATH、已注册的临时启动器。显式命令按配置执行；本地工具启动失败会报告错误，不会下载替代版本。
-
-自动检查不下载工具，只使用本地或已经准备好的工具。显式活跃 LSP 请求在找不到本地工具时可以准备已注册的临时工具，不修改项目依赖或锁文件。clangd、rust-analyzer 和 `tsgo` 无自动安装器。`"typescript": "tsc"` 要求 TypeScript 7 或更高版本；本地旧版 `tsc` 不会被自动替换。
-
-## 项目检查与诊断基线
-
-`projectChecks="auto"` 从工作区根目录配置发现 TypeScript、Python、Cargo 和 lint 检查。TypeScript 按有效 `files/include/exclude` 范围判定覆盖；JavaScript 类型覆盖需要同时启用 `allowJs` 与 `checkJs`。Python 尊重 ty 的 include/exclude。Cargo 默认检查 workspace、all-targets 和默认 features。
-
-TypeScript references、多包仓库、C/C++、自定义语言和特殊 Cargo features 应显式定义检查。显式数组替换自动发现结果，必须列出需要的类型和 lint 检查。
-
-| 检查定义字段 | 要求 |
-| --- | --- |
-| `name` | 非空且在数组中唯一 |
-| `cwd` | 相对工作区的目录；根目录使用 `"."`，不能越出工作区 |
-| `command` | 可执行程序与参数组成的非空数组，直接执行而非 shell 字符串 |
-| `parser` | `tsc`、`ty`、`cargo`、`ruff`、`eslint`、`biome`、`json` 或 `sarif` |
-| `coverage` | 相对该检查 `cwd` 的非空路径/glob 数组，必须准确描述命令实际检查的源文件 |
-
-显式示例假定 Node 工具安装在 `web/node_modules/.bin/`，Python 工具在 `api/.venv/bin/`。若依赖提升到仓库根目录或使用 Windows，应改为实际可执行文件路径。检查程序必须只检查，不安装依赖、不修改源文件；避免 `--fix`。Ruff 示例明确关闭 fix 和 fix-only。
-
-ty 使用 concise 输出，Cargo 使用 JSON，Ruff/ESLint/Biome 使用相应结构化诊断输出。自定义 `json` 输出格式如下；空诊断使用 `{"diagnostics":[]}`：
+读取 `$CODEX_HOME/lsp-client.json`（默认 `~/.codex/lsp-client.json`）和项目的 `.codex/lsp-client.json`。优先级为内置、全局、项目；两者都使用 `schemaVersion:1`。同一语言的 LSP 对象整体替换；exclude/projectChecks 数组整体替换。
 
 ```json
 {
-  "diagnostics": [
-    {
-      "path": "src/example.c",
-      "line": 1,
-      "column": 1,
-      "severity": "error",
-      "source": "type-check",
-      "message": "problem description"
-    }
-  ]
+  "schemaVersion":1,
+  "projectChecks":"auto",
+  "lsp":{"python":"ty","typescript":"typescript","go":"gopls","cpp":"clangd","rust":"rust"},
+  "lint":{"javascript":"auto","python":"auto"},
+  "automaticDiagnostics":{"postToolUse":"off","stop":"off"}
 }
 ```
 
-路径相对检查工作目录，行列从 1 开始。C/C++ 可通过自己的只检查命令或包装脚本输出 `json`/`sarif`；clangd 提供文件诊断与导航，并不能替代项目 CLI 基线。
+| 字段 | 含义 |
+| --- | --- |
+| lsp | 语言到内置名称、false 或自定义 command/extensions/env/initialization 对象的映射 |
+| lint.javascript | auto、biome、eslint、off |
+| lint.python | auto、ruff、off |
+| formatting | tabSize（1–16）、insertSpaces |
+| exclude | 相对路径正向 glob；不接受绝对路径、反斜线、否定或 .. |
+| projectChecks | auto 或显式检查数组；数组替换自动发现结果 |
+| automaticDiagnostics | postToolUse=delta/off，stop=errors/off；默认均 off |
+| stopGate | 只有用户全局配置可设 introduced-errors；默认 off |
 
-文件编辑、shell、MCP 重命名和格式化均不需要诊断基线。SessionStart 在自动反馈启用时后台尝试建立基线。基线按检查器和实际覆盖范围判断可靠性，部分失败不妨碍其他范围反馈；没有可靠编辑前基线时仍可报告当前诊断，但标为无法归因，不认为是本轮新增。
+本地工具优先，显式命令失败不回退到下载版本。Python ty 与 Ruff 独立；lint=off 不会禁用显式格式化。TypeScript 默认使用传统 language server，原生 TypeScript 7 可选择 tsc。Go 使用 gopls；C/C++ 和 Rust 使用现有本地工具链。
 
-结束门禁仅在用户全局 `stopGate="introduced-errors"` 且 `automaticDiagnostics.stop="errors"` 时有效。它要求编辑前基线可靠、覆盖充分、当前同一检查器确认新增错误、文件内容和配置仍匹配；每轮最多阻断一次。pending、超时、配置错误、工具缺失、覆盖不足或过期结果均不触发。项目不能自行启用门禁。空检查数组表示没有项目覆盖，不影响编辑。
+配置损坏不阻断编辑。status、缓存读取仍可用；可定位的语言/检查配置错误只影响相关能力。status 不启动 LSP、不下载工具，unverified 不代表已经成功启动。目录信任记录不控制插件执行。
 
-## MCP 工具与调用示例
+## 九个 MCP 工具
 
-所有工具都传入绝对用户项目路径 `workspace`。`path`/`paths` 指向该项目内文件；位置从 1 开始。多会话共享工作区时，turn/session 范围传入对应 Codex `session` ID。
+所有调用使用绝对 workspace。位置为 **1-based、UTF-16 列**。位置操作接受以下一种定位方式：
+
+- line/column；
+- symbol，例如 Class.method；重载索引由 symbols 结果提供；
+- pattern，例如 function @@greet，以 @@ 标记光标。
+
+重名或多个锚点匹配返回候选，插件不会猜测。工作区符号搜索仍使用 navigate 的 operation=symbols 和 query；path 用于选择语言服务器。
 
 | 工具 | 用途 |
 | --- | --- |
-| `check_project` | 启动或读取整个项目的 CLI 检查任务，查找未修改调用方中的错误 |
-| `check_diagnostics` | 显式文件或 turn/session 范围的 LSP、lint 或双通道检查 |
-| `lsp_status` | 检查配置问题、能力状态、配置来源、工具选择、启动失败与运行状态；不启动 LSP |
-| `lsp_navigation` | 只读符号导航与重命名前检查 |
-| `lsp_rename` | 应用跨文件重命名 |
-| `lsp_format` | 格式化显式文件；Python 使用 Ruff，其他语言采用项目格式化器或 LSP |
+| check | 项目 CLI 检查；active 启动任务，cached 读取 job，跟随 next |
+| diagnostics | 显式路径、turn/session 的 LSP、lint 或 both 检查；active/cached |
+| status | 工具、配置、能力、失败和任务状态；refresh 重新验证 |
+| navigate | 原子语义查询及 outline |
+| rename | 只读重命名计划 |
+| format | 只读格式化计划 |
+| inspect | symbol 组合探索或 impact 影响分析 |
+| actions | list/explain/preview 修复动作 |
+| apply | 消费既有计划并顺序写入；唯一源码写入口 |
 
-以下 JSON 为工具参数，替换项目路径和文件位置后使用。
-
-### 全项目检查与缓存
-
-调用 `check_project`：
-
-```json
-{ "workspace": "/absolute/path/to/project", "run": "active" }
-```
-
-活跃请求启动或复用后台任务。返回 `state="running"` 时继续查询；有分页或后续工作时使用完整结构化 `next` 参数，包括 `run="cached"`、`job`、`cursor`。不要自行构造游标。`run="cached"` 只读取结果，不启动检查；`missing` 表示没有可读任务，`stale` 表示结果已失效。`complete` 可能包含历史错误，应查看 `errors`、`warnings` 和各检查器状态。
-
-也可使用随包 CLI，输出为 JSON：
-
-```sh
-codex-codeintel check_project /absolute/path/to/project
-codex-codeintel check_project /absolute/path/to/project --run cached --job JOB_ID
-codex-codeintel check_project /absolute/path/to/project --refresh
-```
-
-从源码仓库使用 `node dist/cli.js check_project ...`；`--cursor` 支持后续分页。CLI 的 `mcp` 和 `hook` 入口供宿主集成使用。
-
-### 文件诊断与状态
-
-调用 `check_diagnostics`：
+### 项目检查与诊断
 
 ```json
-{
-  "workspace": "/absolute/path/to/project",
-  "paths": ["src/main.ts", "src/helper.ts"],
-  "scope": "paths",
-  "source": "both",
-  "run": "active"
-}
+{"workspace":"/project","run":"active"}
 ```
 
-`scope` 支持 `paths`、`turn`、`session`；`source` 支持 `lsp`、`lint`、`both`；`run` 支持 `active`、`cached`。默认采用 paths/both/active；paths 范围必须提供显式文件或文件目录范围，不能用 `"."` 或省略路径请求全工作区检查。全项目改用 `check_project`。
+使用 check。任务未完成时跟随返回的 next；state=running/failed/stale 不能证明项目无错误。CLI 也可使用 `codex-codeintel check <workspace>`。
 
-读取当前轮 Hook 共享诊断可调用 `check_diagnostics`：
+diagnostics 示例：
 
 ```json
-{
-  "workspace": "/absolute/path/to/project",
-  "session": "CODEX_SESSION_ID",
-  "scope": "turn",
-  "source": "both",
-  "run": "cached"
-}
+{"workspace":"/project","paths":["src/main.ts"],"source":"both","run":"active","severity":"error"}
 ```
 
-`refresh=true` 用于活跃诊断、活跃项目检查或状态请求。调用 `lsp_status` 检查某语言：
+scope 可为 paths、turn、session；多会话时必须提供 session。路径诊断不能用省略路径或 "." 代替全项目检查，应使用 check。rule/severity 只筛选展示，不改变实际检查、基线或缓存；失败和 pending 状态不会被过滤隐藏。
+
+默认诊断保留位置、规则、严重性、消息和已知修复可用性。修复编辑、完整文档及工具原始信息不会随每次诊断发送。统计按规则/文件汇总；归因仅使用可靠的既有 checker 基线，缺失时为 unattributed。不同规则、检查器与覆盖范围不能相互替代基线。
+
+projectChecks 的每项包含 name、cwd、command、parser、coverage；相对命令/coverage 均相对 cwd。支持 parser：tsc、ty、go、cargo、ruff、eslint、biome、sarif、json。自定义 json 为：
 
 ```json
-{ "workspace": "/absolute/path/to/project", "path": "src/main.py", "refresh": true }
+{"diagnostics":[{"path":"src/a.ts","line":1,"column":1,"severity":"error","source":"rule","message":"problem"}]}
 ```
 
-状态刷新会重新解析工具并清除相关失败/客户端；状态请求本身仍不启动服务器。`pending`、`stale`、`failed`、缺少工具或部分覆盖不能解释为检查通过。
+自动发现支持根 tsconfig、ty、Go module、Cargo workspace 和匹配的 lint 配置。TypeScript references/多包、特殊 features、自定义语言及 C/C++ CLI 检查应显式配置。命令必须只检查，不修改源码、自动修复或安装依赖。示例见 [docs/examples](examples/)。
 
-### 导航、重命名和格式化
+Go 自动检查使用 go vet -mod=readonly -json ./...，由 go list 确认实际 Go/Test 输入，不把 build tags、平台排除或其他 module 的文件算作覆盖。自动检查禁止 Go 工具链/模块下载；需要的环境和依赖应先准备好。缺失工具或包发现失败为 unavailable/failed，不能返回干净结果。
 
-调用 `lsp_navigation`：
+### 导航与组合分析
+
+navigate 支持 definition、declaration、references、symbols、prepare_rename、hover、typeDefinition、implementation、signatureHelp、incoming、outgoing、supertypes、subtypes、completion。
 
 ```json
-{
-  "workspace": "/absolute/path/to/project",
-  "path": "src/main.ts",
-  "operation": "definition",
-  "line": 12,
-  "column": 5
-}
+{"workspace":"/project","path":"src/main.ts","operation":"symbols"}
 ```
 
-`operation` 支持 `definition`、`references`、`symbols`、`prepare_rename`、`hover`、`typeDefinition`、`implementation`、`signatureHelp`；符号查询可提供 `query`。服务器未支持某操作时明确报告，不影响该语言的其他操作。导航结构化输出使用 `status` 和 `result`。
-
-调用 `lsp_rename` 时传入文件、行列和 `newName`；调用 `lsp_format` 时传入显式 `path` 或 `paths`。先检查编辑目标与授权范围，再按顺序执行写操作。
+outline 默认只展示顶层；传入 symbol 展开该节点的直接成员。成员过多会分页，不再因一个大 class 超限而返回空列表。关系查询返回直接关系；进一步展开需重新定位对应符号。服务器不支持时明确返回 unsupported。
 
 ```json
-{
-  "workspace": "/absolute/path/to/project",
-  "path": "src/main.ts",
-  "line": 12,
-  "column": 5,
-  "newName": "updatedName"
-}
+{"workspace":"/project","path":"src/main.ts","operation":"symbol","symbol":"greet","source":true}
 ```
+
+使用 inspect 聚合签名/文档、定义、引用摘要和调用关系；source 默认省略。operation=impact 接收明确 path/paths 或定位符，汇总顶层类型/函数及类型成员的引用，排除局部变量、字段噪声。symbols 可指定文件内的符号路径集合，逐项保留歧义或失败；调用方来自调用层级，普通引用单独统计。transitive=true 最多追加一层，预算不足明确 partial。各子查询独立报告失败。
+
+候选测试仅依据文件命名和符号引用，不是运行时覆盖证明。零引用不证明可安全删除；没有并发安全或死代码自动裁决。
+
+### lint 与 LSP 修复
 
 ```json
-{ "workspace": "/absolute/path/to/project", "paths": ["src/main.py"] }
+{"workspace":"/project","path":"src/main.py","operation":"list","source":"lint"}
 ```
 
-格式化返回 `status="formatted"` 或 `"unchanged"`。成功、部分失败或取消都要检查完整 `modifiedPaths`；部分写入不自动回滚，响应丢失后先检查文件再决定后续操作。写入成功后诊断失败作为附加 `diagnostics` 状态返回，不将成功写入报告为失败，也不应重放写操作。
+使用 actions。source=lint/lsp/both，默认 both。list 返回动作 id、标题、来源、适用性和不可用原因，不默认返回全部编辑。
+
+explain 接收 path 和 rule。返回当前安装工具可确认的规则说明、文档和有效设置；details=true 按需展开。工具未提供配置来源或忽略原因时明确为 unknown，不猜测。
+
+preview 传入选定 ids，或在明确文件范围内批量生成计划：
+
+```json
+{"workspace":"/project","operation":"preview","ids":["action-id"]}
+```
+
+批量默认只选择工具明确标记 safe 的动作。unsafe、unknown 和 suggestions 需显式选择；ESLint fixable 不会被重标成 safe。Ruff/ESLint 保留逐诊断编辑，Biome 通过 stdin 生成文件级修复；按 rule 预览时仅处理当前诊断已确认启用的规则，不通过筛选开启原本关闭的规则。
+
+LSP 动作可 resolve 后生成纯文本计划。带 command、disabled 或创建/删除/移动文件的动作标为 unsupported，不执行其命令，也不部分应用。lint 修复不会顺带调用 formatter、添加抑制注释或修改配置。
+
+### 编辑计划与 apply
+
+rename 示例：
+
+```json
+{"workspace":"/project","path":"src/main.ts","symbol":"greet","newName":"welcome"}
+```
+
+format 示例：
+
+```json
+{"workspace":"/project","paths":["src/main.ts"]}
+```
+
+两者都只生成 plan、文件摘要和 diff，不写入。随后：
+
+```json
+{"workspace":"/project","plan":"returned-plan-id"}
+```
+
+调用 apply。对已授权修改可连续执行预览与应用，无需新增人工批准步骤。计划只描述文本修改；它不包含内存类型模拟，也不保证构建或测试成功。
+
+计划存在工作区服务的有界内存中，服务重启即失效。源文件、配置、工具或请求环境变化会使计划失效。应用先预检所有目标，冲突、越界、符号链接变化或重叠编辑会拒绝；之后逐文件确认并写入。
+
+计划进入应用后被消费，不能重放。取消/失败返回实际修改路径；多文件操作不承诺原子回滚。写后诊断失败是补充状态，不能因此再次应用同一个计划。需要继续操作时重新生成计划。
+
+## 分页与返回信息
+
+默认最多 20 项，详情页约 8 KiB，结构化输出也受预算控制。文本仅作短摘要。始终跟随 next 提供的完整参数；不要自行计算 offset、复制旧 revision 或拼接游标。
+
+大型嵌套值拆成 items 中的字段片段：field 使用 result["key"][index] 表示原输出路径；value 保存完整小值，part/text 保存按序文本分段。路径中带点或斜线的键使用带引号的下标，避免歧义。源码、diff 和大 outline 可以完整续取，不静默丢失。底层项目任务或诊断批次仍需继续时，最后一页的 next 转交对应任务的后续参数。
+
+查询游标绑定查询、快照、配置及工具；apply 的后续页绑定已发生的执行记录，因此后续源码修改不妨碍读完 modifiedPaths。失效时重新发起原查询；不要用不同的过滤条件复用旧游标。页面中的 partial/failed/pending 信息必须保留，分页完成不代表底层分析已完成。
 
 ## 自动 Hook 反馈
 
-| 事件 | 默认行为 |
-| --- | --- |
-| SessionStart | 自动反馈默认关闭；启用时在短前台预算内登记后台基线任务 |
-| PreToolUse | 发布定义已移除；手动调用始终直接放行，包括缺少会话标识和不支持运行环境 |
-| PostToolUse | 自动反馈启用时登记后台检查或交付已完成反馈，不等待分析完成；只读操作消费缓存 |
-| Stop / SubagentStop | 默认仅反馈；全局授权门禁后只阻断确认新增错误，每轮最多一次 |
-| SessionEnd | 清理会话状态，即使配置损坏也可执行 |
+自动反馈默认关闭，保留现有 automaticDiagnostics 和全局 stopGate 选择，不增加配置项。需要支持原生异步 command Hook 和 Interrupt 的当前 Codex 宿主；没有旧宿主兼容执行模式。Hooks 不调用 apply，不自动修复或格式化源码。
 
-两个自动模式均为 off 时，不扫描项目、不建立基线、不启动检查器或预热 LSP。
-历史错误不会仅因存在而变成新增错误。仅行号移动不会新增同一诊断；重复诊断数量增加会计为新增。pending/stale/failed 结果保持不确定性，不清除未解决问题。
+| 事件 | 处理方式 |
+|---|---|
+| SessionStart | 同步入口预算 500 ms，保存修改前快照并登记基线任务，不等待项目检查。仅 startup/resume/clear/fork；compact 不重复发现。resume 复用有效状态，其余建立新 epoch。 |
+| PostToolUse | 原生 async，仅匹配 Bash、apply_patch、mcp__lsp__apply。内部总预算 310 秒，宿主 timeout 330 秒；原工具结果不受影响。已知只读 shell 只领取完成的反馈，不启动服务或检查。 |
+| Stop | 普通反馈总预算 1.5 秒，最多等待结果 300 ms；变化发现和检查可在后台继续。显式全局门禁开启时保留 44 秒总预算。 |
+| SubagentStop | 独立代理反馈，总预算 1.5 秒，始终不能请求续跑。 |
+| SessionEnd | 内部预算 1.6 秒、宿主 3 秒，取消任务并以 epoch 失效旧交付。 |
+| Interrupt | 内部预算 1 秒、宿主 3 秒，解除等待、取消明确属于被中断轮次的自动任务；身份不明保留 pending，不终止共享 LSP 或 MCP 写入。 |
 
-前台预算从输入解析后计时，包含 IPC、排队和结果校验；Node 进程加载耗时另计。Stop 最多等待约 42.5 秒，显式编辑 Hook 内部总预算 4.4 秒。等待超时或客户端断开只结束等待，已经登记的后台任务继续运行，最多运行五分钟。会话结束、内容代次或相关配置失效、工具身份、结束策略变化及服务关闭取消相应任务。
+只有明确 agent_id 的事件属于子代理，不从 transcript 猜测。工作区版本、LSP 和缓存共享，代理任务等待、轮次、反馈记录分别保存；归属不明的结果标记 shared，由主任务 Stop 汇总。MCP 的 session 仍表示共享会话。SubagentStop 不消费主任务或其他代理的反馈。
 
-后台结果持久排队，通过后续 PostToolUse 的 additionalContext 或 Stop 交付。消息带有 `[Codex CodeIntel automatic diagnostics]` 标记、来源 turn 和稳定 deliveryId；成功输出后确认交付，确认丢失可重发同一 ID。文件 hash、generation、会话代次及分析身份不匹配时不交付旧结果。部分、失败、过期和仍在检查不代表检查通过；只有可靠完成的空结果表示没有诊断。零等待是读取已完成状态，不给异步读取套 0ms 超时。需要检查未修改调用方或整个项目时显式使用 `check_project`。
+只有主任务 Stop 在用户全局 stopGate=introduced-errors 时，才可为可靠、覆盖且新鲜的新增错误请求每 turn 最多一次修复。缺少修改前基线、未知、失败、pending、stale 不阻断。setupLSP 不自动启用门禁。SessionStart 的 additionalContext 可供模型读取；Stop/SubagentStop 普通输出是 UI 摘要，不能据此声称模型已经读取。
 
-自动反馈启用时，共享服务就绪后延迟约两秒预热最多两种主要语言，复用已有文件 inventory 和本地工具，不安装依赖。同一 workspace 合并预热及 LSP 初始化。初始化失败按 30、60、120、最高 300 秒冷却；成功、工具身份变化或显式 refresh 重置。LSP 与服务的闲置复用窗口均为 300 秒，活跃任务不计闲置。
+写事件按 session epoch、明确代理及 tool_use_id 幂等登记；没有 ID 时不猜测重复。合并窗口 200 ms，连续变化最长延后 1 秒，以当前内容哈希确认快照。apply 的完整 modifiedPaths（含部分写入）用于范围提示；分页、未知或不完整结果回退文件变化发现。分析身份和快照相同时复用 apply 写后的诊断。
+
+每条自动反馈最多 2 KiB UTF-8、五条关键诊断，报告 introduced/resolved/unattributed/pending 数量；同一状态去重，每代理每 turn 总量最多 8 KiB，并为收尾摘要预留空间。详情使用现有 diagnostics(run=cached, scope=session) 并提供共享 session。内部 hook_wait 仅长轮询已登记任务，单次最多 20 秒，不新增 MCP 工具。
+
+deliveryId、sourceTurn 和内容快照随交付保留，发送前复核新鲜度。ACK 仅表示 stdout 成功写出，ACK 失败可使用同一 ID 重发；不保证模型层恰好一次接收。没有证明建立于修改前的检查始终未归因。
+
+本版升级内部元数据格式，不迁移旧交付记录。更新后通过 /hooks 重新审阅定义，并在新会话使用；插件不修改信任记录或用户配置。真实宿主验收按 [Hooks 验收步骤](testing/hooks-host.md) 执行，CLI JSON 测试不能替代宿主原生异步、路由和 Interrupt 检查。
 
 ## 排查问题
 
-| 现象 | 处理步骤 |
-| --- | --- |
-| 能力未配置或工具缺失 | 普通编辑继续；配置/安装/修复任务使用 `$setup-lsp` |
-| Hook 未运行 | 查看 `/hooks`，确认当前安装版本的定义已启用和信任；更新后重启会话 |
-| 工具缺失或启动失败 | 用 `lsp_status` 指定代表性文件查看解析命令；修复本地环境后 `refresh=true` |
-| 结束被门禁阻断 | 检查全局 stopGate 及确认新增错误，修复一次；诊断不可靠时不会阻断 |
-| TypeScript 原生 LSP 启动失败 | 检查本地 `tsc` 是否 >=7；若使用传统服务器，将语言条目改为 `"typescript"` |
-| Ruff 缺失 | 单独安装/修复 Ruff；ty 类型与导航仍可用；lint=off 不会禁用显式格式化 |
-| Rust 长时间 pending | 等待索引及后续结果，确认 rust-analyzer、rust-src、项目工具链和依赖已准备好 |
-| 缓存结果 stale/missing | 发起活跃检查；项目结果跟随 `next` 查询，不把缺少结果当作零错误 |
-| 环境或外部依赖改变 | 刷新状态或活跃检查；工作区外的变化不保证被自动观察 |
+用 status 配合代表性 path 查看工具选择与能力；修复后 refresh=true。现有命令启动失败不选择下载替代品。Windows 的 Path/PATH 在请求环境中统一规范化；显式空 PATH 仍然有效。
 
-自动命令禁止下载 Rustup 工具链或 uv Python、同步环境和自动修复源码。应在检查前完成依赖准备；自定义检查命令也必须遵守只检查约定。
+依赖安装、构建/链接与测试仍需项目自己的命令。check 完成只代表指定检查完成。
+
+### 独立 Rust CI
+
+`.github/workflows/rust.yml` 独立运行于 Linux 和 Windows，固定 Rust 1.99.1 及配套的 rust-analyzer、rust-src、rustfmt。工具只安装到 CI runner，本机日常开发和默认 `npm test` 不要求 Rust。
+
+`npm run test:rust` 是需要已准备工具链的真实验收入口；缺少工具会失败，不会跳过。用例通过已交付 bundle 验证诊断及修复后的更新、符号/锚点定位、引用和调用、组合探索与候选测试关联、重命名/格式化/Code Action 的预览与 apply，以及 Cargo 工作区检查。fixture 只依赖本地 path crate，预先生成 lockfile，检查期间禁用依赖下载。
+
+CI 保留工具版本、测试日志及 MCP/fixture 记录为 `rust-<os>` artifact，保留 14 天。日志成功上传不代表验收通过，应以对应 job 的结果为准。新入口与历史多语言 `test:real` 的 Rust 开关独立。
 
 <a id="limits"></a>
 ## 范围限制与本地数据
 
-文件发现上限为 10,000 个文件，单文件读取上限为 1 MiB；显式诊断每页最多处理 50 个文件，单次 `paths` 参数最多 200 项。项目检查任务预算为五分钟，输出存在大小限制；超限、超时或未完成状态不能证明项目没有错误。
+发现预算 10,000 文件，单文件读取预算 1 MiB，paths 最多 200 项。影响分析每次最多处理 200 个符号、追加一层时最多 100 个间接节点；超限明确 partial。组合查询和编辑计划需要完整的工作区快照；超出发现或单文件预算时明确拒绝，需缩小 workspace 或配置 exclude。项目检查预算五分钟。
 
-`complete` 表示对应分析已完成，构建、链接和测试仍需项目自己的命令。CLI coverage 必须匹配命令的实际范围；自定义 Cargo features、外部配置导入与工作区外依赖需要项目配置和必要的刷新。
-
-无遥测。源文件、诊断基线与未解决问题留在本地私有缓存；日志使用固定类别，不记录源代码或凭据。`CODEX_LSP_CACHE` 可指定会话元数据和日志目录。停止服务后可删除该目录清理会话数据；全局配置、项目配置及准备工具缓存分别管理。工作区服务空闲约五分钟后退出；不同用户、工作区、`CODEX_HOME` 和 bundle 版本隔离。
+无遥测。源码、诊断基线和未解决问题留在私有本地缓存。计划与动作在服务内存中，工作区服务空闲约五分钟退出。不同用户、workspace、CODEX_HOME 和 bundle 隔离；停止服务后可清理 CODEX_LSP_CACHE。
 
 <a id="upgrade"></a>
-## 从旧版本升级
+## 从 0.9 升级
 
-使用旧名称安装的插件先移除旧插件，再执行本手册的安装命令：
-
-```sh
-codex plugin remove codex-lsp@codex-lsp-standalone
-```
-
-无其他插件依赖旧 marketplace 时，可移除 `codex-lsp-standalone` marketplace。将旧 `$lsp` Skill 请求改为 `$code-intelligence`。现名称为 `codex-codeintel`，npm 包为 `@zoisythe/codex-codeintel`；MCP 注册键仍为 `lsp`。`lsp-client.json` 路径、`CODEX_LSP_CACHE` 和 `CODEX_LSP_REAL_TOOLS` 环境变量名保持不变。
-
-| 旧配置或请求 | 当前用法 |
+| 移除的旧名 | 新名 |
 | --- | --- |
-| 无 schemaVersion 的配置 | 添加 `"schemaVersion": 1`，按语言定义 `lsp` |
-| `LSP_TOOLS_MCP_*_CONFIG`、`CODEX_LSP_TRUST_PROJECT` | 这些变量仅提示迁移且被忽略；使用固定配置路径 |
-| `trustedWorkspaces` | 移除旧字段；仅提示迁移，不影响执行 |
-| `priority`、`disabled` 服务器字段 | 使用完整语言条目；关闭时设为 `false` |
-| `lsp_diagnostics` | `check_diagnostics`，`source="lsp"` |
-| `mode`、`start`、`offset`、`revision` | 使用 `scope/source/run`，分页跟随结构化 `next` 和 opaque `cursor` |
-| 全工作区 `check_diagnostics` | 使用 `check_project`；文件诊断提供显式路径或 turn/session 范围 |
-| 自动 `full`、Stop `delta` 模式 | PostToolUse 使用 `delta/off`，Stop 使用 `errors/off` |
-| 导航中的 rename | 独立 `lsp_rename` 工具 |
+| check_project | check |
+| check_diagnostics / lsp_diagnostics | diagnostics |
+| lsp_status | status |
+| lsp_navigation | navigate |
+| lsp_rename | rename → apply |
+| lsp_format | format → apply |
 
-0.9 移除插件目录信任检查和 PreToolUse 编辑门禁。两个自动模式默认关闭，已有显式设置继续生效。原有 `stop="errors"` 现在只反馈；要恢复结束阻断，用户须在全局配置明确设置 `stopGate="introduced-errors"`。setupLSP 不会自动开启它。项目同名字段被忽略。更新后重启会话，并**重新审阅 Hook 定义**；用户配置不会自动改写。新增 setupLSP Skill 可正常发现，以 `$setup-lsp` 调用。
+旧名只返回迁移提示，不执行，也不保留隐藏调用别名。更新提示词、Skills 和调用脚本，并启动新会话。
 
-源码归属与 MIT 许可见 [NOTICE](../NOTICE) 和 [LICENSE](../LICENSE)。阶段架构、迁移、验收和性能记录保留在维护者本地 `docs/history/`，该目录被 Git 忽略，不包含在仓库新提交或发布包中。
+rename/format 的含义发生变化：它们是只读计划工具；apply 是唯一源码写入口。配置仍使用 schemaVersion:1，不需要重新创建全局配置。保留既有 automatic-off 和全局门禁选择；重新审阅 Hook 定义。

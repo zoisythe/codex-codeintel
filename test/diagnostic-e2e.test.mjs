@@ -20,7 +20,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
-	const check = (extra = {}) => client.call("check_diagnostics", { path: "main.fake", source: "lsp", ...extra });
+	const check = (extra = {}) => client.call("diagnostics", { path: "main.fake", source: "lsp", ...extra });
 	await configure("pull");
 	assert.equal((await check()).structuredContent.errors, 1);
 	await configure("strict-initialize");
@@ -28,8 +28,8 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	assert.match((await check({ source: "both" })).content[0].text, /pull-unchanged/);
 	await writeFile(join(root, "main.fake"), "fixed\n"); assert.equal((await check()).structuredContent.errors, 0);
 	await configure("rename-only");
-	assert.equal((await client.call("lsp_navigation", { path: "main.fake", operation: "prepare_rename" })).structuredContent.status, "unsupported");
-	assert.equal((await client.call("lsp_navigation", { path: "main.fake", operation: "hover" })).structuredContent.result.status, "unsupported");
+	assert.equal((await client.call("navigate", { path: "main.fake", operation: "prepare_rename" })).structuredContent.status, "unsupported");
+	assert.equal((await client.call("navigate", { path: "main.fake", operation: "hover" })).structuredContent.status, "unsupported");
 	assert.equal((await check()).structuredContent.results[0].state, "complete", "unsupported capability leaves the language enabled");
 	await configure("empty-unversioned");
 	assert.equal((await check()).structuredContent.results[0].state, "pending");
@@ -42,7 +42,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	const count = await launches(); assert((await check()).isError); assert.equal(await launches(), count);
 	const advanced = once(client.child, "message"); client.child.send(31000); await advanced;
 	assert((await check()).isError); assert.equal(await launches(), count + 1);
-	await client.call("lsp_status", { path: "main.fake", refresh: true }); assert.equal(await launches(), count + 1, "status refresh stays lazy");
+	await client.call("status", { path: "main.fake", refresh: true }); assert.equal(await launches(), count + 1, "status refresh stays lazy");
 	assert((await check()).isError); assert.equal(await launches(), count + 2);
 	await configure("pull"); assert(!(await check()).isError, "configuration changes recover immediately");
 	assert((await client.call("lsp_diagnostics", { path: "main.fake" })).isError);
@@ -58,11 +58,11 @@ test("bundle idle release keeps stdio alive and starts a new client", { timeout:
 	await writeFile(preload, `import fs from "node:fs";const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(${JSON.stringify(clockFile)},"utf8"));`);
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);
+	assert(!(await client.call("diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	const firstPid = Number((await readFile(log, "utf8")).trim());
 	await writeFile(clockFile, "301000");
 	await new Promise(resolve => setTimeout(resolve, 1800));
 	assert.throws(() => process.kill(firstPid, 0));
-	assert(!(await client.call("check_diagnostics", { path: "a.fake", source: "lsp" })).isError);
+	assert(!(await client.call("diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
 });

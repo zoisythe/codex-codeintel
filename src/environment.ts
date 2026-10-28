@@ -23,9 +23,17 @@ interface ExecutionContext {
 const executions = new AsyncLocalStorage<ExecutionContext>();
 export function executionEnvironment(): NodeJS.ProcessEnv {
 	// IPC objects and native environment blocks need not enumerate in the same order.
-	return Object.fromEntries(
+	const environment = Object.fromEntries(
 		Object.entries(executions.getStore()?.environment ?? process.env).sort(([a], [b]) => a.localeCompare(b)),
 	);
+	// Windows process.env is case-insensitive; IPC/deserialized objects are not.
+	// Preserve an explicit PATH override, including an intentionally empty PATH.
+	if (process.platform === "win32") {
+		const path = environment["PATH"] ?? environment["Path"];
+		for (const key of Object.keys(environment)) if (key.toLowerCase() === "path") delete environment[key];
+		if (path !== undefined) environment["PATH"] = path;
+	}
+	return environment;
 }
 export function automaticExecution(): boolean {
 	return executions.getStore()?.automatic ?? false;
@@ -37,6 +45,9 @@ export function subprocessEnvironment(environment = executionEnvironment()): Nod
 		? {
 				...environment,
 				RUSTUP_AUTO_INSTALL: "0",
+				GOTOOLCHAIN: "local",
+				GOPROXY: "off",
+				GOSUMDB: "off",
 				UV_PYTHON_DOWNLOADS: "never",
 				UV_NO_SYNC: "1",
 				UV_OFFLINE: "1",

@@ -134,7 +134,7 @@ test(
 			send({ method: "notifications/initialized" });
 			send({ id: 2, method: "tools/list" });
 			const tools = (await response(2)).result.tools.map((tool) => tool.name);
-			assert.deepEqual(tools, ["check_project", "check_diagnostics", "lsp_status", "lsp_navigation", "lsp_rename", "lsp_format"]);
+			assert.deepEqual(tools, ["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions", "apply"]);
 			await delay(100);
 			send({ id: 3, method: "ping" });
 			assert.deepEqual((await response(3)).result, {});
@@ -143,7 +143,7 @@ test(
 				id: 4,
 				method: "tools/call",
 				params: {
-					name: "check_diagnostics",
+					name: "diagnostics",
 					arguments: { workspace, path: "example.phaseone" },
 				},
 			});

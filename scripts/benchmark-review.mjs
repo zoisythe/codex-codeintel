@@ -70,7 +70,7 @@ try {
 		try {
 			await writeFile(join(target.root,"main.fake"),"clean");
 			const start=performance.now();await hook({hook_event_name:"SessionStart"});const gate=await hook({hook_event_name:"PreToolUse",tool_name:"Write",tool_input:{path:"main.fake"}});assert.notEqual(gate.output.hookSpecificOutput?.permissionDecision,"deny",JSON.stringify(gate.output));
-			servicePid=(await client.call("lsp_status",{path:"main.fake"})).structuredContent?.service?.pid;
+			servicePid=(await client.call(revision === "before" ? "lsp_status" : "status",{path:"main.fake"})).structuredContent?.service?.pid;
 			const baselineMs=performance.now()-start,post=[],empty=[],stop=[],emptyReads=[];
 			for(let iteration=0;iteration<10;iteration++) {
 				await writeFile(join(target.root,"main.fake"),`clean ${iteration}`);

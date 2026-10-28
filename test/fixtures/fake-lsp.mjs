@@ -12,6 +12,7 @@ function send(value) {
 }
 function handle(value) {
 	const { method, params = {}, id } = value;
+	if (process.env.CODEX_LSP_TEST_REQUESTS) appendFileSync(process.env.CODEX_LSP_TEST_REQUESTS, `${method}\n`);
 	const mode = process.env.CODEX_LSP_TEST_MODE;
 	const pull = mode === "pull" || mode === "strict-initialize";
 	if (method === "initialized") { initialized = typeof value.params === "object" && value.params !== null; return; }
@@ -37,7 +38,7 @@ function handle(value) {
 	}
 	if (id === undefined) return;
 	if (method === "initialize" && mode === "cold") { setTimeout(() => send({ id, result: { capabilities: { textDocumentSync: 1 } } }), 6000); return; }
-	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
+	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), ...(mode === "intelligence" ? {hoverProvider:true, declarationProvider:true,callHierarchyProvider:true,typeHierarchyProvider:true,completionProvider:{},codeActionProvider:{resolveProvider:true}} : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
 	if (method === "textDocument/diagnostic" && pull) {
 		const text = docs.get(params.textDocument.uri) ?? "";
 		const items = text.split("\n").flatMap((line,index) => line.includes("broken") ? [{range:{start:{line:index,character:0},end:{line:index,character:6}},severity:1,source:"fake",message:"pull broken"}] : []);
@@ -47,7 +48,17 @@ function handle(value) {
 	}
 	if (method === "textDocument/diagnostic") { send({ id, error: { code: -32601, message: "Unhandled method textDocument/diagnostic" } }); return; }
 	const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } };
-	if (method === "textDocument/formatting") { send({ id, result: [{ range, newText: "fixed!" }] }); return; }
+	if (mode === "intelligence") {
+ if (method === "textDocument/documentSymbol") {send({id,result:[{name:"Container",kind:5,range:{start:{line:0,character:0},end:{line:100,character:1}},selectionRange:range,children:Array.from({length:80},(_,i)=>({name:"member"+i,kind:6,range:{start:{line:i+1,character:0},end:{line:i+1,character:1}},selectionRange:{start:{line:i+1,character:0},end:{line:i+1,character:1}}}))}]});return;}
+ if (method === "textDocument/hover") {send({id,result:{contents:{kind:"markdown",value:"symbol documentation"}}});return;}
+ if (method === "textDocument/references") {send({id,result:[{uri:params.textDocument.uri,range}]});return;}
+ if (method === "textDocument/prepareCallHierarchy" || method === "textDocument/prepareTypeHierarchy") {send({id,result:[{name:"target",kind:12,uri:params.textDocument.uri,range,selectionRange:range}]});return;}
+ if (/^(callHierarchy|typeHierarchy)\//.test(method)) {send({id,result:[]});return;}
+ if (method === "textDocument/completion") {send({id,result:{isIncomplete:false,items:[{label:"candidate",kind:3,detail:"function",insertText:"raw edit must not leak"}]}});return;}
+ if (method === "textDocument/codeAction") {send({id,result:[{title:"Fix",edit:{changes:{[params.textDocument.uri]:[{range,newText:"fixed!"}]}}},{title:"Command",command:{command:"danger"}},{title:"Resolve",data:{uri:params.textDocument.uri}}]});return;}
+ if (method === "codeAction/resolve") {send({id,result:{...params,edit:{changes:{[params.data.uri]:[{range,newText:"fixed!"}]}}}});return;}
+ }
+ if (method === "textDocument/formatting") { send({ id, result: [{ range, newText: "fixed!" }] }); return; }
 	if (method === "textDocument/prepareRename") { send({ id, result: range }); return; }
 	if (method === "textDocument/rename") {
 		const changes = { [params.textDocument.uri]: [{ range, newText: params.newName }] };

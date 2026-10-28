@@ -1,3 +1,4 @@
+import { stopTestService } from "./bundle-client.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
@@ -55,8 +56,8 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
-		assert.equal(init.serverInfo.version, "0.9.0");
-		return {request, async call(name, args = {}) { const result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
+		assert.equal(init.serverInfo.version, "0.10.0");
+		return {request, async call(name, args = {}) { let result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); if (["rename","format"].includes(name)) { result = await request("tools/call", {name:"apply",arguments:{workspace:root,session:"test",plan:result.structuredContent.plan}}); assert(!result.isError,JSON.stringify(result)); } return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (event) => {
 		const child = spawnSync(process.execPath, [cli, "hook"], { cwd: root, env, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "test", turn_id: "t1", hook_event_name: event }) });
@@ -68,32 +69,32 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	assert.equal(hook("SessionStart"), "");
 	await writeFile(join(root, "main.fake"), "broken again\n");
 	assert.equal(hook("PostToolUse"), "");
-	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
-	const serviceStatus = await first.request("tools/call", {name: "lsp_status", arguments: {workspace: root, path: "main.fake"}});
+	assert.match(await first.call("diagnostics", {path: "main.fake"}), /fake\/E1/);
+	const serviceStatus = await first.request("tools/call", {name: "status", arguments: {workspace: root, path: "main.fake"}});
 	servicePid = serviceStatus.structuredContent.service.pid;
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1, "Hook owns a shared LSP through the service");
-	assert.match(await first.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
-	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
-	assert.match(await first.call("check_diagnostics", {path: "main.fake"}), /fake\/E1/);
+	assert.match(await first.call("diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
+	assert.match(await first.call("diagnostics", {path: "main.fake"}), /fake\/E1/);
+	assert.match(await first.call("diagnostics", {path: "main.fake"}), /fake\/E1/);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
 	const second = await client();
-	assert.match(await second.call("check_diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
-	await second.call("check_diagnostics", {path: "main.fake"});
+	assert.match(await second.call("diagnostics", {scope: "session", run: "cached"}), /fake\/E1/);
+	await second.call("diagnostics", {path: "main.fake"});
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 1);
 	await second.close();
-	assert.match(await first.call("lsp_format", {path: "main.fake"}), /Formatted/);
+	assert.match(await first.call("format", {path: "main.fake"}), /applied/);
 	assert.equal(await readFile(join(root, "main.fake"), "utf8"), "fixed! again\n");
-	assert.match(await first.call("lsp_rename", {path: "main.fake", newName: "renamed"}), /Renamed/);
+	assert.match(await first.call("rename", {path: "main.fake", newName: "renamed"}), /applied/);
 	assert.equal(await readFile(join(root, "main.fake"), "utf8"), "renamed again\n");
 	const count = (await readFile(log, "utf8")).trim().split("\n").length;
-	await first.call("check_diagnostics", {path: "main.fake", refresh: true});
+	await first.call("diagnostics", {path: "main.fake", refresh: true});
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, count + 1);
 	await Promise.all(Array.from({length: 201}, (_,i) => writeFile(join(root, `page-${i}.fake`), "x")));
-	const page = await first.call("check_diagnostics", {paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)});
-	assert.match(page, /checked=/);
-	const paged = await first.request("tools/call", {name: "check_diagnostics", arguments: {workspace: root, session: "test", paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)}});
+	const page = await first.call("diagnostics", {paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)});
+	assert.match(page, /checked=|Continue with next/);
+	const paged = await first.request("tools/call", {name: "diagnostics", arguments: {workspace: root, session: "test", paths: Array.from({length: 100}, (_, i) => `page-${i}.fake`)}});
 	assert(paged.structuredContent.next?.cursor);
-	assert(!(await first.request("tools/call", {name: "check_diagnostics", arguments: paged.structuredContent.next})).isError);
+	assert(!(await first.request("tools/call", {name: "diagnostics", arguments: paged.structuredContent.next})).isError);
 	await first.close();
 	const last = Number((await readFile(log, "utf8")).trim().split("\n").at(-1)); assert.doesNotThrow(() => process.kill(last, 0), "MCP EOF does not kill shared clients");
 });
@@ -113,7 +114,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	await writeFile(preload, 'import fs from "node:fs/promises";import {syncBuiltinESMExports} from "node:module";const original=fs.writeFile;fs.writeFile=async (...args)=>{await original(...args);if(String(args[0]).endsWith("a.fake")) await new Promise(r=>setTimeout(r,400));};syncBuiltinESMExports();');
 	const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, cli, "mcp"], {cwd: root, env: {...process.env, CODEX_HOME: dir, CODEX_LSP_CACHE: join(dir, "cache")}, stdio: ["pipe", "pipe", "pipe"]});
 	const exited = once(child, "exit");
-	t.after(async () => {if(child.exitCode === null) {child.kill(); await exited;} await rm(dir, {recursive: true, force: true});});
+	t.after(async () => {if(child.exitCode === null) {child.kill(); await exited;} await stopTestService(root, dir, cli); await delay(100); await rm(dir, {recursive: true, force: true});});
 	const results = new Map();
 	let stderr = ""; child.stderr.setEncoding("utf8").on("data", chunk => {stderr += chunk;});
 	createInterface({input: child.stdout}).on("line", (line) => {const value = JSON.parse(line); results.set(value.id, value.result);});
@@ -126,11 +127,11 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const pids = async () => (await readFile(log,"utf8").catch(()=>"")).trim().split("\n").filter(Boolean).map(Number);
 	const alive = (pid) => {try{process.kill(pid,0);return true;}catch{return false;}};
 	for (const args of [{mode:"all",refresh:true},{mode:"status",refresh:false},{mode:"full",refresh:"yes"}]) {
-		assert.equal((await result(begin("check_diagnostics", args))).isError,true);
+		assert.equal((await result(begin("diagnostics", args))).isError,true);
 	}
-	const first = begin("check_diagnostics", {path:"a.fake"});
+	const first = begin("diagnostics", {path:"a.fake"});
 	await until(async ()=>(await pids()).length===1);
-	const queued = begin("check_diagnostics", {path:"b.fake"});
+	const queued = begin("diagnostics", {path:"b.fake"});
 	cancel(queued);
 	assert.match((await result(queued)).content[0].text,/cancelled|aborted/i);
 	assert(alive((await pids())[0]),"queued cancellation cannot kill the active LSP");
@@ -139,19 +140,23 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert((await pids()).every(alive), "executing request cancellation preserves the service clients");
 	assert.equal((await pids()).length,1,"cancelled queued request never starts a client");
 
-	await configure("slow-second");
-	const formatting=begin("lsp_format",{paths:["a.fake","b.fake"]});
+	await configure("two-files");
+	const formatPreview = await result(begin("format",{paths:["a.fake","b.fake"]}));
+	assert(!formatPreview.isError,JSON.stringify(formatPreview));
+	const formatting=begin("apply",{plan:formatPreview.structuredContent.plan});
 	await until(async ()=>(await readFile(join(root,"a.fake"),"utf8")).startsWith("fixed!"));
 	cancel(formatting);
 	const partial=await result(formatting);
 	assert.equal(partial.isError,true);
-	assert.match(partial.content[0].text,/formatted.*a.fake/);
+	assert.match(partial.content[0].text,/cancel|abort/i);
 	assert.deepEqual(partial.structuredContent.modifiedPaths, ["a.fake"]);
 	assert.equal(await readFile(join(root,"b.fake"),"utf8"),"broken\n");
 
 	await writeFile(join(root,"a.fake"),"broken\n");
 	await configure("two-files");
-	const rename=begin("lsp_rename",{path:"a.fake",newName:"renamed"});
+	const renamePreview=await result(begin("rename",{path:"a.fake",newName:"renamed"}));
+	assert(!renamePreview.isError,JSON.stringify(renamePreview));
+	const rename=begin("apply",{plan:renamePreview.structuredContent.plan});
 	await until(async ()=>(await readFile(join(root,"a.fake"),"utf8")).startsWith("renamed"));
 	cancel(rename);
 	const partialRename=await result(rename);
@@ -160,7 +165,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert.equal(await readFile(join(root,"b.fake"),"utf8"),"broken\n");
 
 	await configure("");
-	const checked=await result(begin("check_diagnostics",{path:"b.fake",refresh:true}));
+	const checked=await result(begin("diagnostics",{path:"b.fake",refresh:true}));
 	assert(!checked.isError,JSON.stringify(checked));
 	assert.match(checked.content[0].text,/fake\/E1/);
 	child.stdin.end();

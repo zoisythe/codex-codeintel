@@ -8,23 +8,44 @@ export type WriteIntent =
 	| { kind: "configuration"; paths: string[] }
 	| { kind: "write"; paths?: string[] };
 export function isShellTool(input: Record<string, unknown>): boolean {
-	return /^(?:bash|shell|exec_command|unified_exec)$/.test(
-		text(input["tool_name"]).split(".").at(-1)?.toLowerCase() ?? "",
-	);
+	return input["tool_name"] === "Bash";
+}
+const readTools = new Set(
+	["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions"].map(
+		(name) => `mcp__lsp__${name}`,
+	),
+);
+
+function applyPaths(input: Record<string, unknown>): string[] | undefined {
+	let result = input["tool_response"];
+	if (!record(result)) return;
+	if (record(result["structuredContent"])) result = result["structuredContent"];
+	if (!record(result)) return;
+	// An output page, omitted result, or unknown outcome cannot prove the complete write range.
+	if (result["next"] || result["truncated"] || result["complete"] === false || !Array.isArray(result["modifiedPaths"]))
+		return;
+	return result["modifiedPaths"].every((path) => typeof path === "string")
+		? (result["modifiedPaths"] as string[])
+		: undefined;
 }
 export function writeIntent(root: string, input: Record<string, unknown>): WriteIntent {
 	const tool = text(input["tool_name"]);
 	const args = record(input["tool_input"]) ? input["tool_input"] : {};
 	let paths: string[] = [];
-	if (/apply_patch|Edit|Write|write_file|lsp_format|lsp_rename/.test(tool)) {
-		if (/lsp_rename/.test(tool)) return { kind: "write" }; // Workspace edit may include callers.
-		const command =
-			typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
-		paths.push(
-			...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
-				(match) => match[1] ?? "",
-			),
-		);
+	if (tool === "mcp__lsp__apply" || tool === "apply_patch") {
+		if (tool === "mcp__lsp__apply") {
+			const modified = applyPaths(input);
+			if (!modified) return { kind: "write" };
+			paths = modified;
+		} else {
+			const command =
+				typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
+			paths.push(
+				...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
+					(match) => match[1] ?? "",
+				),
+			);
+		}
 		paths.push(
 			...[args["path"], args["file_path"], ...(Array.isArray(args["paths"]) ? args["paths"] : [])].filter(
 				(path): path is string => typeof path === "string",
@@ -41,8 +62,7 @@ export function writeIntent(root: string, input: Record<string, unknown>): Write
 		)
 			return { kind: "read" };
 		return { kind: "write" };
-	} else if (/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool))
-		return { kind: "read" };
+	} else if (readTools.has(tool)) return { kind: "read" };
 	else return { kind: "write" };
 	if (!paths.length) return { kind: "write" };
 	paths = [

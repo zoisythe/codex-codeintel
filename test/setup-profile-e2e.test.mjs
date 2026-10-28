@@ -36,16 +36,16 @@ test("packed setupLSP: isolated global defaults, mixed project coverage, read-on
 	] }));
 	const originals = await Promise.all(["main.ts", "main.py", "main.c", "main.cpp", "rust/src/main.rs"].map(async path => [path, await readFile(join(root, path), "utf8")]));
 	const env = { CODEX_LSP_CACHE: join(dir, "cache") }, c = bundleClient(root, home, env, cli);
-	t.after(async () => { const s = (await c.call("lsp_status", { path: "main.ts" })).structuredContent; if (s.service?.pid) process.kill(s.service.pid, "SIGTERM"); await c.close(); await delay(150); await rm(dir, { recursive: true, force: true }); });
-	const before = (await c.call("lsp_status", { path: "main.ts", refresh: true })).structuredContent; assert.equal(before.configuration.stopGate, "off"); assert.equal(before.tools[0].capabilities.diagnostics, "unverified"); assert.equal(before.clients.processStarts, 0);
+	t.after(async () => { const s = (await c.call("status", { path: "main.ts" })).structuredContent; if (s.service?.pid) process.kill(s.service.pid, "SIGTERM"); await c.close(); await delay(150); await rm(dir, { recursive: true, force: true }); });
+	const before = (await c.call("status", { path: "main.ts", refresh: true })).structuredContent; assert.equal(before.configuration.stopGate, "off"); assert.equal(before.tools[0].capabilities.diagnostics, "unverified"); assert.equal(before.clients.processStarts, 0);
 	for (const path of ["main.ts", "main.c", "main.cpp", "rust/src/main.rs"]) {
 		let result;
-		for (let attempt = 0; attempt < 4; attempt++) { result = await c.call("check_diagnostics", { path, source: "lsp" }); if (result.structuredContent?.results[0].state === "complete") break; }
+		for (let attempt = 0; attempt < 4; attempt++) { result = await c.call("diagnostics", { path, source: "lsp" }); if (result.structuredContent?.results[0].state === "complete") break; }
 		assert.equal(result.isError, undefined, JSON.stringify(result)); assert.equal(result.structuredContent.results[0].state, "complete", JSON.stringify(result));
-		const nav = await c.call("lsp_navigation", { path, operation: "symbols" }); assert.equal(nav.isError, undefined, JSON.stringify(nav));
+		const nav = await c.call("navigate", { path, operation: "symbols" }); assert.equal(nav.isError, undefined, JSON.stringify(nav));
 	}
-	const missing = await c.call("check_diagnostics", { path: "main.py", source: "lsp" }); assert.equal(missing.isError, true); assert.match(missing.content[0].text, /Explicit command missing.*no fallback/);
-	let project = (await c.call("check_project")).structuredContent; while (project.state === "running") { await delay(100); project = (await c.call("check_project", project.next)).structuredContent; }
+	const missing = await c.call("diagnostics", { path: "main.py", source: "lsp" }); assert.equal(missing.isError, true); assert.match(missing.content[0].text, /Explicit command missing.*no fallback/);
+	let project = (await c.call("check")).structuredContent; while (project.state === "running") { await delay(100); project = (await c.call("check", project.next)).structuredContent; }
 	assert.equal(project.state, "failed"); assert.equal(project.checkers.filter(check => check.state === "complete").length, 4); assert(project.checkers.some(check => check.name === "python-unavailable" && check.state === "failed"));
 	for (const [path, text] of originals) assert.equal(await readFile(join(root, path), "utf8"), text, "setup verification stays read-only");
 	const pre = spawnSync(process.execPath, [cli, "hook"], { cwd: root, env: { ...process.env, CODEX_HOME: home, ...env }, input: JSON.stringify({ cwd: root, hook_event_name: "PreToolUse", tool_name: "Write", tool_input: { path: "main.py" } }), encoding: "utf8" }); assert.equal(pre.status, 0, pre.stderr); assert.equal(pre.stdout, "");

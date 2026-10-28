@@ -4,6 +4,7 @@ import { assertConfiguration, configuration } from "./config.js";
 import type { Engine } from "./engine.js";
 import { withExecution } from "./environment.js";
 import { hash } from "./files.js";
+import { rootSession } from "./hook-events.js";
 import { analysisIdentity } from "./identity.js";
 import { Metadata } from "./metadata.js";
 import { type FileResult, message, text } from "./results.js";
@@ -44,21 +45,16 @@ export class Automatic {
 		return [...this.jobs.values()].some((job) => job.state === "running");
 	}
 	status(): unknown {
-		return [...this.jobs.values()].map((job) => ({
-			session: job.session,
-			generation: job.generation,
-			scope: job.scope,
-			state: job.state,
-			total: job.paths.length,
-			processed: job.results.size,
-			checked: [...job.results.values()].filter((result) => result.state === "complete").length,
-			remaining: job.paths.filter((path) => job.results.get(path)?.state !== "complete"),
-			note: job.note,
-		}));
+		const jobs = [...this.jobs.values()];
+		return {
+			running: jobs.filter((job) => job.state === "running").length,
+			pending: jobs.filter((job) => job.state === "pending").length,
+			complete: jobs.filter((job) => job.state === "complete").length,
+		};
 	}
-	cancel(session?: string): void {
+	cancel(session?: string, turn?: string): void {
 		for (const job of this.jobs.values())
-			if (!session || job.session === session) {
+			if ((!session || job.session === session) && (!turn || job.turn === turn)) {
 				job.controller.abort();
 				job.state = "cancelled";
 				this.jobs.delete(job.session);
@@ -150,7 +146,7 @@ export class Automatic {
 		try {
 			let remaining = [...job.paths];
 			if (!remaining.length)
-				await this.engine.dispatch("automatic_batch", { paths: [], session: job.session }, signal);
+				await this.engine.dispatch("automatic_batch", { paths: [], session: rootSession(job.session) }, signal);
 			while (remaining.length && !signal.aborted) {
 				const retry: string[] = [];
 				for (let start = 0; start < remaining.length; start += BUDGET.batch) {
@@ -171,7 +167,7 @@ export class Automatic {
 					const paths = remaining.slice(start, start + BUDGET.batch);
 					const output = await this.engine.dispatch(
 						"automatic_batch",
-						{ paths, session: job.session, turn: job.turn },
+						{ paths, session: rootSession(job.session) },
 						signal,
 					);
 					const results = output["results"] as FileResult[];

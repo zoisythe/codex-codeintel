@@ -1,3 +1,10 @@
+import type { TextEdit } from "./lsp/types.js";
+
+export interface LintFix {
+	title: string;
+	applicability: "safe" | "unsafe" | "unknown" | "suggestion";
+	edits: TextEdit[];
+}
 export interface Finding {
 	path: string;
 	line: number;
@@ -6,6 +13,16 @@ export interface Finding {
 	source: string;
 	sources?: string[];
 	message: string;
+	rule?: string;
+	endLine?: number;
+	endColumn?: number;
+	documentation?: string;
+	fixable?: boolean;
+	lint?: { runner: string; fixes: LintFix[]; raw: Record<string, unknown> };
+}
+export function publicFinding(finding: Finding): Omit<Finding, "lint"> & { fixable?: boolean } {
+	const { lint, documentation: _documentation, endLine: _endLine, endColumn: _endColumn, ...result } = finding;
+	return { ...result, ...(lint ? { fixable: result.fixable ?? lint.fixes.length > 0 } : {}) };
 }
 export interface FileResult {
 	path: string;
@@ -79,13 +96,18 @@ export function mergeFindings(findings: Finding[]): Finding[] {
 	for (const finding of findings) {
 		const key = JSON.stringify([finding.path, finding.line, finding.column, finding.severity, finding.message]);
 		const old = entries.get(key);
-		if (old) old.sources = [...new Set([...(old.sources ?? [old.source]), finding.source])];
-		else entries.set(key, { ...finding });
+		if (old) {
+			old.sources = [...new Set([...(old.sources ?? [old.source]), finding.source])];
+			if (finding.lint && !old.lint) old.lint = finding.lint;
+			if (finding.rule && !old.rule) old.rule = finding.rule;
+		} else entries.set(key, { ...finding });
 	}
 	return [...entries.values()].sort((a, b) => Number(a.severity !== "error") - Number(b.severity !== "error"));
 }
 
 export function failureKind(reason: string): string {
+	if (/Plan (?:stale|conflict)|Overlapping|Workspace (?:or tools )?changed/i.test(reason)) return "conflict";
+	if (/Plan missing|consumed or expired|Action stale|Cursor invalid/i.test(reason)) return "stale";
 	if (
 		/Migration|configuration|schemaVersion|Extension conflict|Unknown built-in|Invalid (?:lsp|lint|formatting)|lsp\.\w+.*(?:must be|requires)|trustedWorkspaces requires|exclude requires/i.test(
 			reason,

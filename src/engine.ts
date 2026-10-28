@@ -1,28 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, relative, sep } from "node:path";
-import type { AutomaticResult } from "./automatic.js";
 import { BUDGET } from "./budgets.js";
 import { assertConfiguration, type Config, configuration } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
-import { automaticExecution } from "./environment.js";
+import { automaticExecution, executionEnvironment } from "./environment.js";
 import { hash, type Inventory, indexStatistics, inventory, latestInventory, workspacePath } from "./files.js";
-import type { HookOutput } from "./hook-engine.js";
+import { isActorSession, rootSession } from "./hook-events.js";
 import { analysisIdentity } from "./identity.js";
+import { Intelligence } from "./intelligence.js";
 import { Languages } from "./language.js";
 import { Metadata } from "./metadata.js";
 import { timings } from "./metrics.js";
-import type { ProjectResult } from "./project-types.js";
-import {
-	type FileResult,
-	type FormatResult,
-	mergeFindings,
-	message,
-	type NavigationResult,
-	text,
-	WriteFailure,
-} from "./results.js";
-import { clearLintAvailability, formatWithRunner, lintBatch, preflightRunner } from "./runners.js";
+import { type FileResult, mergeFindings, message, publicFinding, text } from "./results.js";
+import { clearLintAvailability, lintBatch } from "./runners.js";
 import { codeLanguage, withToolResolution } from "./tool-resolution.js";
 
 export interface EngineDependencies {
@@ -33,19 +24,7 @@ export interface EngineDependencies {
 		signal: AbortSignal,
 	): Promise<{ result: FileResult; lsp: FileResult; lint: FileResult }[]>;
 }
-export type ToolOutput = Record<string, unknown> &
-	(
-		| { operation: "release" | "session_end" | "hook_ack" }
-		| { operation: "handshake"; protocol: number; identity: string; pid: number }
-		| { operation: "hook"; output: HookOutput }
-		| ({ operation: "automatic" } & AutomaticResult)
-		| { operation: "automatic_batch"; results: FileResult[] }
-		| { operation: "lsp_status"; workspace: string; configuration: Config }
-		| { operation: "check_diagnostics"; results: FileResult[]; partial: boolean; errors: number; warnings: number }
-		| ({ operation: "lsp_navigation" | "lsp_rename" } & NavigationResult)
-		| { operation: "lsp_format"; results: FormatResult[]; modifiedPaths: string[] }
-		| ProjectResult
-	);
+export type ToolOutput = Record<string, unknown> & { operation: string };
 
 interface Cached {
 	identity: string;
@@ -63,6 +42,7 @@ export class Engine {
 	private readonly cache = new Map<string, Cached>();
 	private readonly sessions = new Map<string, Session>();
 	private language: Languages | undefined;
+	private intelligence: Intelligence | undefined;
 	private configVersion = "";
 	private lastConfig: Config | undefined;
 	private previousSnapshot: Inventory | undefined;
@@ -297,7 +277,7 @@ export class Engine {
 	}
 
 	dispatch(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutput> {
-		const writes = operation === "lsp_format" || operation === "lsp_rename";
+		const writes = operation === "apply";
 		let started = false;
 		const task = this.queue.then(() => {
 			started = true;
@@ -362,14 +342,16 @@ export class Engine {
 			this.configVersion = config.version;
 		}
 		if (config.valid) this.lastConfig = config;
-		if (!config.valid && operation === "lsp_status") {
+		if (!config.valid && operation === "status") {
 			await this.language?.update(config);
 			this.configVersion = config.version;
 		}
 		const store = new Metadata(this.root);
-		const ids = await store.ids();
+		const allIds = await store.ids();
+		const ids = [...new Set(allIds.map(rootSession))];
 		for (const id of this.sessions.keys())
-			if (!ids.includes(id) && (await store.read(id)).turn === "__ended__") this.sessions.delete(id);
+			if (isActorSession(id) || (!ids.includes(id) && (await store.read(id)).turn === "__ended__"))
+				this.sessions.delete(id);
 		for (const id of ids) {
 			const state = await store.read(id);
 			if (state.turn === "__ended__") {
@@ -377,10 +359,16 @@ export class Engine {
 				continue;
 			}
 			const session = this.session(id, state.turn);
-			session.touched = new Set(state.touched);
-			session.current = new Set(state.current);
+			for (const actor of allIds.filter((candidate) => candidate !== id && rootSession(candidate) === id)) {
+				const visible = await store.read(actor);
+				if (visible.epoch !== state.epoch || visible.turn === "__ended__") continue;
+				state.touched.push(...visible.touched);
+				state.current.push(...visible.current);
+			}
+			session.touched = new Set([...session.touched, ...state.touched]);
+			session.current = new Set([...session.current, ...state.current]);
 		}
-		if (operation === "lsp_status") {
+		if (operation === "status") {
 			this.language ??= new Languages(this.root, config);
 			const targets = args["path"]
 				? [text(args["path"])]
@@ -402,7 +390,7 @@ export class Engine {
 				sessions: [...this.sessions.keys()],
 			};
 		}
-		if (!(operation === "check_diagnostics" && args["run"] === "cached")) assertConfiguration(config);
+		if (!(operation === "diagnostics" && args["run"] === "cached")) assertConfiguration(config);
 		if (operation === "automatic_batch") {
 			const paths = Array.isArray(args["paths"])
 				? args["paths"].filter((path): path is string => typeof path === "string")
@@ -425,12 +413,12 @@ export class Engine {
 			args["scope"] === "paths" || args["scope"] === undefined
 				? text(args["session"], "manual")
 				: this.id(args["session"]);
-		if (operation === "check_diagnostics") {
+		if (operation === "diagnostics") {
 			if (!config.valid && args["run"] === "cached" && this.lastConfig) {
 				const output = await this.diagnostics(args, id, signal, this.lastConfig, store);
 				return {
 					...output,
-					operation: "check_diagnostics",
+					operation: "diagnostics",
 					partial: true,
 					configurationIssues: config.issues,
 					errors: Number(output["errors"]),
@@ -445,70 +433,107 @@ export class Engine {
 			return this.diagnostics(args, id, signal, config, store);
 		}
 
-		if (operation === "lsp_rename") args = { ...args, operation: "rename" };
-
-		if (operation === "lsp_navigation" || operation === "lsp_rename") {
-			const path = relative(this.root, await workspacePath(this.root, text(args["path"])));
-			const identity = await analysisIdentity(this.root, [path], config, signal);
-			if (this.identities.has(path) && this.identities.get(path) !== identity) {
-				for (const key of this.cache.keys()) if (key.replace(/^(?:lsp|lint):/, "") === path) this.cache.delete(key);
-			}
-			this.identities.set(path, identity);
-			const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, true);
-			snapshot.version = hash(snapshot.version + config.version);
-			await this.synchronize(snapshot);
+		if (["navigate", "rename", "format", "inspect", "actions", "apply"].includes(operation)) {
 			this.language ??= new Languages(this.root, config);
-			const before = args["operation"] === "rename" ? await inventory(this.root, BUDGET.files, signal) : undefined;
-			let output: NavigationResult;
+			this.intelligence ??= new Intelligence(this.root, this.language);
+			if (args["cursor"]) args = this.intelligence.pageArguments(args);
+			let paths: string[];
+			if (operation === "apply") paths = this.intelligence.planPaths(text(args["plan"]));
+			else if (
+				operation === "actions" &&
+				args["operation"] === "preview" &&
+				Array.isArray(args["ids"]) &&
+				args["ids"].length
+			)
+				paths = this.intelligence.actionPaths(args["ids"]);
+			else {
+				if (!args["path"] && !args["paths"]) throw new Error("Explicit path or paths required");
+				paths = (await this.paths(args, signal)).paths;
+			}
+			if (paths.length > 200 && operation !== "apply" && !args["ids"])
+				throw new Error("At most 200 explicit files; narrow scope");
+			const bindings = [
+				...new Set([
+					...paths,
+					...(typeof args["path"] === "string" ? [args["path"]] : []),
+					...(Array.isArray(args["paths"])
+						? args["paths"].filter((path): path is string => typeof path === "string")
+						: []),
+				]),
+			];
+			let identity: string;
 			try {
-				output = await this.language.navigate(args, signal);
-			} finally {
-				if (before) this.cache.clear();
+				identity = await this.intelligenceIdentity(bindings, config, signal);
+			} catch (error) {
+				if (operation === "apply") this.intelligence.plans.discard(text(args["plan"]));
+				throw error;
 			}
-			if (before) {
-				this.cache.clear();
-				const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
-				return { ...output, operation, diagnostics: await this.afterWrite(modifiedPaths, id, signal) };
+			if (operation === "apply") {
+				try {
+					const modifiedPaths = await this.intelligence.plans.apply(
+						text(args["plan"]),
+						identity,
+						this.root,
+						signal,
+					);
+					this.cache.clear();
+					return {
+						operation,
+						status: "applied",
+						modifiedPaths,
+						diagnostics: await this.afterWrite(modifiedPaths, id, signal),
+					};
+				} catch (error) {
+					this.cache.clear();
+					throw error;
+				}
 			}
+			const output = await this.intelligence.execute(operation, args, paths, config, identity, signal, bindings);
+			if (identity !== (await this.intelligenceIdentity(bindings, config, signal)))
+				throw new Error("Workspace or tools changed during query; repeat without cursor");
 			return { ...output, operation };
 		}
-		const scope = await this.paths(args, signal);
-		const paths = scope.paths;
-		if (operation === "lsp_format") {
-			if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
-			if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
-			if (!config.formattingEnabled)
-				throw new Error("Configuration error: formatting disabled; repair formatting configuration");
-			this.language ??= new Languages(this.root, config);
-			for (const path of paths) {
-				const runner = await preflightRunner(this.root, path, config, signal);
-				if (!runner) await this.language.preflight(path, signal, "format");
-			}
-			const writes: FormatResult[] = [];
-			const modifiedPaths: string[] = [];
-			try {
-				for (const path of paths) {
-					signal.throwIfAborted();
-					writes.push(
-						(await formatWithRunner(this.root, path, signal, config)) ??
-							(await this.language.format(path, signal)),
-					);
-					if (writes.at(-1)?.status === "formatted") modifiedPaths.push(path);
-				}
-			} catch (error) {
-				throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(writes)}`, modifiedPaths);
-			} finally {
-				this.cache.clear();
-			}
-			return { operation, modifiedPaths, results: writes, diagnostics: await this.afterWrite(paths, id, signal) };
-		}
+
 		throw new Error("Unknown tool");
 	}
 
+	private async intelligenceIdentity(paths: string[], config: Config, signal: AbortSignal): Promise<string> {
+		const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, paths);
+		if (!snapshot.complete)
+			throw new Error("Workspace snapshot incomplete; cannot establish query or plan freshness");
+		return hash(
+			JSON.stringify([
+				snapshot.version,
+				config.version,
+				executionEnvironment(),
+				await this.pageIdentity(paths, config, snapshot, signal),
+				await Promise.all(paths.map(async (path) => [path, await workspacePath(this.root, path)])),
+			]),
+		);
+	}
 	private async afterWrite(paths: string[], id: string, signal: AbortSignal): Promise<Record<string, unknown>> {
 		try {
-			const results = await this.check(paths, id, this.session(id).turn, false, signal);
-			return { state: results.every((result) => result.state === "complete") ? "complete" : "partial", results };
+			const config = await configuration(this.root);
+			const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, paths);
+			const results = await this.check(paths, id, this.session(id).turn, false, signal, 0, snapshot, config);
+			return {
+				state:
+					snapshot.complete &&
+					results.length === paths.length &&
+					results.every((result) => result.state === "complete")
+						? "complete"
+						: "partial",
+				errors: results.flatMap((result) => result.findings).filter((finding) => finding.severity === "error")
+					.length,
+				warnings: results.flatMap((result) => result.findings).filter((finding) => finding.severity === "warning")
+					.length,
+				files: results.map((result) => ({
+					path: result.path,
+					state: result.state,
+					...(result.note ? { note: result.note.slice(0, 1000) } : {}),
+				})),
+				note: "Read diagnostics run=cached for finding details; writes are already complete.",
+			};
 		} catch (error) {
 			return {
 				state: "unavailable",
@@ -535,7 +560,7 @@ export class Engine {
 				(Array.isArray(args["paths"]) && args["paths"].includes(".")))
 		)
 			throw new Error(
-				"Migration required: use check_project for workspace checks; check_diagnostics requires specific paths or turn/session scope",
+				"Migration required: use check for workspace checks; diagnostics requires specific paths or turn/session scope",
 			);
 		const source = text(args["source"], "both");
 		const run = text(args["run"], "active");
@@ -668,6 +693,19 @@ export class Engine {
 				];
 			}
 		}
+
+		const matches = (finding: import("./results.js").Finding) =>
+			(!args["rule"] || finding.rule === args["rule"] || finding.source === args["rule"]) &&
+			(!args["severity"] || finding.severity === args["severity"]);
+		results = results.map((result) => ({ ...result, findings: result.findings.filter(matches).map(publicFinding) }));
+		const byRule: Record<string, number> = {};
+		const byFile: Record<string, number> = {};
+		for (const result of results)
+			for (const finding of result.findings) {
+				const rule = finding.rule ?? finding.source;
+				byRule[rule] = (byRule[rule] ?? 0) + 1;
+				byFile[result.path] = (byFile[result.path] ?? 0) + 1;
+			}
 		const selected: FileResult[] = [];
 		let size = 0;
 		for (const result of results.slice(index)) {
@@ -692,7 +730,8 @@ export class Engine {
 		}
 		const partial = !snapshot.complete || results.some((result) => result.state !== "complete");
 		return {
-			operation: "check_diagnostics",
+			operation: "diagnostics",
+			summary: { byRule, byFile },
 			inventoryComplete: snapshot.complete,
 			scope,
 			source,
@@ -793,6 +832,8 @@ export class Engine {
 	async close(): Promise<void> {
 		const language = this.language;
 		this.language = undefined;
+		this.intelligence?.clear();
+		this.intelligence = undefined;
 		await language?.close();
 	}
 }

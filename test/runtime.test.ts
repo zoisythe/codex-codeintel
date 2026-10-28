@@ -20,12 +20,15 @@ afterEach(async () => {
 describe("workspace diagnostics", () => {
 	it("keeps the tool schema fixed and small", () => {
 		expect(TOOLS.map((tool) => tool.name)).toEqual([
-			"check_project",
-			"check_diagnostics",
-			"lsp_status",
-			"lsp_navigation",
-			"lsp_rename",
-			"lsp_format",
+			"check",
+			"diagnostics",
+			"status",
+			"navigate",
+			"rename",
+			"format",
+			"inspect",
+			"actions",
+			"apply",
 		]);
 	});
 	it("reuses results but invalidates dependent files and reports stale caches", async () => {
@@ -39,20 +42,20 @@ describe("workspace diagnostics", () => {
 				findings: [{ path, line: 1, column: 1, severity: "error", source: "fake", message: "broken" }],
 			};
 		});
-		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
-		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
+		await engine.dispatch("diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
+		await engine.dispatch("diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
 		expect(checks).toBe(1);
 		await writeFile(join(root, "dependency.ts"), "changed");
 		expect(
 			(
 				await engine.dispatch(
-					"check_diagnostics",
+					"diagnostics",
 					{ scope: "session", run: "cached", session: "s" },
 					new AbortController().signal,
 				)
 			).includes("stale"),
 		).toBe(true);
-		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
+		await engine.dispatch("diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal);
 		expect(checks).toBe(2);
 		await engine.close();
 	});
@@ -63,18 +66,18 @@ describe("workspace diagnostics", () => {
 			state: "complete",
 			findings: [{ path, line: 1, column: 1, severity: "warning", source: "fake", message: "warning" }],
 		}));
-		await engine.dispatch("check_diagnostics", { path: "a.ts", session: "one" }, new AbortController().signal);
+		await engine.dispatch("diagnostics", { path: "a.ts", session: "one" }, new AbortController().signal);
 
 		expect(
 			await engine.dispatch(
-				"check_diagnostics",
+				"diagnostics",
 				{ scope: "session", run: "cached", session: "one" },
 				new AbortController().signal,
 			),
 		).toContain("warning");
 		expect(
 			await engine.dispatch(
-				"check_diagnostics",
+				"diagnostics",
 				{ scope: "session", run: "cached", session: "two" },
 				new AbortController().signal,
 			),
@@ -93,19 +96,11 @@ describe("workspace diagnostics", () => {
 			return { path, state: "complete", findings: [] };
 		});
 		await Promise.all([
-			engine.dispatch(
-				"check_diagnostics",
-				{ scope: "paths", path: "a.ts", session: "s" },
-				new AbortController().signal,
-			),
-			engine.dispatch(
-				"check_diagnostics",
-				{ scope: "paths", path: "a.ts", session: "s" },
-				new AbortController().signal,
-			),
+			engine.dispatch("diagnostics", { scope: "paths", path: "a.ts", session: "s" }, new AbortController().signal),
+			engine.dispatch("diagnostics", { scope: "paths", path: "a.ts", session: "s" }, new AbortController().signal),
 		]);
 		expect(max).toBe(1);
-		expect(await engine.dispatch("lsp_status", {}, new AbortController().signal)).toContain("workspace");
+		expect(await engine.dispatch("status", {}, new AbortController().signal)).toContain("workspace");
 		await engine.close();
 	});
 	it("does not call an incomplete diagnostic result clean", async () => {
@@ -117,7 +112,7 @@ describe("workspace diagnostics", () => {
 			note: "server has not published",
 		}));
 		expect(
-			await engine.dispatch("check_diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal),
+			await engine.dispatch("diagnostics", { path: "a.ts", session: "s" }, new AbortController().signal),
 		).toContain("pending");
 		await engine.close();
 	});

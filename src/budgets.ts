@@ -1,11 +1,16 @@
-// Wait < IPC/Hook budget < hooks.json timeout (10s ordinary, 50s Stop).
+// Internal budgets remain below the native Hook host timeouts.
 export const BUDGET = {
 	quickHook: 500,
+	asyncHook: 310000,
+	ordinaryStop: 1500,
+	ordinaryWait: 300,
+	hookWait: 20000,
+	merge: 200,
+	mergeMax: 1000,
 	warmupDelay: 2000,
 	idle: 300000,
 	cleanup: 1000,
 	postWait: 3500,
-	hook: 4400,
 	stopWait: 42500,
 	stop: 44000,
 	request: 45000,

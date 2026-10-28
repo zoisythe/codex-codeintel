@@ -123,6 +123,7 @@ async function scanInventory(
 		await walk(scope);
 	}
 	const files = new Map<string, string>();
+	const aliases = new Map<string, string>();
 	names.sort();
 	if (names.length > maxFiles) complete = false;
 	if (!complete && dependencyOnly) return { files, complete: false, version: hash(JSON.stringify(names)) };
@@ -151,6 +152,7 @@ async function scanInventory(
 						continue;
 					}
 					const key = relative(root, path);
+					if (key !== name) aliases.set(name, key);
 					const signature = JSON.stringify([info.size, info.mtimeMs, info.ctimeMs, info.dev, info.ino]);
 					let entry = cache.get(key);
 					if (verify.has(key) || entry?.signature !== signature) {
@@ -171,7 +173,11 @@ async function scanInventory(
 	if (scope === root && complete) for (const key of cache.keys()) if (!files.has(key)) cache.delete(key);
 	const sorted = new Map([...files].sort(([a], [b]) => a.localeCompare(b)));
 
-	const snapshot = { files: sorted, version: hash(JSON.stringify([...sorted])), complete };
+	const snapshot = {
+		files: sorted,
+		version: hash(JSON.stringify([[...sorted], [...aliases].sort(([a], [b]) => a.localeCompare(b))])),
+		complete,
+	};
 	if (scope === root) snapshots.set(root, snapshot);
 	return snapshot;
 }

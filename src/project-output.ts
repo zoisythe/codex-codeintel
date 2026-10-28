@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inside } from "./files.js";
+import { goDocuments } from "./go-output.js";
 import { parseLint } from "./lint-output.js";
 import type { ProjectCheck } from "./project-types.js";
 import { type Finding, record, text } from "./results.js";
@@ -18,6 +19,61 @@ export async function projectOutput(
 		if (!inside(root, absolute)) throw new Error("Checker diagnostic outside workspace");
 		return relative(root, absolute);
 	};
+	if (check.parser === "go") {
+		const findings: Finding[] = [];
+		// go vet emits one JSON object per package, with optional '# package' headers.
+		const documents = goDocuments(output);
+		for (const document of documents)
+			if (record(document))
+				for (const analyzers of Object.values(document))
+					if (record(analyzers))
+						for (const [rule, diagnostics] of Object.entries(analyzers))
+							if (Array.isArray(diagnostics))
+								for (const diagnostic of diagnostics) {
+									if (!record(diagnostic)) continue;
+									const match = /^(.*):(\d+):(\d+)$/.exec(text(diagnostic["posn"]));
+									if (!match) throw new Error("Unlocated Go vet diagnostic");
+									findings.push({
+										path: pathOf(match[1] ?? ""),
+										line: Number(match[2]),
+										column: Number(match[3]),
+										severity: "error",
+										source: `go/${rule}`,
+										rule,
+										message: text(diagnostic["message"]),
+									});
+								}
+		for (const line of output.split("\n")) {
+			const match = /^(?:vet(?:\.exe)?: )?(.*\.go):(\d+)(?::(\d+))?:\s+(.+)$/.exec(line.trim());
+			if (match)
+				findings.push({
+					path: pathOf(match[1] ?? ""),
+					line: Number(match[2]),
+					column: Number(match[3] ?? 1),
+					severity: "error",
+					source: "go/compiler",
+					message: match[4] ?? "Go compiler diagnostic",
+				});
+		}
+		const contents = new Map<string, Promise<string>>();
+		return Promise.all(
+			findings.map(async (finding) => {
+				let content = contents.get(finding.path);
+				if (!content) {
+					content = readFile(resolve(root, finding.path), "utf8");
+					contents.set(finding.path, content);
+				}
+				const line = (await content).split("\n")[finding.line - 1] ?? "";
+				return {
+					...finding,
+					column:
+						Buffer.from(line)
+							.subarray(0, finding.column - 1)
+							.toString("utf8").length + 1,
+				};
+			}),
+		);
+	}
 	if (check.parser === "sarif") {
 		if (!output.trim()) return [];
 		const data: unknown = JSON.parse(output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1));

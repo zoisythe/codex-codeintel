@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0
+
+- Breaking: expose exactly check, diagnostics, status, navigate, rename, format, inspect, actions and apply. Old names return migration guidance without executing.
+- Make rename and format read-only previews. Unify text edits into bounded, single-use plans with workspace/config/tool/environment binding, full preflight, sequential apply, conflict checks and complete partial-write reporting. Only apply writes source.
+- Require native async Codex Hooks. Register exactly SessionStart, PostToolUse, Stop, SubagentStop, SessionEnd and Interrupt; match canonical Bash/apply_patch/mcp__lsp__apply, skip compact and remove high-frequency status messages and old event special cases.
+- Isolate explicit subagent waits/deliveries/turns while sharing workspace diagnostics; unknown ownership is shared. Only the main Stop may use the optional global gate. Ordinary ending feedback waits at most 300 ms within a 1.5-second budget.
+- Persist epoch/actor/tool-use identities, coalesce writes, add internal read-only long polling, preserve uncertain pending ranges through cancellation/restarts and prevent late startup checks from manufacturing pre-edit baselines. Reuse fresh apply diagnostics.
+- Bound automatic output to five diagnostics, 2 KiB per message and 8 KiB per actor/turn. Preserve snapshot-bound delivery IDs and stdout ACK retries; UI summaries and ACKs do not promise model receipt. Upgrade metadata without migrating old deliveries; re-review /hooks and start a new session, preserving user settings and trust.
+- Add symbol paths, unique @@ anchors, compact outlines and recoverable paging; add declarations, call/type hierarchy, completions, symbol exploration and bounded impact analysis with candidate test links.
+- Preserve lint rule/fix metadata internally; add filtered diagnostics, summaries, rule explanations and previewed Ruff/Biome/ESLint and LSP text actions. Vendor-safe bulk selection stays distinct from unknown/unsafe/suggestions; command/resource actions do not execute.
+- Expand Go support with gopls and go vet JSON project checks scoped by go list. Normalize Windows Path/PATH across IPC, preserve cancellation and nonblocking Hook behavior.
+- Update Skills/docs and delivered-bundle/real-tool acceptance. Retain Linux/macOS/Windows coverage; add Go/Ruff/ty/clangd feature CI. Keep Rust acceptance separate from default local tests.
+- Add an independent Linux/Windows Rust CI with a pinned matching toolchain, offline Cargo fixtures, delivered-bundle navigation/edit/check acceptance and retained failure evidence; ordinary local tests require no Rust.
+
 ## 0.9.0
 
 - Remove plugin directory-trust checks and the published PreToolUse edit gate; compatibility calls always pass. Keep workspace boundaries, symlink and conflict checks, complete modifiedPaths, and CODEX_HOME isolation.

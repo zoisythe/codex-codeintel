@@ -44,9 +44,9 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 				executionEnvironment(),
 				signal,
 			),
-		end: (session) => {
-			automatic.cancel(session);
-			projects.cancelSession(session);
+		end: (session, turn) => {
+			automatic.cancel(session, turn);
+			if (!turn) projects.cancelSession(session);
 		},
 	});
 	let warmupTimer: NodeJS.Timeout | undefined;
@@ -114,7 +114,10 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 			try {
 				const output = await withExecution(
 					environment,
-					operation === "automatic" || operation === "hook",
+					operation === "automatic" ||
+						operation === "hook" ||
+						operation === "hook_wait" ||
+						operation === "hook_ack",
 					async () => {
 						if (operation === "handshake")
 							return { operation, protocol: SERVICE_PROTOCOL, identity, pid: process.pid };
@@ -133,7 +136,9 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 						}
 						if (operation === "automatic")
 							return { operation, ...(await automatic.request(args, environment, controller.signal)) };
-						if (operation === "check_project")
+						if (operation === "hook_wait")
+							return { operation, ...(await coordinator.wait(args, controller.signal)) };
+						if (operation === "check")
 							return { ...(await projects.request(args, environment, controller.signal)) };
 						if (operation === "hook") {
 							if (args["hook_event_name"] === "SessionEnd" && text(args["session_id"]) === warmupSession) {
@@ -145,7 +150,7 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 							return { operation, ...(await coordinator.request(args, controller.signal)) };
 						}
 						if (
-							!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(
+							!["status", "diagnostics", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
 								operation,
 							)
 						)
@@ -157,7 +162,17 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 						)
 							automatic.cancel();
 						const output = await engine.dispatch(operation, args, controller.signal);
-						if (operation === "lsp_status")
+						if (operation === "diagnostics" && Array.isArray(output["results"])) {
+							const results = output["results"] as import("./results.js").FileResult[];
+							output["attribution"] = await projects
+								.attribution(text(args["session"], "manual"), results, args, controller.signal)
+								.catch(() => ({
+									introduced: 0,
+									resolved: 0,
+									unattributed: results.flatMap((result) => result.findings).length,
+								}));
+						}
+						if (operation === "status")
 							return {
 								...output,
 								service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },

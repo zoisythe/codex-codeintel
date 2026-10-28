@@ -146,7 +146,7 @@ async function findTool(
 	return resolution(
 		[...command],
 		"missing",
-		`Tool missing: ${name}; install locally and retry or use lsp_status refresh=true`,
+		`Tool missing: ${name}; install locally and retry or use status refresh=true`,
 	);
 }
 export function languageFor(config: Config, path: string): { language: string; server: Server } | undefined {

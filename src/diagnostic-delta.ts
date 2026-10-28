@@ -51,8 +51,10 @@ export function attributableFinding(
 	const source = finding.source.toLowerCase();
 	const parser = /^(?:typescript|tsc|ts(?:\/|$|\d))/.test(source)
 		? "tsc"
-		: /^(?:rust|cargo)/.test(source)
-			? "cargo"
-			: ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
+		: /^(?:go|gopls)(?:\/|$)/.test(source)
+			? "go"
+			: /^(?:rust|cargo)/.test(source)
+				? "cargo"
+				: ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
 	return parser !== undefined && parsers.includes(parser);
 }

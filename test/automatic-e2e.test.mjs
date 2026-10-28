@@ -20,7 +20,7 @@ async function fixture(t, extra = {}, environment = {}) {
 	const configure = value => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
 	await configure(config);
 	const c = bundleClient(root, home, env);
-	const status = async () => (await c.call("lsp_status", { path: "main.fake" })).structuredContent;
+	const status = async () => (await c.call("status", { path: "main.fake" })).structuredContent;
 	const hook = (event = "PostToolUse", input = {}) => new Promise((resolveResult, reject) => {
 		const began = performance.now(), child = spawn(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
 		let stdout = "", stderr = "";
@@ -34,15 +34,15 @@ async function fixture(t, extra = {}, environment = {}) {
 			const data = JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8")); if (data.id === "s") return data;
 		}
 	};
-	const read = () => hook("PostToolUse", { tool_name: "exec_command", tool_input: { cmd: "git status --short" } });
-	const settle = () => until(async () => { const result = await status(); return result.hookTasks?.length === 0; });
+	const read = () => hook("PostToolUse", { tool_name: "Bash", tool_input: { cmd: "git status --short" } });
+	const settle = () => until(async () => { const result = await status(); return result.hookTasks?.queued === 0 && result.hookTasks?.running === 0; });
 	const start = async () => {
 		await hook("SessionStart");
-		await until(async () => { const value = (await c.call("check_project", { run: "cached" })).structuredContent; return value.state !== "missing" && value.state !== "running"; });
+		await until(async () => { const value = (await c.call("check", { run: "cached" })).structuredContent; return value.state !== "missing" && value.state !== "running"; });
 		await settle(); await read();
 	};
 	const post = async (input = {}) => {
-		const result = await hook("PostToolUse", { tool_name: "Write", tool_input: { path: "main.fake" }, ...input });
+		const result = await hook("PostToolUse", { tool_name: "apply_patch", tool_input: { path: "main.fake" }, ...input });
 		await settle(); const delivered = await read();
 		return { ...result, text: (result.text.includes("deliveryId=") ? result.text : "") + delivered.text };
 	};
@@ -52,10 +52,10 @@ async function fixture(t, extra = {}, environment = {}) {
 
 test("default feedback reports introduced errors without blocking; PreToolUse never checks", { timeout: 20000 }, async t => {
 	const f = await fixture(t); await f.start();
-	assert.equal((await f.hook("PreToolUse", { session_id: "", tool_name: "Write", tool_input: { path: "main.fake" } })).text, "");
+	assert.equal((await f.hook("PreToolUse", { session_id: "", tool_name: "apply_patch", tool_input: { path: "main.fake" } })).text, "");
 	await f.write("broken new\n"); const post = await f.post(); assert(post.ms < 1500, String(post.ms)); assert.match(post.text, /introduced=1/);
 	assert.equal((await f.hook("Stop")).value.decision, undefined);
-	const cached = (await f.c.call("check_diagnostics", { run: "cached", scope: "session", session: "s" })).structuredContent; assert.equal(cached.errors, 1);
+	const cached = (await f.c.call("diagnostics", { run: "cached", scope: "session", session: "s" })).structuredContent; assert.equal(cached.errors, 1);
 });
 
 test("global gate confirms new errors once per turn, historical shifts remain historical", { timeout: 25000 }, async t => {
@@ -72,7 +72,14 @@ test("global gate confirms new errors once per turn, historical shifts remain hi
 test("missing baseline still reports current diagnostics, cannot create post-edit history", { timeout: 15000 }, async t => {
 	const f = await fixture(t, { stopGate: "introduced-errors" });
 	await f.write("broken current\n"); const result = await f.post(); assert.match(result.text, /unattributed=1/); assert.match(result.text, /cannot be attributed/); assert.match(result.text, /pull broken/);
-	assert.equal((await f.state()).diagnosticBaseline, null); assert.equal((await f.hook("Stop")).value.decision, undefined); assert.equal((await f.hook("PreToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } })).text, "");
+	assert.equal((await f.state()).diagnosticBaseline, null); assert.equal((await f.hook("Stop")).value.decision, undefined); assert.equal((await f.hook("PreToolUse", { tool_name: "apply_patch", tool_input: { path: "main.fake" } })).text, "");
+});
+
+test("resume without saved state cannot establish a pre-edit baseline", { timeout: 12000 }, async t => {
+	const f = await fixture(t, { stopGate: "introduced-errors" });
+	await f.write("broken before resume\n"); await f.hook("SessionStart", { source: "resume" });
+	assert.match((await f.post()).text, /unattributed=1/);
+	assert.equal((await f.state()).diagnosticBaseline, null); assert.notEqual((await f.hook("Stop")).value.decision, "block");
 });
 
 test("failed baseline and uncovered checks retain feedback but cannot gate", { timeout: 20000 }, async t => {
@@ -85,7 +92,7 @@ test("one checker failure preserves reliable independent ranges", { timeout: 200
 	const f = await fixture(t, { stopGate: "introduced-errors" }); await mkdir(join(f.root, "bad")); await writeFile(join(f.root, "bad", "other.fake"), "clean\n");
 	await f.configure({ ...f.config, projectChecks: [...f.config.projectChecks, { name: "missing", cwd: "bad", command: [join(f.dir, "missing")], parser: "json", coverage: ["**/*.fake"] }] });
 	await f.start(); await f.write("broken good range\n"); assert.match((await f.post()).text, /introduced=1/); assert.equal((await f.hook("Stop")).value.decision, "block");
-	const project = (await f.c.call("check_project")).structuredContent; assert.equal(project.state, "failed"); assert(project.checkers.some(value => value.name === "fake" && value.state === "complete"));
+	const project = (await f.c.call("check")).structuredContent; assert.equal(project.state, "failed"); assert(project.checkers.some(value => value.name === "fake" && value.state === "complete"));
 });
 
 test("project cannot enable gate and explicit global off takes precedence", { timeout: 15000 }, async t => {
@@ -95,15 +102,43 @@ test("project cannot enable gate and explicit global off takes precedence", { ti
 });
 
 test("configuration and ending policy changes invalidate old baselines and deliveries", { timeout: 18000 }, async t => {
-	const f = await fixture(t, { stopGate: "introduced-errors" }); await f.start(); await f.write("broken old\n"); await f.hook("PostToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } }); await f.settle(); assert(Object.keys((await f.state()).outbox).length);
-	await f.configure({ ...f.config, stopGate: "off" }); assert.equal((await f.c.call("check_project", {run:"cached"})).structuredContent.state,"stale"); assert.equal((await f.read()).text, ""); assert.equal((await f.hook("Stop")).value.decision, undefined);
+	const f = await fixture(t, { stopGate: "introduced-errors" }); await f.start(); await f.write("broken old\n"); await f.hook("PostToolUse", { tool_name: "apply_patch", tool_input: { path: "main.fake" } }); await f.settle(); assert.equal(Object.keys((await f.state()).outbox).length, 0, "Successful native async output is acknowledged");
+	await f.configure({ ...f.config, stopGate: "off" }); assert.equal((await f.c.call("check", {run:"cached"})).structuredContent.state,"stale"); assert.equal((await f.read()).text, ""); assert.equal((await f.hook("Stop")).value.decision, undefined);
 	await f.configure({ ...f.config, stopGate: "introduced-errors" }); await f.write("broken new configuration\n"); assert.match((await f.post()).text, /unattributed=1/); assert.equal((await f.hook("Stop")).value.decision, undefined);
 });
 
 test("MCP formatting succeeds without a baseline; later diagnostic cancellation is supplementary", { timeout: 15000 }, async t => {
 	const f = await fixture(t, {}, { CHECK_FAIL: "1" });
 	await f.write("clean text\n");
-	const result = await f.c.call("lsp_format", { path: "main.fake" }); assert.equal(result.isError, undefined, JSON.stringify(result)); assert(result.structuredContent.modifiedPaths.includes("main.fake"));
+	const result = await f.c.write("format", { path: "main.fake" }); assert.equal(result.isError, undefined, JSON.stringify(result)); assert(result.structuredContent.modifiedPaths.includes("main.fake"));
 	assert.match(await readFile(join(f.root, "main.fake"), "utf8"), /fixed!/);
 	assert.equal((await f.state())?.diagnosticBaseline ?? null, null);
+});
+
+test("apply post diagnostics are reused, and paged ranges still discover writes", { timeout: 15000 }, async t => {
+	const f = await fixture(t); const trace = join(f.dir, "requests.log");
+	await f.write("clean text\n");
+	await f.configure({ ...f.config, lsp: { fake: { ...f.config.lsp.fake, env: { ...f.config.lsp.fake.env, CODEX_LSP_TEST_REQUESTS: trace } } } });
+	const applied = (await f.c.write("format", { path: "main.fake", session: "s" })).structuredContent;
+	assert.equal(applied.status, "applied", JSON.stringify(applied)); assert.equal(applied.diagnostics.state, "complete");
+	const count = async () => (await readFile(trace, "utf8")).split("\n").filter(method => method === "textDocument/diagnostic").length;
+	const before = await count(); assert(before > 0);
+	await f.hook("PostToolUse", { tool_name: "mcp__lsp__apply", tool_use_id: "apply-1", tool_response: { structuredContent: applied } });
+	assert.equal(await count(), before, "The Hook reused the exact fresh apply result");
+	await f.write("broken discovered\n");
+	const paged = await f.hook("PostToolUse", { tool_name: "mcp__lsp__apply", tool_use_id: "apply-2", tool_response: { structuredContent: { modifiedPaths: [], next: { cursor: "page" } } } });
+	assert.match(paged.text, /pull broken/); assert(await count() > before, "Incomplete modifiedPaths falls back to discovery");
+});
+
+test("parallel child Hooks retain one public MCP session and share visible cached changes", { timeout: 15000 }, async t => {
+	const f = await fixture(t);
+	await writeFile(join(f.root, "a.fake"), "clean a\n"); await writeFile(join(f.root, "b.fake"), "clean b\n"); await f.start();
+	await writeFile(join(f.root, "a.fake"), "broken a\n"); await writeFile(join(f.root, "b.fake"), "broken b\n");
+	const outputs = await Promise.all(["a", "b"].map(agent => f.hook("PostToolUse", { tool_name: "apply_patch", agent_id: agent, turn_id: `child-${agent}`, tool_use_id: "same-call", tool_input: { path: `${agent}.fake` } })));
+	for (const output of outputs) assert.match(output.text, /pull broken/);
+	const result = await f.c.call("diagnostics", { run: "cached", scope: "session", session: "s" });
+	assert.equal(result.structuredContent.errors, 2, JSON.stringify(result));
+	assert.deepEqual((await f.status()).sessions, ["s"]);
+	assert(!(await f.c.call("diagnostics", { run: "cached", scope: "session" })).isError, "Internal actor routes are not public MCP sessions");
+	assert.notEqual((await f.hook("SubagentStop", { agent_id: "a", turn_id: "child-a" })).value.decision, "block");
 });

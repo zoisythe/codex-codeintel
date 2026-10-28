@@ -21,11 +21,16 @@ var init_budgets = __esm({
     "use strict";
     BUDGET = {
       quickHook: 500,
+      asyncHook: 31e4,
+      ordinaryStop: 1500,
+      ordinaryWait: 300,
+      hookWait: 2e4,
+      merge: 200,
+      mergeMax: 1e3,
       warmupDelay: 2e3,
       idle: 3e5,
       cleanup: 1e3,
       postWait: 3500,
-      hook: 4400,
       stopWait: 42500,
       stop: 44e3,
       request: 45e3,
@@ -62,9 +67,15 @@ function restoreInstalledHome(script = fileURLToPath(import.meta.url)) {
   }
 }
 function executionEnvironment() {
-  return Object.fromEntries(
+  const environment = Object.fromEntries(
     Object.entries(executions.getStore()?.environment ?? process.env).sort(([a], [b]) => a.localeCompare(b))
   );
+  if (process.platform === "win32") {
+    const path = environment["PATH"] ?? environment["Path"];
+    for (const key of Object.keys(environment)) if (key.toLowerCase() === "path") delete environment[key];
+    if (path !== void 0) environment["PATH"] = path;
+  }
+  return environment;
 }
 function automaticExecution() {
   return executions.getStore()?.automatic ?? false;
@@ -73,6 +84,9 @@ function subprocessEnvironment(environment = executionEnvironment()) {
   return automaticExecution() ? {
     ...environment,
     RUSTUP_AUTO_INSTALL: "0",
+    GOTOOLCHAIN: "local",
+    GOPROXY: "off",
+    GOSUMDB: "off",
     UV_PYTHON_DOWNLOADS: "never",
     UV_NO_SYNC: "1",
     UV_OFFLINE: "1"
@@ -206,6 +220,7 @@ async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 
     await walk(scope2);
   }
   const files = /* @__PURE__ */ new Map();
+  const aliases = /* @__PURE__ */ new Map();
   names.sort();
   if (names.length > maxFiles) complete = false;
   if (!complete && dependencyOnly) return { files, complete: false, version: hash(JSON.stringify(names)) };
@@ -234,6 +249,7 @@ async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 
             continue;
           }
           const key = relative(root, path);
+          if (key !== name) aliases.set(name, key);
           const signature = JSON.stringify([info.size, info.mtimeMs, info.ctimeMs, info.dev, info.ino]);
           let entry = cache.get(key);
           if (verify.has(key) || entry?.signature !== signature) {
@@ -255,7 +271,11 @@ async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 
     for (const key of cache.keys()) if (!files.has(key)) cache.delete(key);
   }
   const sorted = new Map([...files].sort(([a], [b]) => a.localeCompare(b)));
-  const snapshot = { files: sorted, version: hash(JSON.stringify([...sorted])), complete };
+  const snapshot = {
+    files: sorted,
+    version: hash(JSON.stringify([[...sorted], [...aliases].sort(([a], [b]) => a.localeCompare(b))])),
+    complete
+  };
   if (scope2 === root) snapshots.set(root, snapshot);
   return snapshot;
 }
@@ -413,6 +433,10 @@ var init_server_definitions = __esm({
 });
 
 // src/results.ts
+function publicFinding(finding) {
+  const { lint, documentation: _documentation, endLine: _endLine, endColumn: _endColumn, ...result } = finding;
+  return { ...result, ...lint ? { fixable: result.fixable ?? lint.fixes.length > 0 } : {} };
+}
 function message(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -465,12 +489,17 @@ function mergeFindings(findings) {
   for (const finding of findings) {
     const key = JSON.stringify([finding.path, finding.line, finding.column, finding.severity, finding.message]);
     const old = entries.get(key);
-    if (old) old.sources = [.../* @__PURE__ */ new Set([...old.sources ?? [old.source], finding.source])];
-    else entries.set(key, { ...finding });
+    if (old) {
+      old.sources = [.../* @__PURE__ */ new Set([...old.sources ?? [old.source], finding.source])];
+      if (finding.lint && !old.lint) old.lint = finding.lint;
+      if (finding.rule && !old.rule) old.rule = finding.rule;
+    } else entries.set(key, { ...finding });
   }
   return [...entries.values()].sort((a, b) => Number(a.severity !== "error") - Number(b.severity !== "error"));
 }
 function failureKind(reason) {
+  if (/Plan (?:stale|conflict)|Overlapping|Workspace (?:or tools )?changed/i.test(reason)) return "conflict";
+  if (/Plan missing|consumed or expired|Action stale|Cursor invalid/i.test(reason)) return "stale";
   if (/Migration|configuration|schemaVersion|Extension conflict|Unknown built-in|Invalid (?:lsp|lint|formatting)|lsp\.\w+.*(?:must be|requires)|trustedWorkspaces requires|exclude requires/i.test(
     reason
   ))
@@ -616,7 +645,7 @@ async function configuration(root) {
       });
   const user = await read(paths.user, issues, sources);
   const project = await read(paths.project, issues, sources);
-  const problem = (source, scope2, error) => issues.push({
+  const problem2 = (source, scope2, error) => issues.push({
     source,
     scope: scope2,
     severity: "error",
@@ -642,7 +671,7 @@ async function configuration(root) {
   ]) {
     if (data["lsp"] !== void 0) {
       if (!record(data["lsp"])) {
-        problem(source, "lsp", "Invalid lsp; all LSP capabilities disabled");
+        problem2(source, "lsp", "Invalid lsp; all LSP capabilities disabled");
         for (const language of Object.keys(servers)) servers[language] = false;
       } else
         for (const [language, value] of Object.entries(data["lsp"])) {
@@ -652,7 +681,7 @@ async function configuration(root) {
             if (entry) extensions[language] = entry.extensions;
           } catch (error) {
             servers[language] = false;
-            problem(source, `lsp.${language}`, error);
+            problem2(source, `lsp.${language}`, error);
           }
         }
     }
@@ -660,7 +689,7 @@ async function configuration(root) {
       const lint = data["lint"];
       if (!record(lint)) {
         javascript = python = "off";
-        problem(source, "lint", "Invalid lint; lint capabilities disabled");
+        problem2(source, "lint", "Invalid lint; lint capabilities disabled");
       } else
         for (const [key, value] of Object.entries(lint)) {
           if (key === "javascript" && typeof value === "string" && ["auto", "biome", "eslint", "off"].includes(value))
@@ -670,7 +699,7 @@ async function configuration(root) {
           else {
             if (key === "python") python = "off";
             if (key === "javascript") javascript = "off";
-            problem(source, `lint.${key}`, `Invalid lint.${key}`);
+            problem2(source, `lint.${key}`, `Invalid lint.${key}`);
           }
         }
     }
@@ -680,7 +709,7 @@ async function configuration(root) {
         (item) => typeof item === "string" && !item.startsWith("!") && !item.includes("\\") && !isAbsolute2(item) && !item.split("/").includes("..")
       ))
         exclude = value;
-      else problem(source, "configuration", "exclude requires relative forward-slash globs without negation");
+      else problem2(source, "configuration", "exclude requires relative forward-slash globs without negation");
     }
     if (data["formatting"] !== void 0) {
       const value = data["formatting"];
@@ -688,13 +717,13 @@ async function configuration(root) {
       formattingEnabled = record(value) && Object.keys(value).every((key) => ["tabSize", "insertSpaces"].includes(key)) && Number.isInteger(merged.tabSize) && merged.tabSize >= 1 && merged.tabSize <= 16 && typeof merged.insertSpaces === "boolean";
       if (formattingEnabled) formatting = merged;
       else
-        problem(source, "formatting", "Invalid formatting.tabSize or formatting.insertSpaces; formatting disabled");
+        problem2(source, "formatting", "Invalid formatting.tabSize or formatting.insertSpaces; formatting disabled");
     }
     if (data["automaticDiagnostics"] !== void 0) {
       const value = data["automaticDiagnostics"];
       if (!record(value)) {
         automaticDiagnostics = { postToolUse: "off", stop: "off" };
-        problem(source, "automaticDiagnostics", "Invalid automaticDiagnostics; automatic feedback disabled");
+        problem2(source, "automaticDiagnostics", "Invalid automaticDiagnostics; automatic feedback disabled");
       } else
         for (const [key, mode] of Object.entries(value)) {
           if (key === "postToolUse" && (mode === "delta" || mode === "off"))
@@ -704,10 +733,10 @@ async function configuration(root) {
           else {
             if (key === "postToolUse" || key === "stop")
               automaticDiagnostics = { ...automaticDiagnostics, [key]: "off" };
-            problem(
+            problem2(
               source,
               `automaticDiagnostics.${key}`,
-              "Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks"
+              "Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check for full checks"
             );
           }
         }
@@ -717,17 +746,17 @@ async function configuration(root) {
       if (value === "auto") projectChecks = "auto";
       else if (!Array.isArray(value)) {
         projectChecks = [];
-        problem(source, "projectChecks", "projectChecks requires auto or a list; project checks disabled");
+        problem2(source, "projectChecks", "projectChecks requires auto or a list; project checks disabled");
       } else {
         const checks = [];
         const names = /* @__PURE__ */ new Set();
         for (const [index, check] of value.entries()) {
-          if (!record(check) || Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) || typeof check["name"] !== "string" || !check["name"] || names.has(check["name"]) || typeof check["cwd"] !== "string" || isAbsolute2(check["cwd"]) || check["cwd"].split(/[\\/]/).includes("..") || !["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
+          if (!record(check) || Object.keys(check).some((key) => !["name", "cwd", "command", "parser", "coverage"].includes(key)) || typeof check["name"] !== "string" || !check["name"] || names.has(check["name"]) || typeof check["cwd"] !== "string" || isAbsolute2(check["cwd"]) || check["cwd"].split(/[\\/]/).includes("..") || !["tsc", "ty", "go", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
             typeof check["parser"] === "string" ? check["parser"] : ""
           ) || !Array.isArray(check["command"]) || !check["command"].length || !check["command"].every((arg) => typeof arg === "string" && arg.length) || !Array.isArray(check["coverage"]) || !check["coverage"].length || !check["coverage"].every(
             (arg) => typeof arg === "string" && !isAbsolute2(arg) && !arg.startsWith("!") && !arg.includes("\\") && !arg.split("/").includes("..")
           )) {
-            problem(
+            problem2(
               source,
               `projectChecks.${record(check) ? typeof check["name"] === "string" ? check["name"] : index : index}`,
               "Invalid projectChecks entry: require unique name, relative cwd, command array, parser and coverage globs"
@@ -748,7 +777,7 @@ async function configuration(root) {
   for (const [extension, languages] of used)
     if (languages.length > 1)
       for (const language of languages) {
-        problem(
+        problem2(
           servers[language] ? servers[language].source : "configuration",
           `lsp.${language}`,
           `Extension conflict ${extension}: ${languages.join(" and ")}; disable or replace the original language entry`
@@ -758,7 +787,7 @@ async function configuration(root) {
   let stopGate = "off";
   if (user["stopGate"] === "off" || user["stopGate"] === "introduced-errors") stopGate = user["stopGate"];
   else if (user["stopGate"] !== void 0)
-    problem(paths.user, "stopGate", "Invalid stopGate; expected off or introduced-errors; gate disabled");
+    problem2(paths.user, "stopGate", "Invalid stopGate; expected off or introduced-errors; gate disabled");
   if (project["stopGate"] !== void 0)
     issues.push({
       source: paths.project,
@@ -862,7 +891,7 @@ function configurationLanguages(path) {
   if (/^(?:tsconfig|jsconfig|package|pnpm-lock|yarn\.lock)/.test(name)) return ["typescript"];
   if (["pyproject.toml", "uv.lock", "ty.toml", "pyrightconfig.json"].includes(name)) return ["python"];
   if ([".clangd", "compile_commands.json", "compile_flags.txt"].includes(name)) return ["cpp"];
-  if (["go.mod", "go.sum"].includes(name)) return ["go"];
+  if (["go.mod", "go.sum", "go.work", "go.work.sum"].includes(name)) return ["go"];
   return [];
 }
 var exact;
@@ -894,6 +923,8 @@ var init_config_files = __esm({
       ".rustfmt.toml": ["format"],
       "go.mod": ["types"],
       "go.sum": ["types"],
+      "go.work": ["types"],
+      "go.work.sum": ["types"],
       "lsp-client.json": ["types", "lint", "format"]
     };
   }
@@ -930,7 +961,7 @@ function attributableFinding(finding, parsers, before = []) {
     return before.filter((item) => item.path === finding.path).every((item) => item.source.split("/")[0] === finding.source.split("/")[0]);
   }
   const source = finding.source.toLowerCase();
-  const parser = /^(?:typescript|tsc|ts(?:\/|$|\d))/.test(source) ? "tsc" : /^(?:rust|cargo)/.test(source) ? "cargo" : ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
+  const parser = /^(?:typescript|tsc|ts(?:\/|$|\d))/.test(source) ? "tsc" : /^(?:go|gopls)(?:\/|$)/.test(source) ? "go" : /^(?:rust|cargo)/.test(source) ? "cargo" : ["ty", "ruff", "eslint", "biome"].find((name) => source === name || source.startsWith(`${name}/`));
   return parser !== void 0 && parsers.includes(parser);
 }
 var init_diagnostic_delta = __esm({
@@ -939,26 +970,122 @@ var init_diagnostic_delta = __esm({
   }
 });
 
+// src/hook-events.ts
+function hookEvent(input) {
+  const event = text(input["hook_event_name"], "PostToolUse");
+  if (!HOOK_EVENTS.some((name) => name === event)) return;
+  if (event === "SessionStart" && !["startup", "resume", "clear", "fork"].includes(text(input["source"], "startup")))
+    return;
+  return event;
+}
+function normalizeHook(input) {
+  const event = hookEvent(input), session = text(input["session_id"]);
+  if (!event || !session || session.includes("\0")) return;
+  return { ...input, hook_event_name: event };
+}
+function rootSession(session) {
+  return session.split(separator)[0] ?? session;
+}
+function hookSession(input) {
+  const parent = text(input["session_id"]);
+  const event = text(input["hook_event_name"]);
+  const agent = text(input["agent_id"]);
+  if (event === "SessionStart" || event === "SessionEnd" || event === "Stop" || event === "Interrupt") return parent;
+  if (event === "PostToolUse" && !agent) return parent;
+  return `${parent}${separator}${agent ? `agent:${agent}` : "shared"}`;
+}
+function internalHook(input) {
+  return { ...input, session_id: hookSession(input), parent_session_id: text(input["session_id"]) };
+}
+function isActorSession(session) {
+  return session.includes(separator);
+}
+function actorLabel(session) {
+  return session.split(separator)[1] ?? "main";
+}
+var HOOK_EVENTS, separator;
+var init_hook_events = __esm({
+  "src/hook-events.ts"() {
+    "use strict";
+    init_results();
+    HOOK_EVENTS = ["SessionStart", "PostToolUse", "Stop", "SubagentStop", "SessionEnd", "Interrupt"];
+    separator = "\0codeintel:";
+  }
+});
+
 // src/lint-output.ts
+function offsetPosition(content, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset > content.length) throw new Error("Invalid lint fix offset");
+  const lines = content.slice(0, offset).split("\n");
+  return { line: lines.length - 1, character: lines.at(-1)?.length ?? 0 };
+}
+function bytePosition(content, offset) {
+  const prefix = Buffer.from(content).subarray(0, offset).toString("utf8");
+  return offsetPosition(prefix, prefix.length);
+}
+function editsFor(runner, fix, content) {
+  if (runner === "eslint" && Array.isArray(fix["range"]) && typeof fix["text"] === "string") {
+    const [start, end] = fix["range"];
+    if (typeof start !== "number" || typeof end !== "number") throw new Error("Invalid lint edit range");
+    const bom = content.startsWith("\uFEFF") ? 1 : 0;
+    const from = bom && start === 0 && fix["text"].startsWith("\uFEFF") ? 0 : start + bom;
+    return [
+      {
+        range: { start: offsetPosition(content, from), end: offsetPosition(content, end + bom) },
+        newText: fix["text"]
+      }
+    ];
+  }
+  if (runner === "ruff" && Array.isArray(fix["edits"]))
+    return fix["edits"].map((value) => {
+      if (!record(value) || !record(value["location"]) || !record(value["end_location"]) || typeof value["content"] !== "string")
+        throw new Error("Malformed Ruff fix");
+      const at = (position3) => {
+        const row = Number(position3["row"]);
+        const column = Number(position3["column"]);
+        const line = content.split("\n")[row - 1];
+        const bom = row === 1 && line?.startsWith("\uFEFF") ? 1 : 0;
+        const scalarLine = line?.slice(bom);
+        if (!Number.isInteger(row) || row < 1 || line === void 0 || !Number.isInteger(column) || column < 1 || column > Array.from(scalarLine ?? "").length + 1)
+          throw new Error("Invalid Ruff fix position");
+        return {
+          line: row - 1,
+          character: bom + Array.from(scalarLine ?? "").slice(0, column - 1).join("").length
+        };
+      };
+      return { range: { start: at(value["location"]), end: at(value["end_location"]) }, newText: value["content"] };
+    });
+  return [];
+}
 function position(value, content) {
   const location = record(value["location"]) ? value["location"] : {};
   const span = location["span"];
   if (Array.isArray(span) && typeof span[0] === "number") {
-    const before = Buffer.from(content).subarray(0, span[0]).toString("utf8").split("\n");
-    return { line: before.length, column: (before.at(-1)?.length ?? 0) + 1 };
+    const at = bytePosition(content, span[0]);
+    return { line: at.line + 1, column: at.character + 1 };
   }
   const start = record(location["start"]) ? location["start"] : {};
   const line = value["line"] ?? location["row"] ?? start["line"];
   const column = value["column"] ?? location["column"] ?? start["column"];
   return { line: typeof line === "number" ? line : 1, column: typeof column === "number" ? column : 1 };
 }
+function ruffPosition(value, content) {
+  const row = Number(value["row"] ?? 1);
+  const column = Number(value["column"] ?? 1);
+  const line = content.split("\n")[row - 1] ?? "";
+  const bom = row === 1 && line.startsWith("\uFEFF") ? 1 : 0;
+  return {
+    line: row,
+    column: bom + Array.from(line.slice(bom)).slice(0, column - 1).join("").length + 1
+  };
+}
 function items(runner, data) {
   if (runner === "eslint" && Array.isArray(data))
     return data.flatMap((file) => record(file) && Array.isArray(file["messages"]) ? file["messages"] : []);
   if (runner === "ruff" && Array.isArray(data)) return data;
   if (runner === "biome" && record(data) && Array.isArray(data["diagnostics"])) {
-    const summary = data["summary"];
-    if (record(summary) && Number(summary["diagnosticsNotPrinted"]) > 0)
+    const summary2 = data["summary"];
+    if (record(summary2) && Number(summary2["diagnosticsNotPrinted"]) > 0)
       throw new Error("Lint result truncated; narrow file scope");
     return data["diagnostics"];
   }
@@ -971,12 +1098,47 @@ function parseLint(runner, data, path, content) {
     const severity = value["severity"];
     if (severity !== void 0 && ![1, 2, "error", "warning", "fatal"].includes(severity))
       continue;
+    const rule = text(value["ruleId"], text(value["code"], text(value["category"], "lint")));
+    const fixes = [];
+    if (record(value["fix"])) {
+      const raw = value["fix"];
+      const edits = editsFor(runner, raw, content);
+      const applicability = runner === "ruff" && ["safe", "unsafe"].includes(text(raw["applicability"])) ? text(raw["applicability"]) : "unknown";
+      if (edits.length) fixes.push({ title: text(raw["message"], `Fix ${rule}`), applicability, edits });
+    }
+    if (Array.isArray(value["suggestions"]))
+      for (const suggestion of value["suggestions"]) {
+        if (record(suggestion) && record(suggestion["fix"]))
+          fixes.push({
+            title: text(suggestion["desc"], `Suggestion for ${rule}`),
+            applicability: "suggestion",
+            edits: editsFor(runner, suggestion["fix"], content)
+          });
+      }
+    const end = record(value["end_location"]) ? value["end_location"] : record(value["location"]) && record(value["location"]["end"]) ? value["location"]["end"] : {};
+    const start = runner === "ruff" && record(value["location"]) ? ruffPosition(value["location"], content) : position(value, content);
+    if (runner === "eslint" && start.line === 1 && content.startsWith("\uFEFF")) start.column++;
+    const endPosition = runner === "ruff" && record(value["end_location"]) ? ruffPosition(value["end_location"], content) : void 0;
+    const location = record(value["location"]) ? value["location"] : {};
+    const span = Array.isArray(location["span"]) ? location["span"] : [];
+    const biomeEnd = runner === "biome" && typeof span[1] === "number" ? bytePosition(content, span[1]) : void 0;
     findings.push({
       path,
-      ...position(value, content),
+      ...start,
       severity: severity === 1 || severity === "warning" ? "warning" : "error",
       source: `${runner}/${text(value["ruleId"], text(value["code"], text(value["category"], "lint")))}`,
-      message: text(value["description"], text(value["message"], "Lint finding"))
+      message: text(value["description"], text(value["message"], "Lint finding")),
+      rule,
+      fixable: fixes.length > 0 || runner === "biome" && (Array.isArray(value["tags"]) && value["tags"].includes("fixable") || Array.isArray(value["advices"]) && value["advices"].some(
+        (advice) => record(advice) && /^(?:Safe|Unsafe) fix:/.test(text(advice["text"]))
+      )),
+      ...typeof (value["endLine"] ?? end["row"] ?? end["line"]) === "number" ? { endLine: Number(value["endLine"] ?? end["row"] ?? end["line"]) } : {},
+      ...typeof (value["endColumn"] ?? end["column"]) === "number" ? {
+        endColumn: Number(value["endColumn"] ?? end["column"]) + (runner === "eslint" && value["endLine"] === 1 && content.startsWith("\uFEFF") ? 1 : 0)
+      } : {},
+      ...typeof value["url"] === "string" ? { documentation: value["url"] } : {},
+      ...endPosition ? { endLine: endPosition.line, endColumn: endPosition.column } : biomeEnd ? { endLine: biomeEnd.line + 1, endColumn: biomeEnd.character + 1 } : {},
+      lint: { runner, fixes, raw: value }
     });
   }
   return findings;
@@ -1104,9 +1266,9 @@ function validateCwd(cwd) {
   }
 }
 function wrap(proc) {
-  const exitedPromise = new Promise((resolve12) => {
-    proc.once("close", (code) => resolve12(code ?? 0));
-    proc.once("error", () => resolve12(1));
+  const exitedPromise = new Promise((resolve13) => {
+    proc.once("close", (code) => resolve13(code ?? 0));
+    proc.once("error", () => resolve13(1));
   });
   if (!proc.stdin || !proc.stdout || !proc.stderr) {
     throw new LspProcessSpawnError("Spawned process is missing one of stdin/stdout/stderr pipes");
@@ -1225,8 +1387,8 @@ function isWindowsShellShim(command) {
   return lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat");
 }
 function splitPath(pathValue, platform) {
-  const separator = platform === "win32" ? ";" : delimiter;
-  return pathValue.split(separator).filter(Boolean);
+  const separator2 = platform === "win32" ? ";" : delimiter;
+  return pathValue.split(separator2).filter(Boolean);
 }
 function getWindowsPathExtensions(env) {
   const rawExtensions = env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
@@ -1450,7 +1612,7 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
   return resolution(
     [...command],
     "missing",
-    `Tool missing: ${name}; install locally and retry or use lsp_status refresh=true`
+    `Tool missing: ${name}; install locally and retry or use status refresh=true`
   );
 }
 function languageFor(config, path) {
@@ -1505,12 +1667,12 @@ var init_tool_resolution = __esm({
 
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
-import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
+import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname3, extname as extname2, join as join7, relative as relative2, resolve as resolve3 } from "node:path";
 async function run(command, args, cwd, signal, input, options = {}) {
   signal.throwIfAborted();
   const environment = subprocessEnvironment(options.environment ?? executionEnvironment());
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const prepared = createSpawnCommand([command, ...args], process.platform, environment["ComSpec"], environment);
     const child = spawn2(prepared.command, prepared.args, {
       ...HIDDEN_PROCESS,
@@ -1553,7 +1715,7 @@ async function run(command, args, cwd, signal, input, options = {}) {
       if (code !== 0 && code !== 1 && !signal.aborted) void logEvent("abnormal-exit");
       if (signal.aborted) reject(new Error("Runner cancelled"));
       else if (exceeded) reject(new Error("Runner exceeded time/output budget"));
-      else resolve12({ stdout, stderr, code: code ?? -1 });
+      else resolve13({ stdout, stderr, code: code ?? -1 });
     });
     child.stdin.on("error", () => {
     });
@@ -1599,8 +1761,8 @@ async function javascriptRunner(root, path, name, packageName, entry) {
 async function select(root, path, formatting = false, provided, active = false, signal = new AbortController().signal) {
   const config = provided ?? await configuration(root);
   const extension = extname2(path);
-  const choice = formatting ? "auto" : /\.pyi?$/.test(extension) ? config.python : config.javascript;
-  if (choice === "off") return void 0;
+  const choice2 = formatting ? "auto" : /\.pyi?$/.test(extension) ? config.python : config.javascript;
+  if (choice2 === "off") return void 0;
   if (/\.pyi?$/.test(extension)) {
     let tool2 = await resolveTool(root, path, ["ruff"], false, false);
     if (tool2.source === "missing") {
@@ -1629,9 +1791,9 @@ async function select(root, path, formatting = false, provided, active = false, 
     return { name: "ruff", command: tool2.command[0] ?? "ruff", prefix: tool2.command.slice(1), source: tool2.source };
   }
   if (!/\.(?:[cm]?[jt]sx?|jsonc?|css)$/.test(path)) return void 0;
-  if ((choice === "auto" || choice === "biome") && await configured(root, path, ["biome.json", "biome.jsonc"]))
+  if ((choice2 === "auto" || choice2 === "biome") && await configured(root, path, ["biome.json", "biome.jsonc"]))
     return javascriptRunner(root, path, "biome", "@biomejs/biome", "bin/biome");
-  if ((choice === "auto" || choice === "eslint") && await configured(root, path, [
+  if ((choice2 === "auto" || choice2 === "eslint") && await configured(root, path, [
     "eslint.config.js",
     "eslint.config.mjs",
     "eslint.config.cjs",
@@ -1640,7 +1802,7 @@ async function select(root, path, formatting = false, provided, active = false, 
     ".eslintrc.cjs"
   ]))
     return javascriptRunner(root, path, "eslint", "eslint", "bin/eslint.js");
-  if (choice !== "auto") throw new Error(`${choice}: matching project configuration missing`);
+  if (choice2 !== "auto") throw new Error(`${choice2}: matching project configuration missing`);
   return void 0;
 }
 async function runnerIdentity(root, path, provided) {
@@ -1679,6 +1841,15 @@ async function reportLint(root, path, config, reason) {
   });
   while (lintReports.size > 1e3) lintReports.delete(lintReports.keys().next().value ?? "");
 }
+async function lintDirectory(root, absolute) {
+  let cwd = dirname3(absolute);
+  while (cwd !== root && inside(root, cwd)) {
+    const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
+    if (names.some((name) => configurationImpact(name).includes("lint"))) break;
+    cwd = dirname3(cwd);
+  }
+  return cwd;
+}
 async function lintBatch(root, paths, signal, provided, active = false) {
   const config = provided ?? await configuration(root);
   const results = /* @__PURE__ */ new Map();
@@ -1696,12 +1867,7 @@ async function lintBatch(root, paths, signal, provided, active = false) {
         });
         continue;
       }
-      let cwd = dirname3(absolute);
-      while (cwd !== root && inside(root, cwd)) {
-        const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
-        if (names.some((name) => configurationImpact(name).includes("lint"))) break;
-        cwd = dirname3(cwd);
-      }
+      const cwd = await lintDirectory(root, absolute);
       const key = JSON.stringify([
         runner,
         cwd,
@@ -1718,16 +1884,16 @@ async function lintBatch(root, paths, signal, provided, active = false) {
   for (const { runner, cwd, paths: members } of groups.values()) {
     const batches = [];
     let batch = [];
-    let bytes = 0;
+    let bytes2 = 0;
     for (const path of members) {
       const size = Buffer.byteLength(resolve3(root, path)) + 3;
-      if (batch.length && bytes + size > BUDGET.argvBytes) {
+      if (batch.length && bytes2 + size > BUDGET.argvBytes) {
         batches.push(batch);
         batch = [];
-        bytes = 0;
+        bytes2 = 0;
       }
       batch.push(path);
-      bytes += size;
+      bytes2 += size;
     }
     if (batch.length) batches.push(batch);
     for (const paths2 of batches) {
@@ -1803,17 +1969,7 @@ async function formatWithRunner(root, path, signal, provided) {
   const result = await run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
   if (await readFile4(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
-  if (before === result.stdout) return { status: "unchanged", path, modifiedPaths: [] };
-  signal.throwIfAborted();
-  await writeFile2(absolute, result.stdout);
-  return { status: "formatted", path, modifiedPaths: [path] };
-}
-async function preflightRunner(root, path, config, signal) {
-  const runner = await select(root, await workspacePath(root, path), true, config, true, signal);
-  if (!runner || runner.name === "eslint") return false;
-  const result = await run(runner.command, [...runner.prefix, "--version"], root, signal);
-  if (result.code !== 0) throw new Error(`${runner.name} preflight failed: ${result.stderr}`);
-  return true;
+  return { before, after: result.stdout };
 }
 var lintReports;
 var init_runners = __esm({
@@ -1895,7 +2051,7 @@ var init_identity = __esm({
 // src/directory-lock.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir as mkdir3, readFile as readFile6, rename as rename3, rm as rm2, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile6, rename as rename3, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join9 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 function alive(pid) {
@@ -1914,7 +2070,7 @@ async function directoryLock(lock, signal, budget = BUDGET.lock) {
   const nonce = randomUUID3();
   const candidate = `${lock}.claim-${nonce}`;
   await mkdir3(candidate, { mode: 448 });
-  await writeFile3(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
+  await writeFile2(join9(candidate, "owner"), JSON.stringify({ pid: process.pid, nonce }), { mode: 384 });
   const deadline = Date.now() + budget;
   try {
     while (true) {
@@ -1981,7 +2137,7 @@ var init_service_identity = __esm({
 
 // src/metadata.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile8, realpath as realpath4, rename as rename4, rm as rm3, writeFile as writeFile4 } from "node:fs/promises";
+import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile8, realpath as realpath4, rename as rename4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
 import { join as join10 } from "node:path";
 var empty, Metadata;
@@ -1991,6 +2147,7 @@ var init_metadata = __esm({
     init_directory_lock();
     init_environment();
     init_files();
+    init_hook_events();
     init_results();
     init_service_identity();
     empty = (id) => ({
@@ -2012,7 +2169,12 @@ var init_metadata = __esm({
       pending: [],
       delivery: [],
       shown: {},
-      blocked: []
+      blocked: [],
+      hookEvents: {},
+      feedback: {},
+      baselineAttempted: false,
+      waitEpoch: 0,
+      interrupts: {}
     });
     Metadata = class {
       constructor(root) {
@@ -2022,7 +2184,7 @@ var init_metadata = __esm({
         const user = process.getuid?.() ?? hash(homedir5()).slice(0, 10);
         const base = join10(
           executionEnvironment()["CODEX_LSP_CACHE"] ?? join10(tmpdir2(), `codex-lsp-${user}`),
-          `metadata-v7-${user}`
+          `metadata-v8-${user}`
         );
         await mkdir4(base, { recursive: true, mode: 448 });
         const info = await lstat3(base);
@@ -2058,10 +2220,20 @@ var init_metadata = __esm({
             (paths) => Array.isArray(paths) && paths.every((path2) => typeof path2 === "string")
           ))
             throw new Error("Invalid channel metadata");
-          data["epoch"] ??= "legacy";
-          data["outbox"] ??= {};
           if (typeof data["epoch"] !== "string" || !record(data["outbox"]) || !Object.values(data["outbox"]).every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)))
             throw new Error("Invalid delivery metadata");
+          if (!record(data["hookEvents"]) || !record(data["feedback"]) || typeof data["baselineAttempted"] !== "boolean")
+            throw new Error("Invalid hook metadata");
+          if (!Number.isSafeInteger(data["waitEpoch"]) || !record(data["interrupts"]) || !Object.values(data["interrupts"]).every(
+            (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+          ))
+            throw new Error("Invalid interrupt metadata");
+          for (const entry of Object.values(data["hookEvents"]))
+            if (!record(entry) || typeof entry["turn"] !== "string" || !["queued", "running", "complete", "superseded", "cancelled", "failed"].includes(String(entry["state"])))
+              throw new Error("Invalid hook registration state");
+          for (const entry of Object.values(data["feedback"]))
+            if (!record(entry) || typeof entry["bytes"] !== "number" || !Number.isFinite(entry["bytes"]) || entry["bytes"] < 0 || entry["bytes"] > 8192 || !Array.isArray(entry["signatures"]) || !entry["signatures"].every((item) => typeof item === "string" && /^[a-f0-9]{64}$/.test(item)))
+              throw new Error("Invalid feedback budget");
           return data;
         } catch (error) {
           if (record(error) && error["code"] === "ENOENT") return empty(id);
@@ -2091,7 +2263,7 @@ var init_metadata = __esm({
         const dir = join10(await this.dir(), "shared");
         await mkdir4(dir, { recursive: true, mode: 448 });
         const path = join10(dir, `${reference}.json`);
-        await writeFile4(path, content, { mode: 384, flag: "wx" }).catch((error) => {
+        await writeFile3(path, content, { mode: 384, flag: "wx" }).catch((error) => {
           if (!record(error) || error["code"] !== "EEXIST") throw error;
         });
         return reference;
@@ -2117,7 +2289,7 @@ var init_metadata = __esm({
           state.version++;
           for (const key of ["touched", "current", "pending", "delivery", "blocked"])
             state[key] = [...new Set(state[key])];
-          await writeFile4(temp, JSON.stringify(state), { mode: 384 });
+          await writeFile3(temp, JSON.stringify(state), { mode: 384 });
           await rename4(temp, path);
           return state;
         } finally {
@@ -2132,27 +2304,72 @@ var init_metadata = __esm({
           state.turn = "__ended__";
         });
       }
+      async start(id, signal) {
+        return this.update(id, signal, (state) => {
+          Object.assign(state, { ...empty(id), version: state.version, epoch: randomUUID4() });
+        });
+      }
+      async actor(id, signal) {
+        const parent = await this.read(rootSession(id));
+        if (rootSession(id) === id) return parent;
+        return this.update(id, signal, (state) => {
+          if (state.epoch === parent.epoch) return false;
+          Object.assign(state, {
+            ...empty(id),
+            version: state.version,
+            epoch: parent.epoch,
+            baseline: parent.baseline,
+            diagnosticBaseline: parent.diagnosticBaseline,
+            baselineAttempted: parent.baselineAttempted,
+            edited: parent.edited,
+            configuration: parent.configuration,
+            shown: parent.shown["baselineJob"] ? { baselineJob: parent.shown["baselineJob"] } : {}
+          });
+          return true;
+        });
+      }
     };
   }
 });
 
 // src/hook-delivery.ts
 import { readFile as readFile9 } from "node:fs/promises";
+function utf8(value, bytes2) {
+  const buffer = Buffer.from(value);
+  if (buffer.length <= bytes2) return value;
+  let end = Math.max(0, bytes2);
+  while (end > 0) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, end));
+    } catch {
+      end--;
+    }
+  }
+  return "";
+}
 async function queueDelivery(store, state, output, bindings, configuration2, analysis) {
   if (output.kind !== "context" && output.kind !== "block") return;
   const content = output.kind === "context" ? output.context : output.reason;
-  const pages = output.kind === "block" ? [content.slice(0, 8e3)] : [];
-  let page = "";
-  for (const line of output.kind === "block" ? [] : content.split("\n")) {
-    if (page && Buffer.byteLength(`${page}
-${line}`) > 3500) {
-      pages.push(page);
-      page = "";
-    }
-    page += `${page ? "\n" : ""}${line}`;
-  }
-  if (page) pages.push(page);
-  for (const [index, value] of pages.entries()) {
+  const signature = hash(JSON.stringify([output.kind, content]));
+  const turn = state.turn || "unknown";
+  const budget = state.feedback[turn] ?? { bytes: 0, signatures: [] };
+  if (budget.signatures.includes(signature)) return;
+  const final = output.kind === "block" || output.event === "Stop" || output.event === "SubagentStop";
+  const available = (final ? 8192 : 7680) - budget.bytes;
+  if (available < 350) return;
+  let value = utf8(content, Math.min(1550, available - 250));
+  const suffix = value !== content ? "\nDetails: diagnostics(run=cached, scope=session)." : "";
+  const marker = `[Codex CodeIntel automatic diagnostics] deliveryId=${"x".repeat(30)}; sourceTurn=${utf8(state.turn || "unknown", 64)}
+`;
+  const bytes2 = (body) => Buffer.byteLength(
+    JSON.stringify(
+      output.kind === "block" ? { decision: "block", reason: marker + body } : { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: marker + body } }
+    )
+  );
+  while (bytes2(value + suffix) > Math.min(2048, available) && value.length)
+    value = utf8(value, Buffer.byteLength(value) - 20);
+  value += suffix;
+  {
     const delivery = {
       epoch: state.epoch,
       generation: state.generation,
@@ -2162,15 +2379,20 @@ ${line}`) > 3500) {
       bindings,
       output: output.kind === "context" ? { ...output, context: value } : { ...output, reason: value }
     };
-    const id = `${output.kind === "block" ? "block-" : ""}${hash(JSON.stringify([delivery, index])).slice(0, 24)}`;
+    const id = `${output.kind === "block" ? "block-" : ""}${hash(JSON.stringify(delivery)).slice(0, 24)}`;
     state.outbox[id] = await store.shared(delivery);
+    state.feedback[turn] = {
+      bytes: budget.bytes + bytes2(value),
+      signatures: [...budget.signatures.slice(-127), signature]
+    };
   }
 }
 async function consumeDelivery(root, session, event, signal) {
   const store = new Metadata(root);
   const state = await store.read(session);
+  const parent = await store.read(rootSession(session));
   const config = await configuration(root);
-  if (!config.valid || state.turn === "__ended__" || (event === "Stop" || event === "SubagentStop" ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
+  if (!config.valid || state.turn === "__ended__" || parent.turn === "__ended__" || parent.epoch !== state.epoch || (event === "Stop" || event === "SubagentStop" ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
     return { output: { kind: "silent" } };
   const entries = Object.entries(state.outbox);
   if (event === "Stop" || event === "SubagentStop")
@@ -2181,8 +2403,9 @@ async function consumeDelivery(root, session, event, signal) {
     if (!record(value) || !record(value["bindings"]) || !record(value["output"]))
       throw new Error("Invalid diagnostic delivery");
     const item = value;
+    if (event === "PostToolUse" && item.output.kind === "context" && item.output.event === "SessionStart") continue;
     const paths = Object.keys(item.bindings);
-    let fresh = item.epoch === state.epoch && item.generation === state.generation && item.configuration === config.version;
+    let fresh = item.epoch === state.epoch && item.configuration === config.version;
     if (fresh && paths.length) {
       for (const path of paths) {
         signal.throwIfAborted();
@@ -2206,19 +2429,19 @@ async function consumeDelivery(root, session, event, signal) {
       });
       continue;
     }
-    if (item.output.kind === "block" && (state.turn !== item.turn || config.stopGate !== "introduced-errors")) {
+    if (item.output.kind === "block" && (state.turn !== item.turn || config.stopGate !== "introduced-errors" || session !== rootSession(session))) {
       await acknowledgeDelivery(root, session, id, signal);
       continue;
     }
-    if (item.output.kind === "block" && event !== "Stop" && event !== "SubagentStop") continue;
+    if (item.output.kind === "block" && event !== "Stop") continue;
     const current = await store.read(session);
     if (current.epoch !== state.epoch || current.generation !== state.generation || current.outbox[id] !== reference)
       return { output: { kind: "silent" } };
-    const marker = `[Codex CodeIntel automatic diagnostics] deliveryId=${id}; sourceTurn=${item.turn || "unknown"}
+    const marker = `[Codex CodeIntel automatic diagnostics] deliveryId=${id}; sourceTurn=${utf8(item.turn || "unknown", 64)}
 `;
     return {
       deliveryId: id,
-      output: item.output.kind === "block" ? { kind: "block", reason: marker + item.output.reason } : item.output.kind === "context" ? { kind: "context", event, context: marker + item.output.context } : item.output
+      output: item.output.kind === "block" ? { kind: "block", reason: marker + item.output.reason } : item.output.kind === "context" ? { ...item.output, event, context: marker + item.output.context } : item.output
     };
   }
   return { output: { kind: "silent" } };
@@ -2235,6 +2458,7 @@ var init_hook_delivery = __esm({
     "use strict";
     init_config();
     init_files();
+    init_hook_events();
     init_identity();
     init_metadata();
     init_results();
@@ -2244,22 +2468,34 @@ var init_hook_delivery = __esm({
 // src/write-intent.ts
 import { isAbsolute as isAbsolute5, relative as relative3, resolve as resolve6 } from "node:path";
 function isShellTool(input) {
-  return /^(?:bash|shell|exec_command|unified_exec)$/.test(
-    text(input["tool_name"]).split(".").at(-1)?.toLowerCase() ?? ""
-  );
+  return input["tool_name"] === "Bash";
+}
+function applyPaths(input) {
+  let result = input["tool_response"];
+  if (!record(result)) return;
+  if (record(result["structuredContent"])) result = result["structuredContent"];
+  if (!record(result)) return;
+  if (result["next"] || result["truncated"] || result["complete"] === false || !Array.isArray(result["modifiedPaths"]))
+    return;
+  return result["modifiedPaths"].every((path) => typeof path === "string") ? result["modifiedPaths"] : void 0;
 }
 function writeIntent(root, input) {
   const tool2 = text(input["tool_name"]);
   const args = record(input["tool_input"]) ? input["tool_input"] : {};
   let paths = [];
-  if (/apply_patch|Edit|Write|write_file|lsp_format|lsp_rename/.test(tool2)) {
-    if (/lsp_rename/.test(tool2)) return { kind: "write" };
-    const command = typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
-    paths.push(
-      ...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
-        (match) => match[1] ?? ""
-      )
-    );
+  if (tool2 === "mcp__lsp__apply" || tool2 === "apply_patch") {
+    if (tool2 === "mcp__lsp__apply") {
+      const modified = applyPaths(input);
+      if (!modified) return { kind: "write" };
+      paths = modified;
+    } else {
+      const command = typeof input["tool_input"] === "string" ? input["tool_input"] : text(args["command"], text(args["patch"]));
+      paths.push(
+        ...[...command.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/gm)].map(
+          (match) => match[1] ?? ""
+        )
+      );
+    }
     paths.push(
       ...[args["path"], args["file_path"], ...Array.isArray(args["paths"]) ? args["paths"] : []].filter(
         (path) => typeof path === "string"
@@ -2272,8 +2508,7 @@ function writeIntent(root, input) {
     ) && !/--(?:output|ext-diff|textconv|pre)|--exec/.test(command))
       return { kind: "read" };
     return { kind: "write" };
-  } else if (/read|search|list|status|diagnostics|check_project|navigation|glob|view_image/i.test(tool2))
-    return { kind: "read" };
+  } else if (readTools.has(tool2)) return { kind: "read" };
   else return { kind: "write" };
   if (!paths.length) return { kind: "write" };
   paths = [
@@ -2287,12 +2522,18 @@ function writeIntent(root, input) {
   ];
   return paths.every((path) => configurationImpact(path).length) ? { kind: "configuration", paths } : { kind: "write", paths };
 }
+var readTools;
 var init_write_intent = __esm({
   "src/write-intent.ts"() {
     "use strict";
     init_config_files();
     init_files();
     init_results();
+    readTools = new Set(
+      ["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions"].map(
+        (name) => `mcp__lsp__${name}`
+      )
+    );
   }
 });
 
@@ -2301,7 +2542,19 @@ import { readFile as readFile10 } from "node:fs/promises";
 function renderHook(output) {
   if (output.kind === "silent") return void 0;
   if (output.kind === "block") return { decision: "block", reason: output.reason };
-  return output.event === "Stop" || output.event === "SubagentStop" || output.event === "SessionStart" ? { systemMessage: output.context } : { hookSpecificOutput: { hookEventName: output.event, additionalContext: output.context } };
+  return output.infrastructure || output.event === "Stop" || output.event === "SubagentStop" ? { systemMessage: output.context } : { hookSpecificOutput: { hookEventName: output.event, additionalContext: output.context } };
+}
+function summary(results) {
+  const findings = results.flatMap((result) => result.findings).sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
+  return [
+    ...findings.slice(0, 5).map(
+      (item) => `${utf8(item.path, 120)}:${item.line}:${item.column} ${item.severity} [${utf8(item.source, 60)}] ${utf8(item.message.replace(/\s+/g, " "), 240)}`
+    ),
+    ...results.filter((result) => result.state !== "complete").slice(0, 2).map(
+      (result) => `${utf8(result.path, 120)}: ${result.state}${result.note ? `; ${utf8(result.note.replace(/\s+/g, " "), 120)}` : ""}`
+    ),
+    ...findings.length > 5 ? [`${findings.length - 5} more diagnostics in cache.`] : []
+  ].join("\n");
 }
 var HookEngine;
 var init_hook_engine = __esm({
@@ -2314,6 +2567,7 @@ var init_hook_engine = __esm({
     init_environment();
     init_files();
     init_hook_delivery();
+    init_hook_events();
     init_identity();
     init_metadata();
     init_results();
@@ -2326,9 +2580,25 @@ var init_hook_engine = __esm({
         this.queue = Promise.resolve();
         this.store = new Metadata(root);
       }
+      async cancel(parent, turn, signal) {
+        if (turn === null) return;
+        const ids = [parent, ...(await this.store.ids()).filter((id) => id !== parent && rootSession(id) === parent)];
+        for (const id of ids) {
+          if (turn === void 0) {
+            await this.store.end(id, signal);
+            this.dependencies.end(id);
+          } else {
+            this.dependencies.end(id, turn);
+            await this.store.update(id, signal, (state) => {
+              for (const entry of Object.values(state.hookEvents))
+                if (entry.turn === turn && ["queued", "running"].includes(entry.state)) entry.state = "cancelled";
+            });
+          }
+        }
+      }
       hook(input, signal, background = false) {
-        const event = text(input["hook_event_name"], "PostToolUse");
-        if (event === "PreToolUse") return Promise.resolve({ kind: "silent" });
+        const event = hookEvent(input);
+        if (!event) return Promise.resolve({ kind: "silent" });
         const task = event === "SessionEnd" ? this.prepare(input, signal, background) : this.queue.then(() => this.prepare(input, signal, background));
         this.queue = task.then(
           () => void 0,
@@ -2340,7 +2610,7 @@ var init_hook_engine = __esm({
             const config = await configuration(this.root);
             if (prepared.configuration && prepared.configuration !== config.version) return { kind: "silent" };
             await this.store.update(text(input["session_id"]), signal, async (state) => {
-              if (state.turn === "__ended__") return false;
+              if (state.turn === "__ended__" || input["__epoch"] && input["__epoch"] !== state.epoch) return false;
               await queueDelivery(this.store, state, prepared, {}, config.version, "");
               return true;
             });
@@ -2357,29 +2627,38 @@ var init_hook_engine = __esm({
         const context = (value) => ({
           kind: "context",
           event,
-          context: `session=${id}
+          context: `session=${rootSession(id)}; actor=${event === "PostToolUse" && !isActorSession(id) ? "shared" : actorLabel(id)}
 ${value}`,
-          configuration: config.version
+          configuration: config.version,
+          ...event === "SessionStart" ? { infrastructure: true } : {}
         });
         if (!id) return { kind: "silent" };
         if (event === "SessionEnd") {
-          await this.store.end(id, signal);
-          this.dependencies.end(id);
+          await this.cancel(id, void 0, signal);
+          return { kind: "silent" };
+        }
+        if (event === "Interrupt") {
+          await this.cancel(id, text(input["turn_id"]) || null, signal);
           return { kind: "silent" };
         }
         if (stopping && input["stop_hook_active"] === true) return { kind: "silent" };
         const initial = await this.store.read(id);
+        if (input["__epoch"] && input["__epoch"] !== initial.epoch) return { kind: "silent" };
+        if (isActorSession(id) && (await this.store.read(rootSession(id))).epoch !== initial.epoch)
+          return { kind: "silent" };
         if (initial.turn === "__ended__" && event !== "SessionStart") return { kind: "silent" };
         const config = await configuration(this.root);
         if (initial.configuration && initial.configuration !== config.version) {
           this.dependencies.end(id);
           await this.store.update(id, signal, (state2) => {
+            if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
             state2.generation++;
             state2.diagnosticBaseline = null;
             state2.unresolved = {};
             state2.shown = {};
             state2.outbox = {};
             state2.configuration = config.version;
+            return true;
           });
         }
         if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
@@ -2389,24 +2668,27 @@ ${value}`,
           if (state2.epoch !== initial.epoch || state2.turn === "__ended__" && event !== "SessionStart") return false;
           if (event === "SessionStart" && state2.turn === "__ended__") state2.turn = "";
           state2.configuration = config.version;
-          if (turn !== state2.turn) {
+          if (turn !== state2.turn && !(event === "PostToolUse" && state2.turn)) {
             state2.turn = turn;
-            state2.current = [];
+            if (event !== "Stop" && (event !== "PostToolUse" || isActorSession(id))) state2.current = [];
             state2.blocked = [];
           }
           return true;
         });
         if (event === "SessionStart") {
           try {
-            const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
-            if (!snapshot2.complete)
-              return context("Baseline inventory incomplete; current diagnostics cannot be attributed");
-            const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
-            await this.store.update(id, signal, (state2) => {
-              if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
-              state2.baseline ??= reference;
-              return true;
-            });
+            if (!initial.baselineAttempted) {
+              const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
+              if (!snapshot2.complete)
+                return context("Baseline inventory incomplete; current diagnostics cannot be attributed");
+              const reference = await this.store.shared(Object.fromEntries(snapshot2.files));
+              await this.store.update(id, signal, (state2) => {
+                if (state2.epoch !== initial.epoch || state2.turn === "__ended__") return false;
+                state2.baseline ??= reference;
+                state2.baselineAttempted = true;
+                return true;
+              });
+            }
             await this.dependencies.projects.baseline(id, void 0, executionEnvironment(), signal, 0);
             return { kind: "silent" };
           } catch (error) {
@@ -2417,15 +2699,23 @@ ${value}`,
         const previous = stateBefore.baseline ? await this.store.readShared(stateBefore.baseline) : {};
         if (!record(previous)) throw new Error("Invalid shared snapshot");
         const intent = writeIntent(this.root, input);
-        const forced = intent.kind === "write" || intent.kind === "configuration" ? intent.paths ?? [] : [];
+        const forced = [
+          .../* @__PURE__ */ new Set([
+            ...intent.kind === "write" || intent.kind === "configuration" ? intent.paths ?? [] : [],
+            ...Array.isArray(input["__paths"]) ? input["__paths"].filter((path) => typeof path === "string") : []
+          ])
+        ];
         const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, forced);
         if (!snapshot.complete)
           return context("Change discovery incomplete; pending and unresolved diagnostics retained");
         const changed = [...snapshot.files].filter(([path, content]) => previous[path] !== content).map(([path]) => path);
         const deleted = Object.keys(previous).filter((path) => !snapshot.files.has(path));
-        const sourcePaths = [.../* @__PURE__ */ new Set([...changed, ...forced])].filter(
-          (path) => snapshot.files.has(path) && codeLanguage(config, path) && !configurationImpact(path).length
-        );
+        const sourcePaths = [
+          .../* @__PURE__ */ new Set([
+            ...isActorSession(id) && forced.length ? changed.filter((path) => forced.includes(path)) : changed,
+            ...forced
+          ])
+        ].filter((path) => snapshot.files.has(path) && codeLanguage(config, path) && !configurationImpact(path).length);
         const snapshotReference = await this.store.shared(Object.fromEntries(snapshot.files));
         const state = await this.store.update(id, signal, (current) => {
           if (current.generation !== stateBefore.generation || current.epoch !== stateBefore.epoch) return false;
@@ -2455,13 +2745,20 @@ ${value}`,
           }
           return true;
         });
+        if (state.epoch !== stateBefore.epoch || state.turn === "__ended__") return { kind: "silent" };
         if ((stopping ? config.automaticDiagnostics.stop : config.automaticDiagnostics.postToolUse) === "off")
           return { kind: "silent" };
         const paths = stopping ? [.../* @__PURE__ */ new Set([...state.current, ...state.pending])] : [.../* @__PURE__ */ new Set([...state.pending, ...state.delivery])];
         if (!paths.length) return { kind: "silent" };
         let reliable;
         try {
-          reliable = await this.dependencies.projects.baseline(id, paths, executionEnvironment(), signal, 0);
+          reliable = await this.dependencies.projects.baseline(
+            rootSession(id),
+            paths,
+            executionEnvironment(),
+            signal,
+            0
+          );
         } catch (error) {
           reliable = { reference: "", findings: [], reliable: {}, covered: [], failures: [message(error)], pending: [] };
         }
@@ -2486,6 +2783,8 @@ ${value}`,
           ) : [];
           const ledgerValue = state.shown["diagnosticCurrent"] ? await this.store.readShared(state.shown["diagnosticCurrent"]) : void 0;
           const ledger = record(ledgerValue) ? ledgerValue : {};
+          const observedValue = state.shown["observedCurrent"] ? await this.store.readShared(state.shown["observedCurrent"]) : void 0;
+          const observed = record(observedValue) ? observedValue : {};
           for (const old of deleted) {
             const moved = changed.find(
               (path) => snapshot.files.get(path) === previous[old] && previous[path] === void 0
@@ -2506,7 +2805,7 @@ ${value}`,
             }
           }
           let gateFindings = [];
-          if (stopping && config.stopGate === "introduced-errors" && reliable.covered.length) {
+          if (event === "Stop" && !isActorSession(id) && config.stopGate === "introduced-errors" && reliable.covered.length) {
             try {
               gateFindings = await this.dependencies.projects.introduced(
                 id,
@@ -2518,8 +2817,16 @@ ${value}`,
             } catch {
             }
           }
-          if (await analysisIdentity(this.root, paths, await configuration(this.root), signal) !== snapshotAnalysis)
+          if (await analysisIdentity(this.root, paths, await configuration(this.root), signal) !== snapshotAnalysis) {
+            await this.store.update(id, signal, (current) => {
+              if (current.epoch !== state.epoch || current.generation !== state.generation || current.turn === "__ended__")
+                return false;
+              current.pending.push(...paths);
+              return true;
+            });
             return { kind: "silent" };
+          }
+          if ((await this.store.read(rootSession(id))).epoch !== state.epoch) return { kind: "silent" };
           for (let index = valid.length - 1; index >= 0; index--) {
             const result = valid[index];
             if (!result) continue;
@@ -2539,11 +2846,21 @@ ${value}`,
             signal
           ) : "";
           await this.store.update(id, signal, async (current) => {
-            if (current.generation !== state.generation || current.epoch !== state.epoch) return false;
+            if (current.generation !== state.generation || current.epoch !== state.epoch || current.turn === "__ended__")
+              return false;
             const fresh = [];
             const repaired = [];
             let unattributed = 0;
             let introduced = 0;
+            let resolved = 0;
+            current.pending = [
+              .../* @__PURE__ */ new Set([
+                ...current.pending,
+                ...paths.filter(
+                  (path) => !valid.some((result) => result.path === path && result.state === "complete")
+                )
+              ])
+            ];
             for (const result of valid) {
               const parsers = reliable.reliable[result.path] ?? [];
               const attributable = result.findings.filter(
@@ -2556,15 +2873,27 @@ ${value}`,
               const added = addedFindings(preceding, attributable);
               const previousIssues = current.unresolved[result.path] ?? [];
               if (result.state === "complete") {
+                const removed = addedFindings(result.findings, observed[result.path] ?? []).length;
+                observed[result.path] = result.findings;
                 const historical = addedFindings(previousIssues, preceding);
                 current.unresolved[result.path] = addedFindings(historical, attributable);
                 ledger[result.path] = attributable;
                 current.pending = current.pending.filter((path) => path !== result.path);
                 current.delivery = current.delivery.filter((path) => path !== result.path);
-                if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0))
+                if (previousIssues.length > (current.unresolved[result.path]?.length ?? 0)) {
+                  resolved += Math.max(
+                    removed,
+                    previousIssues.length - (current.unresolved[result.path]?.length ?? 0)
+                  );
                   repaired.push(
                     `${result.path}: ${previousIssues.length - (current.unresolved[result.path]?.length ?? 0)} introduced diagnostics repaired`
                   );
+                } else if (removed) {
+                  resolved += removed;
+                  repaired.push(
+                    `${result.path}: ${removed} current diagnostics repaired; history remains unattributed where unconfirmed`
+                  );
+                }
               } else {
                 current.unresolved[result.path] = [...previousIssues, ...addedFindings(previousIssues, added)];
               }
@@ -2585,25 +2914,956 @@ ${value}`,
                 (result) => result.path === finding.path && result.state === "complete" && reliable.covered.includes(result.path) && result.findings.some((item) => item.severity === "error")
               )
             );
-            if (stopping && config.stopGate === "introduced-errors" && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
+            if (event === "Stop" && !isActorSession(id) && config.stopGate === "introduced-errors" && confirmed.length && !current.blocked.includes(turn || "__turn__")) {
               current.blocked.push(turn || "__turn__");
               feedback = {
                 kind: "block",
-                reason: `Codex CodeIntel: fix introduced errors before finishing.
-${render([{ path: ".", state: "complete", findings: confirmed }], 1e5, BUDGET.outputBytes)}`
+                reason: `Codex CodeIntel: fix introduced errors before finishing. introduced=${confirmed.length}; resolved=${resolved}; unattributed=${unattributed}; pending=${current.pending.length}
+${summary([{ path: ".", state: "complete", findings: confirmed }])}
+Details: diagnostics(run=cached, scope=session).`
               };
-            } else if (fresh.length || repaired.length || stopping && current.pending.length)
+            } else if (fresh.length || repaired.length || current.pending.length)
               feedback = context(
-                `Automatic diagnostics: introduced=${introduced}; unattributed=${unattributed}; pending=${current.pending.length}${unattributed || reliable.failures.length || reliable.pending.length ? "\nCurrent diagnostics cannot be attributed to this turn without a reliable pre-edit baseline for their checker and coverage; ending gate unavailable for these ranges." : ""}
-${fresh.length ? render(fresh, 1e5, BUDGET.outputBytes) : ""}${repaired.join("\n")}${output.note ? `
-${output.note}` : ""}`
+                `Automatic diagnostics: introduced=${introduced}; resolved=${resolved}; unattributed=${unattributed}; pending=${current.pending.length}${unattributed || reliable.failures.length || reliable.pending.length ? "\nCurrent diagnostics cannot be attributed without a reliable pre-edit baseline and checker coverage." : ""}
+${summary(fresh)}${repaired.slice(0, 5).join("\n")}${output.note ? `
+${output.note.slice(0, 200)}` : ""}
+Details: diagnostics(run=cached, scope=session).`
               );
             current.shown["diagnosticCurrent"] = await this.store.shared(ledger);
+            current.shown["observedCurrent"] = await this.store.shared(observed);
             await queueDelivery(this.store, { ...current, turn }, feedback, bindings, config.version, analysis);
             return true;
           });
           return feedback;
         };
+      }
+    };
+  }
+});
+
+// src/edit-plans.ts
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { lstat as lstat4, readFile as readFile11, writeFile as writeFile4 } from "node:fs/promises";
+import { relative as relative4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+async function fileIdentity(path) {
+  const info = await lstat4(path);
+  if (!info.isFile() || info.size > BUDGET.fileBytes) throw new Error("Unsupported or oversized edit target");
+  return JSON.stringify([info.dev, info.ino, info.birthtimeMs]);
+}
+async function plannedFile(root, path, after, before) {
+  const absolute = await workspacePath(root, path);
+  const content = await readFile11(absolute, "utf8");
+  if (before !== void 0 && content !== before) throw new Error("File changed while preparing plan");
+  if (Buffer.byteLength(after) > BUDGET.fileBytes) throw new Error("Planned content exceeds file budget");
+  return {
+    path: relative4(root, absolute),
+    absolute,
+    before: content,
+    after,
+    fileIdentity: await fileIdentity(absolute)
+  };
+}
+async function workspaceEdits(root, edit) {
+  const changes = /* @__PURE__ */ new Map();
+  for (const [uri, edits] of Object.entries(edit?.changes ?? {})) changes.set(uri, edits);
+  for (const change of edit?.documentChanges ?? []) {
+    if ("kind" in change) throw new Error("Unsupported resource operation; no part of this action was applied");
+    if (changes.has(change.textDocument.uri)) throw new Error("Duplicate edit target");
+    changes.set(change.textDocument.uri, change.edits);
+  }
+  const files = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [uri, edits] of changes) {
+    const absolute = await workspacePath(root, fileURLToPath2(uri));
+    if (seen.has(absolute)) throw new Error("Duplicate canonical edit target");
+    seen.add(absolute);
+    await fileIdentity(absolute);
+    const before = await readFile11(absolute, "utf8");
+    files.push(await plannedFile(root, absolute, applyTextChanges(before, edits), before));
+  }
+  return files;
+}
+function diffLines(file) {
+  const before = file.before.split("\n");
+  const after = file.after.split("\n");
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let endBefore = before.length;
+  let endAfter = after.length;
+  while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
+    endBefore--;
+    endAfter--;
+  }
+  return [
+    `--- ${file.path}`,
+    `+++ ${file.path}`,
+    `@@ -${start + 1},${endBefore - start} +${start + 1},${endAfter - start} @@`,
+    ...before.slice(start, endBefore).map((line) => `-${line}`),
+    ...after.slice(start, endAfter).map((line) => `+${line}`)
+  ];
+}
+var EditPlans;
+var init_edit_plans = __esm({
+  "src/edit-plans.ts"() {
+    "use strict";
+    init_budgets();
+    init_files();
+    init_results();
+    EditPlans = class {
+      constructor() {
+        this.plans = /* @__PURE__ */ new Map();
+      }
+      create(identity, files, paths = files.map((file) => file.path)) {
+        const plan = {
+          id: randomUUID5(),
+          identity,
+          paths,
+          files: files.filter((file) => file.before !== file.after).sort((a, b) => a.path.localeCompare(b.path))
+        };
+        if (files.length > 200 || files.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0) > 8 * BUDGET.outputBytes)
+          throw new Error("Edit plan exceeds budget; narrow scope");
+        this.plans.set(plan.id, plan);
+        const memory = () => [...this.plans.values()].flatMap((plan2) => plan2.files).reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0);
+        while (this.plans.size > 16 || memory() > 8 * BUDGET.outputBytes)
+          this.plans.delete(this.plans.keys().next().value ?? "");
+        return plan;
+      }
+      get(id) {
+        const plan = this.plans.get(id);
+        if (!plan) throw new Error("Plan missing, consumed or expired; generate a new preview");
+        return plan;
+      }
+      clear() {
+        this.plans.clear();
+      }
+      discard(id) {
+        this.plans.delete(id);
+      }
+      async apply(id, identity, root, signal) {
+        const plan = this.get(id);
+        this.plans.delete(id);
+        if (plan.identity !== identity)
+          throw new Error("Plan stale: workspace, configuration, tools or environment changed; preview again");
+        const validate = async (file) => {
+          const actual = await workspacePath(root, file.path);
+          if (actual !== file.absolute || await fileIdentity(actual) !== file.fileIdentity || await readFile11(actual, "utf8") !== file.before)
+            throw new Error(`Plan conflict: ${file.path}`);
+        };
+        for (const file of plan.files) {
+          signal.throwIfAborted();
+          await validate(file);
+        }
+        const modified = [];
+        let writing;
+        try {
+          for (const file of plan.files) {
+            signal.throwIfAborted();
+            await validate(file);
+            signal.throwIfAborted();
+            writing = file;
+            await writeFile4(file.absolute, file.after);
+            modified.push(file.path);
+            writing = void 0;
+          }
+        } catch (error) {
+          if (writing && !modified.includes(writing.path) && await readFile11(writing.absolute, "utf8").catch(() => null) !== writing.before)
+            modified.push(writing.path);
+          throw new WriteFailure(message(error), modified);
+        }
+        return modified;
+      }
+    };
+  }
+});
+
+// src/output-pages.ts
+import { randomUUID as randomUUID6 } from "node:crypto";
+function bytes(value) {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+function bounded(value) {
+  if (Array.isArray(value)) return value.length <= 20 && value.every(bounded);
+  if (record(value)) return Object.values(value).every(bounded);
+  return true;
+}
+function fragments(value, field = "result") {
+  if (bytes(value) < 3e3 && bounded(value)) return [{ field, value }];
+  if (Array.isArray(value)) return value.flatMap((item, index) => fragments(item, `${field}[${index}]`));
+  if (record(value))
+    return Object.entries(value).flatMap(([key, item]) => fragments(item, `${field}[${JSON.stringify(key)}]`));
+  if (typeof value === "string") {
+    const characters = Array.from(value);
+    return Array.from({ length: Math.ceil(characters.length / 400) }, (_, part) => ({
+      field,
+      part,
+      text: characters.slice(part * 400, (part + 1) * 400).join("")
+    }));
+  }
+  return [{ field, value }];
+}
+var LIMIT, OutputPages;
+var init_output_pages = __esm({
+  "src/output-pages.ts"() {
+    "use strict";
+    init_files();
+    init_results();
+    LIMIT = 6200;
+    OutputPages = class {
+      constructor(prefix = "") {
+        this.prefix = prefix;
+        this.pages = /* @__PURE__ */ new Map();
+      }
+      clear() {
+        this.pages.clear();
+      }
+      arguments(cursor2) {
+        return this.pages.get(cursor2)?.args ?? {};
+      }
+      query(args) {
+        return hash(
+          JSON.stringify(
+            Object.entries(args).filter(([key, value]) => key !== "cursor" && key !== "refresh" && value !== void 0).sort(([a], [b]) => a.localeCompare(b))
+          )
+        );
+      }
+      read(args, identity, operation) {
+        const page = this.pages.get(String(args["cursor"]));
+        if (!page || page.identity !== identity || page.query !== this.query({ ...page.args, ...args }) || operation !== void 0 && page.header["operation"] !== operation)
+          throw new Error("Cursor invalid: query, workspace, configuration or tools changed; repeat the original query");
+        return this.emit({ ...page });
+      }
+      write(output, args, identity) {
+        if (bytes(output) > 32 * 1024 * 1024) throw new Error("Output exceeds retained page budget; narrow query");
+        if (bytes(output) <= LIMIT && bounded(output)) return output;
+        const header = {};
+        for (const [key, value] of Object.entries(output))
+          if ([
+            "operation",
+            "status",
+            "state",
+            "job",
+            "plan",
+            "partial",
+            "errors",
+            "warnings",
+            "isError",
+            "configuration",
+            "clients",
+            "service"
+          ].includes(key) && bytes(value) < 700 && bytes(header) + bytes(value) < 1800)
+            header[key] = value;
+        return this.emit({
+          identity,
+          query: this.query(args),
+          args,
+          header,
+          items: fragments(
+            Object.fromEntries(Object.entries(output).filter(([key]) => !(key in header) && key !== "next"))
+          ),
+          index: 0,
+          weight: bytes(output),
+          ...record(output["next"]) ? { continuation: output["next"] } : {}
+        });
+      }
+      emit(page) {
+        const items2 = [];
+        while (page.index < page.items.length && items2.length < 20) {
+          const item = page.items[page.index];
+          if (bytes({ ...page.header, items: [...items2, item] }) > LIMIT - 1e3) break;
+          items2.push(item);
+          page.index++;
+        }
+        if (!items2.length && page.index < page.items.length) throw new Error("Output item exceeds page budget");
+        let next;
+        if (page.index < page.items.length) {
+          const cursor2 = this.prefix + randomUUID6();
+          this.pages.set(cursor2, { ...page, index: page.index });
+          const memory = () => {
+            const unique = /* @__PURE__ */ new Map();
+            for (const page2 of this.pages.values()) unique.set(page2.items, page2.weight);
+            return [...unique.values()].reduce((sum, size) => sum + size, 0);
+          };
+          while (this.pages.size > 32 || memory() > 32 * 1024 * 1024)
+            this.pages.delete(this.pages.keys().next().value ?? "");
+          next = {
+            workspace: page.args["workspace"],
+            ...page.args["operation"] ? { operation: page.args["operation"] } : {},
+            cursor: cursor2
+          };
+        } else next = page.continuation;
+        return { ...page.header, paged: true, items: items2, total: page.items.length, ...next ? { next } : {} };
+      }
+    };
+  }
+});
+
+// src/symbols.ts
+import { readFile as readFile12 } from "node:fs/promises";
+import { relative as relative5 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+function contains(range, line, column) {
+  return (line > range.start.line || line === range.start.line && column >= range.start.character) && (line < range.end.line || line === range.end.line && column <= range.end.character);
+}
+function sourceRange(content, range) {
+  const lines = content.split("\n");
+  const start = lines.slice(0, range.start.line).reduce((sum, line) => sum + line.length + 1, 0) + range.start.character;
+  const end = lines.slice(0, range.end.line).reduce((sum, line) => sum + line.length + 1, 0) + range.end.character;
+  return content.slice(start, end);
+}
+function outline(symbols, parent = "") {
+  const result = [];
+  const counts = /* @__PURE__ */ new Map();
+  for (const symbol of symbols) counts.set(symbol.name, (counts.get(symbol.name) ?? 0) + 1);
+  const indices = /* @__PURE__ */ new Map();
+  for (const item of symbols) {
+    const index = indices.get(item.name) ?? 0;
+    indices.set(item.name, index + 1);
+    const name = item.name + ((counts.get(item.name) ?? 0) > 1 ? `[${index}]` : "");
+    const symbol = parent ? `${parent}.${name}` : name;
+    const range = "range" in item ? item.range : item.location.range;
+    result.push({
+      name: item.name,
+      symbol,
+      ...parent ? { parent } : {},
+      kind: item.kind,
+      range,
+      selection: "selectionRange" in item ? item.selectionRange : range
+    });
+    if ("children" in item && item.children) result.push(...outline(item.children, symbol));
+  }
+  return result;
+}
+function publicOutline(item) {
+  return {
+    symbol: item.symbol,
+    ...item.parent ? { parent: item.parent } : {},
+    kind: item.kind,
+    line: item.selection.start.line + 1,
+    column: item.selection.start.character + 1,
+    endLine: item.range.end.line + 1
+  };
+}
+async function position2(path, args, symbols) {
+  const selectors = [
+    args["symbol"] !== void 0,
+    args["pattern"] !== void 0,
+    args["line"] !== void 0 || args["column"] !== void 0
+  ].filter(Boolean).length;
+  if (selectors > 1) throw new Error("Use exactly one position selector: line/column, symbol or pattern");
+  if (args["symbol"] !== void 0) {
+    const query = text(args["symbol"]);
+    const matches = (await symbols()).filter((item) => item.symbol === query || item.name === query);
+    if (matches.length !== 1)
+      throw new Error(`Symbol ambiguous or missing; candidates: ${JSON.stringify(matches.map(publicOutline))}`);
+    const match = matches[0];
+    if (!match) throw new Error("Symbol missing");
+    return { line: match.selection.start.line + 1, column: match.selection.start.character + 1 };
+  }
+  if (args["pattern"] !== void 0) {
+    const pattern = text(args["pattern"]);
+    if (pattern.split("@@").length !== 2) throw new Error("pattern requires exactly one @@ cursor marker");
+    const [prefix = "", suffix = ""] = pattern.split("@@");
+    const needle = prefix + suffix;
+    if (!needle) throw new Error("Empty pattern");
+    const content = await readFile12(path, "utf8");
+    const candidates = [];
+    for (let offset = content.indexOf(needle); offset !== -1; offset = content.indexOf(needle, offset + 1)) {
+      const before = content.slice(0, offset + prefix.length).split("\n");
+      candidates.push({ line: before.length, column: (before.at(-1)?.length ?? 0) + 1 });
+    }
+    if (candidates.length !== 1)
+      throw new Error(`Pattern ambiguous or missing; candidates: ${JSON.stringify(candidates.slice(0, 20))}`);
+    return candidates[0] ?? { line: 1, column: 1 };
+  }
+  return { line: number(args["line"], 1, 1, 1e7), column: number(args["column"], 1, 1, 1e6) };
+}
+function locations(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values.flatMap(
+    (item) => record(item) && typeof item["uri"] === "string" && record(item["range"]) ? [{ uri: item["uri"], range: item["range"] }] : []
+  );
+}
+function publicNavigation(value, root) {
+  if (Array.isArray(value)) return value.map((item) => publicNavigation(item, root));
+  if (!record(value)) return value;
+  if (record(value["start"]) && record(value["end"]) && typeof value["start"]["line"] === "number" && typeof value["end"]["line"] === "number") {
+    return {
+      start: { line: value["start"]["line"] + 1, column: Number(value["start"]["character"]) + 1 },
+      end: { line: value["end"]["line"] + 1, column: Number(value["end"]["character"]) + 1 }
+    };
+  }
+  const uri = typeof value["uri"] === "string" ? value["uri"] : typeof value["targetUri"] === "string" ? value["targetUri"] : void 0;
+  const range = value["range"] ?? value["targetSelectionRange"] ?? value["targetRange"];
+  const output = Object.fromEntries(
+    Object.entries(value).filter(
+      ([key]) => ![
+        "data",
+        "selectionRange",
+        ...uri ? ["uri", "targetUri", "targetRange", "targetSelectionRange", "range"] : []
+      ].includes(key)
+    ).map(([key, item]) => [key, publicNavigation(item, root)])
+  );
+  if (uri && record(range) && record(range["start"])) {
+    let path = uri;
+    try {
+      path = relative5(root, fileURLToPath3(uri));
+    } catch {
+    }
+    return {
+      ...output,
+      path,
+      line: Number(range["start"]["line"]) + 1,
+      column: Number(range["start"]["character"]) + 1
+    };
+  }
+  return output;
+}
+var init_symbols = __esm({
+  "src/symbols.ts"() {
+    "use strict";
+    init_results();
+  }
+});
+
+// src/intelligence.ts
+import { randomUUID as randomUUID7 } from "node:crypto";
+import { readFile as readFile13 } from "node:fs/promises";
+import { relative as relative6, resolve as resolve7 } from "node:path";
+import { fileURLToPath as fileURLToPath4, pathToFileURL } from "node:url";
+function problem(error) {
+  const reason = message(error);
+  return {
+    status: /unsupported/i.test(reason) ? "unsupported" : /timeout|cancel|pending/i.test(reason) ? "pending" : "failed",
+    reason
+  };
+}
+function isTest(path) {
+  return /(?:^|[\\/])(?:test[^\\/]*|__tests__)(?:[\\/]|$)|(?:_test|\.test|\.spec)\.[^\\/]+$/.test(path);
+}
+async function mapBounded(values, fn) {
+  const results = new Array(values.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, values.length) }, async () => {
+      while (next < values.length) {
+        const index = next++;
+        const value = values[index];
+        if (value !== void 0) results[index] = await fn(value);
+      }
+    })
+  );
+  return results;
+}
+var Intelligence;
+var init_intelligence = __esm({
+  "src/intelligence.ts"() {
+    "use strict";
+    init_edit_plans();
+    init_files();
+    init_output_pages();
+    init_results();
+    init_runners();
+    init_symbols();
+    Intelligence = class {
+      constructor(root, language) {
+        this.root = root;
+        this.language = language;
+        this.plans = new EditPlans();
+        this.pages = new OutputPages("detail:");
+        this.actions = /* @__PURE__ */ new Map();
+        this.scope = [];
+      }
+      clear() {
+        this.plans.clear();
+        this.pages.clear();
+        this.actions.clear();
+      }
+      pageArguments(args) {
+        return { ...this.pages.arguments(text(args["cursor"])), ...args };
+      }
+      planPaths(id) {
+        return this.plans.get(id).paths;
+      }
+      actionPaths(ids) {
+        return Array.isArray(ids) ? [...new Set(ids.flatMap((id) => this.actions.get(String(id))?.scope ?? []))] : [];
+      }
+      remember(action) {
+        const value = { ...action, scope: [...this.scope], id: randomUUID7() };
+        this.actions.set(value.id, value);
+        while (this.actions.size > 512) this.actions.delete(this.actions.keys().next().value ?? "");
+        return value;
+      }
+      preview(identity, files) {
+        const plan = this.plans.create(identity, files, this.scope);
+        return {
+          status: plan.files.length ? "planned" : "unchanged",
+          plan: plan.id,
+          files: plan.files.map((file) => file.path),
+          diff: plan.files.flatMap(diffLines),
+          note: "Text edit plan only; apply writes it. Type/build effects have not been simulated."
+        };
+      }
+      async execute(operation, args, paths, config, identity, signal, bindings = paths) {
+        this.scope = bindings;
+        if (args["cursor"]) return this.pages.read(args, identity, operation);
+        let output;
+        if (operation === "navigate") output = await this.language.navigate(args, signal);
+        else if (operation === "rename") {
+          const edit = await this.language.renameEdit(args, signal);
+          output = this.preview(identity, await workspaceEdits(this.root, edit));
+        } else if (operation === "format") {
+          if (!config.formattingEnabled) throw new Error("Configuration error: formatting disabled");
+          const files = [];
+          for (const path of paths) {
+            signal.throwIfAborted();
+            const formatted = await formatWithRunner(this.root, path, signal, config);
+            const absolute = await workspacePath(this.root, path);
+            const before = formatted?.before ?? await readFile13(absolute, "utf8");
+            const after = formatted?.after ?? applyTextChanges(before, await this.language.formatEdits(path, signal));
+            files.push(await plannedFile(this.root, path, after, before));
+          }
+          output = this.preview(identity, files);
+        } else if (operation === "inspect")
+          output = args["operation"] === "impact" ? await this.impact(args, paths, signal) : await this.inspect(args, signal);
+        else if (operation === "actions") output = await this.actionRequest(args, paths, config, identity, signal);
+        else throw new Error("Unknown intelligence operation");
+        if (operation === "navigate" || operation === "inspect")
+          output = publicNavigation(output, this.root);
+        return this.pages.write({ ...output, operation }, args, identity);
+      }
+      async inspect(args, signal) {
+        const path = text(args["path"]);
+        const absolute = await workspacePath(this.root, path);
+        let symbols = [];
+        let outlineIssue;
+        try {
+          symbols = outline(await this.language.documentSymbols(path, signal));
+        } catch (error) {
+          outlineIssue = problem(error);
+          if (args["symbol"]) return { status: "partial", path, sections: { outline: outlineIssue } };
+        }
+        const point = await position2(absolute, args, async () => symbols);
+        const at = { path, line: point.line, column: point.column };
+        const parts = await mapBounded(
+          ["hover", "definition", "references", "incoming", "outgoing"],
+          async (operation) => {
+            try {
+              const result = await this.language.navigate({ ...at, operation }, signal);
+              if (operation === "references" && result["status"] === "complete") {
+                const refs = locations(result["result"]);
+                return [
+                  operation,
+                  {
+                    status: "complete",
+                    count: refs.length,
+                    files: [...new Set(refs.map((ref) => this.localPath(ref.uri)))],
+                    sample: refs.slice(0, 5).map((ref) => ({ path: this.localPath(ref.uri), line: ref.range.start.line + 1 }))
+                  }
+                ];
+              }
+              return [operation, result];
+            } catch (error) {
+              return [operation, problem(error)];
+            }
+          }
+        );
+        const sections = Object.fromEntries(parts);
+        if (outlineIssue) sections["outline"] = outlineIssue;
+        const enclosing = symbols.filter((item) => contains(item.range, point.line - 1, point.column - 1)).sort((a, b) => a.range.end.line - a.range.start.line - (b.range.end.line - b.range.start.line))[0];
+        return {
+          status: Object.values(sections).every((value) => value["status"] === "complete") ? "complete" : "partial",
+          path,
+          ...enclosing ? { symbol: publicOutline(enclosing) } : {},
+          sections,
+          ...args["source"] === true && enclosing ? {
+            source: sourceRange(await readFile13(absolute, "utf8"), enclosing.range)
+          } : {}
+        };
+      }
+      localPath(uri) {
+        try {
+          return relative6(this.root, fileURLToPath4(uri));
+        } catch {
+          return uri;
+        }
+      }
+      async impact(args, paths, signal) {
+        const targets = [];
+        const issues = [];
+        if (Array.isArray(args["symbols"]) && ["symbol", "pattern", "line", "column"].some((key) => args[key] !== void 0))
+          throw new Error("Use symbols or one position selector");
+        for (const path of paths) {
+          try {
+            const symbols = outline(await this.language.documentSymbols(path, signal));
+            if (Array.isArray(args["symbols"])) {
+              for (const symbol of args["symbols"]) {
+                try {
+                  targets.push({
+                    path,
+                    symbol: String(symbol),
+                    ...await position2(await workspacePath(this.root, path), { symbol }, async () => symbols)
+                  });
+                } catch (error) {
+                  issues.push({ path, symbol, ...problem(error) });
+                }
+              }
+              continue;
+            }
+            const selected = args["symbol"] || args["pattern"] || args["line"] ? [await position2(await workspacePath(this.root, path), args, async () => symbols)] : symbols.filter(
+              (item) => [5, 6, 9, 10, 11, 12, 23].includes(item.kind) && (!item.parent || !symbols.some(
+                (parent) => parent.symbol === item.parent && [6, 9, 12].includes(parent.kind)
+              ))
+            ).map((item) => ({
+              line: item.selection.start.line + 1,
+              column: item.selection.start.character + 1,
+              symbol: item.symbol
+            }));
+            for (const point of selected)
+              targets.push({
+                path,
+                symbol: "symbol" in point ? String(point.symbol) : text(args["symbol"], "selected"),
+                line: point.line,
+                column: point.column
+              });
+          } catch (error) {
+            issues.push({ path, ...problem(error) });
+          }
+        }
+        const analyze = async (target) => {
+          const query = async (operation) => {
+            try {
+              return await this.language.navigate(
+                { path: target.path, line: target.line, column: target.column, operation },
+                signal
+              );
+            } catch (error) {
+              return problem(error);
+            }
+          };
+          const [references, incoming] = await Promise.all([query("references"), query("incoming")]);
+          const refs = locations(references["result"]);
+          const callers = [];
+          if (Array.isArray(incoming["result"]))
+            for (const call of incoming["result"]) {
+              if (!record(call) || !record(call["from"])) continue;
+              const from = call["from"];
+              const location = locations({ uri: from["uri"], range: from["selectionRange"] ?? from["range"] })[0];
+              if (location)
+                callers.push({
+                  path: this.localPath(location.uri),
+                  symbol: text(from["name"]),
+                  line: location.range.start.line + 1,
+                  column: location.range.start.character + 1
+                });
+            }
+          return {
+            ...target,
+            status: references["status"] === "complete" && incoming["status"] === "complete" ? "complete" : "partial",
+            references: references["status"] === "complete" ? {
+              status: "complete",
+              count: refs.length,
+              files: [...new Set(refs.map((ref) => this.localPath(ref.uri)))]
+            } : references,
+            callers: incoming["status"] === "complete" ? { status: "complete", items: callers } : incoming,
+            candidateTests: references["status"] === "complete" ? {
+              status: "complete",
+              paths: [...new Set(refs.map((ref) => this.localPath(ref.uri)).filter(isTest))]
+            } : { status: references["status"], reason: references["reason"] }
+          };
+        };
+        const results = await mapBounded(targets.slice(0, 200), analyze);
+        const direct = /* @__PURE__ */ new Map();
+        if (args["transitive"] === true)
+          for (const item of results) {
+            const callers = item.callers["items"];
+            if (!Array.isArray(callers)) continue;
+            for (const caller of callers) {
+              if (!record(caller) || typeof caller["path"] !== "string" || typeof caller["line"] !== "number" || typeof caller["column"] !== "number")
+                continue;
+              const point = {
+                path: caller["path"],
+                symbol: text(caller["symbol"]),
+                line: caller["line"],
+                column: caller["column"]
+              };
+              direct.set(JSON.stringify(point), point);
+            }
+          }
+        if (direct.size > 100)
+          issues.push({ status: "partial", reason: "Indirect relationship budget exceeded; narrow files or symbols" });
+        const indirect = await mapBounded([...direct.values()].slice(0, 100), analyze);
+        if (targets.length > 200)
+          issues.push({ status: "partial", reason: "Symbol budget exceeded; narrow files or symbols" });
+        return {
+          status: issues.length || results.some((item) => item["status"] !== "complete") || indirect.some((item) => item["status"] !== "complete") ? "partial" : "complete",
+          symbols: results,
+          indirect,
+          issues,
+          note: "Candidate tests are inferred from names and references, not runtime coverage. Zero references does not prove safe deletion."
+        };
+      }
+      async actionRequest(args, paths, config, identity, signal) {
+        const operation = text(args["operation"], "list");
+        if (operation === "explain") {
+          const path = paths[0] ?? "";
+          const rule = text(args["rule"]);
+          if (!rule) throw new Error("rule required for explain");
+          const cwd = await lintDirectory(this.root, await workspacePath(this.root, path));
+          const runner = await select(this.root, resolve7(this.root, path), false, config, false, signal);
+          if (!runner) return { status: "unsupported", reason: "No lint runner configured for this file" };
+          let output = "";
+          let settings;
+          if (runner.name === "ruff") {
+            const explained = await run(runner.command, [...runner.prefix, "rule", rule], cwd, signal);
+            if (explained.code !== 0) throw new Error(explained.stderr);
+            output = explained.stdout;
+            const effective = await run(
+              runner.command,
+              [...runner.prefix, "check", "--show-settings", resolve7(this.root, path)],
+              cwd,
+              signal
+            );
+            settings = effective.code === 0 ? effective.stdout : "unknown";
+          } else if (runner.name === "biome") {
+            const explained = await run(
+              runner.command,
+              [...runner.prefix, "explain", rule.split("/").at(-1) ?? rule],
+              cwd,
+              signal
+            );
+            if (explained.code !== 0) throw new Error(explained.stderr);
+            output = explained.stdout;
+            settings = "Effective rule/ignore origin is not exposed by this runner; inspect the existing project configuration";
+          } else {
+            const effective = await run(
+              runner.command,
+              [...runner.prefix, "--print-config", resolve7(this.root, path)],
+              cwd,
+              signal
+            );
+            if (effective.code !== 0) throw new Error(effective.stderr);
+            const parsed = JSON.parse(effective.stdout || "null");
+            settings = record(parsed) && record(parsed["rules"]) ? parsed["rules"][rule] ?? "unknown" : "File ignored or no matching configuration";
+            const metadata = await run(
+              runner.command,
+              [...runner.prefix, "--format", "json-with-metadata", resolve7(this.root, path)],
+              cwd,
+              signal
+            );
+            const report = JSON.parse(metadata.stdout || "null");
+            const rules = record(report) && record(report["metadata"]) && record(report["metadata"]["rulesMeta"]) ? report["metadata"]["rulesMeta"] : {};
+            const ruleMetadata = rules[rule];
+            const docs = record(ruleMetadata) && record(ruleMetadata["docs"]) ? ruleMetadata["docs"] : {};
+            output = text(docs["description"], "Installed rule metadata unavailable") + (docs["url"] ? `
+${String(docs["url"])}` : "") + "\nConfiguration source origin is unknown.";
+          }
+          return {
+            status: "complete",
+            runner: runner.name,
+            rule,
+            explanation: output,
+            ...args["details"] === true ? { effective: settings } : {
+              effective: typeof settings === "string" && settings.length > 500 ? "Available with details=true" : settings
+            }
+          };
+        }
+        if (operation === "preview") {
+          const ids = Array.isArray(args["ids"]) ? args["ids"].filter((id) => typeof id === "string") : [];
+          let issues = [];
+          if (!ids.length) {
+            const listed = await this.listActions(args, paths, config, identity, signal);
+            issues = Array.isArray(listed["issues"]) ? listed["issues"] : [];
+            const fresh = Array.isArray(listed["items"]) ? listed["items"] : [];
+            ids.push(
+              ...fresh.filter(
+                (item) => record(item) && item["applicability"] === "safe" && item["status"] !== "unsupported"
+              ).map((item) => record(item) ? text(item["id"]) : "")
+            );
+          }
+          const grouped = /* @__PURE__ */ new Map();
+          for (const id of [...new Set(ids)]) {
+            const action = this.actions.get(id);
+            if (!action || action.identity !== identity) throw new Error("Action stale or missing; list actions again");
+            if (action.unsupported) throw new Error(`unsupported: ${action.unsupported}`);
+            if (action.lsp) {
+              let raw = action.lsp;
+              if (!raw["edit"]) {
+                const resolved = await this.language.request(action.path, "codeAction/resolve", raw, signal);
+                if (!record(resolved) || resolved["status"] === "unsupported")
+                  throw new Error("unsupported: unresolved Code Action");
+                raw = resolved;
+              }
+              if (raw["command"] || raw["disabled"] || !record(raw["edit"]))
+                throw new Error("unsupported: command, disabled action or missing text edit");
+              const edit = raw["edit"];
+              await workspaceEdits(this.root, edit);
+              const changes = { ...edit.changes };
+              for (const change of edit.documentChanges ?? []) {
+                if ("kind" in change) throw new Error("unsupported: resource operation");
+                changes[change.textDocument.uri] = change.edits;
+              }
+              for (const [uri, edits] of Object.entries(changes))
+                await this.addEdits(grouped, fileURLToPath4(uri), edits);
+            } else if (action.after !== void 0 && action.before !== void 0) {
+              if (grouped.has(action.path)) throw new Error("Overlapping action targets; select one file-level fix");
+              grouped.set(action.path, { edits: [], before: action.before, after: action.after });
+            } else await this.addEdits(grouped, action.path, action.edits ?? []);
+          }
+          const files = [];
+          for (const [path, group] of grouped)
+            files.push(
+              await plannedFile(
+                this.root,
+                path,
+                group.after ?? applyTextChanges(group.before, group.edits),
+                group.before
+              )
+            );
+          return { ...this.preview(identity, files), ...issues.length ? { partial: true, issues } : {} };
+        }
+        return this.listActions(args, paths, config, identity, signal);
+      }
+      async addEdits(groups, path, edits) {
+        path = relative6(this.root, await workspacePath(this.root, path));
+        const group = groups.get(path) ?? { edits: [], before: await readFile13(resolve7(this.root, path), "utf8") };
+        if (group.after !== void 0) throw new Error("Overlapping action targets");
+        group.edits.push(...edits);
+        groups.set(path, group);
+      }
+      async listActions(args, paths, config, identity, signal) {
+        const items2 = [];
+        const issues = [];
+        const add = (action) => {
+          const value = this.remember(action);
+          items2.push({
+            id: value.id,
+            path: value.path,
+            title: value.title,
+            source: value.source,
+            applicability: value.applicability,
+            ...value.rule ? { rule: value.rule } : {},
+            ...value.unsupported ? { status: "unsupported", reason: value.unsupported } : {}
+          });
+        };
+        if (args["source"] !== "lsp") {
+          const results = await lintBatch(this.root, paths, signal, config, false);
+          for (const [path, result] of results) {
+            if (result.state !== "complete") {
+              issues.push({ path, source: "lint", status: result.state, reason: result.note });
+              continue;
+            }
+            for (const finding of result.findings)
+              if (!args["rule"] || finding.rule === args["rule"])
+                for (const fix of finding.lint?.fixes ?? [])
+                  add({
+                    identity,
+                    path,
+                    title: fix.title,
+                    source: finding.lint?.runner ?? "lint",
+                    applicability: fix.applicability,
+                    edits: fix.edits,
+                    finding,
+                    ...finding.rule ? { rule: finding.rule } : {}
+                  });
+            const runner = await select(this.root, resolve7(this.root, path), false, config, false, signal);
+            if (runner?.name === "biome" && (!args["rule"] || result.findings.some((finding) => finding.rule === args["rule"]))) {
+              const before = await readFile13(resolve7(this.root, path), "utf8");
+              const cwd = await lintDirectory(this.root, resolve7(this.root, path));
+              let safeAfter;
+              for (const unsafe of [false, true]) {
+                const output = await run(
+                  runner.command,
+                  [
+                    ...runner.prefix,
+                    "lint",
+                    "--write",
+                    ...unsafe ? ["--unsafe"] : [],
+                    ...args["rule"] ? [`--only=${text(args["rule"]).replace(/^lint\//, "")}`] : [],
+                    `--stdin-file-path=${resolve7(this.root, path)}`
+                  ],
+                  cwd,
+                  signal,
+                  before
+                );
+                if (![0, 1].includes(output.code)) {
+                  issues.push({ path, status: "failed", reason: output.stderr });
+                  continue;
+                }
+                if (unsafe && output.stdout === safeAfter) continue;
+                if (!unsafe) safeAfter = output.stdout;
+                if (output.stdout && output.stdout !== before)
+                  add({
+                    identity,
+                    path,
+                    title: unsafe ? "Biome file fixes including unsafe changes" : "Biome safe file fixes",
+                    source: "biome",
+                    ...args["rule"] ? { rule: text(args["rule"]) } : {},
+                    applicability: unsafe ? "unsafe" : "safe",
+                    before,
+                    after: output.stdout
+                  });
+              }
+            }
+          }
+        }
+        if (args["source"] !== "lint")
+          for (const path of paths) {
+            try {
+              const absolute = await workspacePath(this.root, path);
+              const content = await readFile13(absolute, "utf8");
+              const at = await position2(
+                absolute,
+                args,
+                async () => outline(await this.language.documentSymbols(path, signal))
+              );
+              const range = args["line"] || args["symbol"] || args["pattern"] ? {
+                start: { line: at.line - 1, character: at.column - 1 },
+                end: { line: at.line - 1, character: at.column - 1 }
+              } : {
+                start: { line: 0, character: 0 },
+                end: {
+                  line: content.split("\n").length - 1,
+                  character: content.split("\n").at(-1)?.length ?? 0
+                }
+              };
+              const response = await this.language.request(
+                path,
+                "textDocument/codeAction",
+                { textDocument: { uri: pathToFileURL(absolute).href }, range, context: { diagnostics: [] } },
+                signal
+              );
+              if (record(response) && response["status"] === "pending")
+                issues.push({
+                  path,
+                  source: "lsp",
+                  status: "pending",
+                  reason: "Diagnostics still pending; action list may be incomplete"
+                });
+              const raw = record(response) && "result" in response ? response["result"] : response;
+              if (record(raw) && raw["status"] === "unsupported")
+                issues.push({ path, source: "lsp", status: "unsupported" });
+              if (Array.isArray(raw)) {
+                for (const action of raw)
+                  if (record(action)) {
+                    const edit = record(action["edit"]) ? action["edit"] : {};
+                    const resources = Array.isArray(edit["documentChanges"]) && edit["documentChanges"].some((change) => record(change) && "kind" in change);
+                    add({
+                      identity,
+                      path,
+                      title: text(action["title"], "Code Action"),
+                      source: "lsp",
+                      applicability: "unknown",
+                      lsp: action,
+                      ...action["command"] || action["disabled"] || resources ? { unsupported: "Command, disabled or resource action" } : {}
+                    });
+                  }
+              }
+            } catch (error) {
+              issues.push({ path, source: "lsp", ...problem(error) });
+            }
+          }
+        return { status: issues.length ? "partial" : "complete", items: items2, issues };
       }
     };
   }
@@ -2721,10 +3981,10 @@ var init_json_rpc_connection = __esm({
         const id = this.nextRequestId;
         this.nextRequestId += 1;
         const message2 = params === void 0 ? { jsonrpc: "2.0", id, method } : { jsonrpc: "2.0", id, method, params };
-        const responsePromise = new Promise((resolve12, reject) => {
+        const responsePromise = new Promise((resolve13, reject) => {
           this.pendingRequests.set(String(id), {
             resolve(result) {
-              resolve12(result);
+              resolve13(result);
             },
             reject
           });
@@ -2869,13 +4129,13 @@ var init_json_rpc_connection = __esm({
         const payload = `Content-Length: ${Buffer.byteLength(body, "utf8")}\r
 \r
 ${body}`;
-        return new Promise((resolve12, reject) => {
+        return new Promise((resolve13, reject) => {
           this.writer.write(payload, (error) => {
             if (error) {
               reject(error);
               return;
             }
-            resolve12();
+            resolve13();
           });
         });
       }
@@ -2959,7 +4219,7 @@ var init_transport = __esm({
           env
         });
         this.startStderrReading();
-        await new Promise((resolve12) => setTimeout(resolve12, 100));
+        await new Promise((resolve13) => setTimeout(resolve13, 100));
         if (this.proc.exitCode !== null) {
           const stderr = this.stderrBuffer.join("\n");
           throw new LspProcessExitedError(this.server.id, this.root, this.proc.exitCode, stderr.slice(-2e3));
@@ -3063,8 +4323,8 @@ var init_transport = __esm({
           try {
             proc.kill();
             let timeoutId;
-            const timeoutPromise = new Promise((resolve12) => {
-              timeoutId = setTimeout(resolve12, STOP_HARD_KILL_TIMEOUT_MS);
+            const timeoutPromise = new Promise((resolve13) => {
+              timeoutId = setTimeout(resolve13, STOP_HARD_KILL_TIMEOUT_MS);
             });
             await Promise.race([
               proc.exited.then(() => {
@@ -3079,7 +4339,7 @@ var init_transport = __esm({
                 proc.kill("SIGKILL");
                 await Promise.race([
                   proc.exited,
-                  new Promise((resolve12) => setTimeout(resolve12, STOP_SIGKILL_GRACE_MS))
+                  new Promise((resolve13) => setTimeout(resolve13, STOP_SIGKILL_GRACE_MS))
                 ]);
               } catch (error) {
                 reportBestEffortCleanupError("hard process kill", error);
@@ -3100,7 +4360,7 @@ var init_transport = __esm({
 });
 
 // src/lsp/connection.ts
-import { pathToFileURL } from "node:url";
+import { pathToFileURL as pathToFileURL2 } from "node:url";
 var INITIALIZE_SETTLE_MS, LspClientConnection;
 var init_connection = __esm({
   "src/lsp/connection.ts"() {
@@ -3109,7 +4369,7 @@ var init_connection = __esm({
     INITIALIZE_SETTLE_MS = 300;
     LspClientConnection = class extends LspClientTransport {
       async initialize() {
-        const rootUri = pathToFileURL(this.root).href;
+        const rootUri = pathToFileURL2(this.root).href;
         await this.sendRequest("initialize", {
           processId: process.pid,
           rootUri,
@@ -3117,6 +4377,13 @@ var init_connection = __esm({
           workspaceFolders: [{ uri: rootUri, name: "workspace" }],
           capabilities: {
             textDocument: {
+              callHierarchy: { dynamicRegistration: false },
+              typeHierarchy: { dynamicRegistration: false },
+              completion: { dynamicRegistration: false, completionItem: { snippetSupport: false } },
+              declaration: { dynamicRegistration: false, linkSupport: true },
+              typeDefinition: { dynamicRegistration: false, linkSupport: true },
+              implementation: { dynamicRegistration: false, linkSupport: true },
+              signatureHelp: { dynamicRegistration: false },
               hover: { contentFormat: ["markdown", "plaintext"] },
               definition: { linkSupport: true },
               references: {},
@@ -3154,7 +4421,7 @@ var init_connection = __esm({
               symbol: {},
               workspaceFolders: true,
               configuration: true,
-              applyEdit: true,
+              applyEdit: false,
               workspaceEdit: {
                 documentChanges: true
               }
@@ -3317,8 +4584,8 @@ var init_language_mappings = __esm({
 
 // src/lsp/client.ts
 import { readFileSync as readFileSync2 } from "node:fs";
-import { extname as extname4, resolve as resolve7 } from "node:path";
-import { pathToFileURL as pathToFileURL2 } from "node:url";
+import { extname as extname4, resolve as resolve8 } from "node:path";
+import { pathToFileURL as pathToFileURL3 } from "node:url";
 var POST_OPEN_DELAY_MS, POST_DIAGNOSTICS_WAIT_MS, LspClient;
 var init_client = __esm({
   "src/lsp/client.ts"() {
@@ -3339,8 +4606,8 @@ var init_client = __esm({
         return this.diagnosticPullErrors;
       }
       async openFile(filePath) {
-        const absPath = resolve7(filePath);
-        const uri = pathToFileURL2(absPath).href;
+        const absPath = resolve8(filePath);
+        const uri = pathToFileURL3(absPath).href;
         const text2 = readFileSync2(absPath, "utf-8");
         if (!this.openedFiles.has(absPath)) {
           const ext = extname4(absPath);
@@ -3377,30 +4644,30 @@ var init_client = __esm({
         });
       }
       async definition(filePath, line, character) {
-        const absPath = resolve7(filePath);
+        const absPath = resolve8(filePath);
         await this.openFile(absPath);
         return this.sendRequest(
           "textDocument/definition",
           {
-            textDocument: { uri: pathToFileURL2(absPath).href },
+            textDocument: { uri: pathToFileURL3(absPath).href },
             position: { line: line - 1, character }
           }
         );
       }
       async references(filePath, line, character, includeDeclaration = true) {
-        const absPath = resolve7(filePath);
+        const absPath = resolve8(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/references", {
-          textDocument: { uri: pathToFileURL2(absPath).href },
+          textDocument: { uri: pathToFileURL3(absPath).href },
           position: { line: line - 1, character },
           context: { includeDeclaration }
         });
       }
       async documentSymbols(filePath) {
-        const absPath = resolve7(filePath);
+        const absPath = resolve8(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/documentSymbol", {
-          textDocument: { uri: pathToFileURL2(absPath).href }
+          textDocument: { uri: pathToFileURL3(absPath).href }
         });
       }
       async workspaceSymbols(query) {
@@ -3413,8 +4680,8 @@ var init_client = __esm({
         return /unsupported|not supported|method not found|unknown request/i.test(error.message);
       }
       async diagnostics(filePath) {
-        const absPath = resolve7(filePath);
-        const uri = pathToFileURL2(absPath).href;
+        const absPath = resolve8(filePath);
+        const uri = pathToFileURL3(absPath).href;
         await this.openFile(absPath);
         await new Promise((r) => setTimeout(r, POST_DIAGNOSTICS_WAIT_MS));
         try {
@@ -3432,21 +4699,21 @@ var init_client = __esm({
         return { items: this.getStoredDiagnostics(uri) };
       }
       async prepareRename(filePath, line, character) {
-        const absPath = resolve7(filePath);
+        const absPath = resolve8(filePath);
         await this.openFile(absPath);
         return this.sendRequest(
           "textDocument/prepareRename",
           {
-            textDocument: { uri: pathToFileURL2(absPath).href },
+            textDocument: { uri: pathToFileURL3(absPath).href },
             position: { line: line - 1, character }
           }
         );
       }
       async rename(filePath, line, character, newName) {
-        const absPath = resolve7(filePath);
+        const absPath = resolve8(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/rename", {
-          textDocument: { uri: pathToFileURL2(absPath).href },
+          textDocument: { uri: pathToFileURL3(absPath).href },
           position: { line: line - 1, character },
           newName
         });
@@ -3543,7 +4810,7 @@ async function stopClientBestEffort(client) {
 }
 function awaitWithSignal(promise, signal) {
   if (!signal) return promise;
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled) return;
@@ -3560,7 +4827,7 @@ function awaitWithSignal(promise, signal) {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        resolve12(value);
+        resolve13(value);
       },
       (err) => {
         if (settled) return;
@@ -3837,7 +5104,7 @@ function createSharedAbortableOperation(run2, onSettled, onAbandoned) {
 function awaitSharedAbortableOperation(operation, signal) {
   signal?.throwIfAborted();
   operation.waiterCount += 1;
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled) return;
@@ -3853,7 +5120,7 @@ function awaitSharedAbortableOperation(operation, signal) {
         settled = true;
         signal?.removeEventListener("abort", onAbort);
         releaseSharedOperationWaiter(operation);
-        resolve12(value);
+        resolve13(value);
       },
       (error) => {
         if (settled) return;
@@ -4920,7 +6187,7 @@ var init_dist = __esm({
 
 // src/lsp/cargo-metadata-parser.ts
 import { readFileSync as readFileSync4, realpathSync, statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join12, relative as relative4, sep as sep2 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join12, relative as relative7, sep as sep2 } from "node:path";
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -4940,7 +6207,7 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile11(path) {
+function readFile14(path) {
   try {
     return readFileSync4(path, "utf8");
   } catch {
@@ -4948,7 +6215,7 @@ function readFile11(path) {
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile11(path);
+  const content = readFile14(path);
   if (content === void 0) return void 0;
   try {
     return Object.hasOwn(parse(content), "workspace") ? "workspace" : "ordinary";
@@ -4957,7 +6224,7 @@ function readCargoManifestKind(path) {
   }
 }
 function isContainedPath(root, path) {
-  const relativePath = relative4(root, path);
+  const relativePath = relative7(root, path);
   return relativePath === "" || !isAbsolute6(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
 }
 function parseCargoMetadata(output) {
@@ -5084,8 +6351,8 @@ async function defaultCargoMetadataLoader(manifestPath, signal, environment = ex
       let terminationError;
       let settled = false;
       let resolveTermination;
-      const terminationComplete = new Promise((resolve12) => {
-        resolveTermination = resolve12;
+      const terminationComplete = new Promise((resolve13) => {
+        resolveTermination = resolve13;
       });
       const finishTermination = () => {
         resolveTermination?.();
@@ -5397,7 +6664,7 @@ var init_cargo_workspace_root = __esm({
 
 // src/lsp/workspace-root.ts
 import { existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname7, join as join14, resolve as resolve8 } from "node:path";
+import { dirname as dirname7, join as join14, resolve as resolve9 } from "node:path";
 function isDirectoryPath(filePath) {
   try {
     return statSync3(filePath).isDirectory();
@@ -5406,7 +6673,7 @@ function isDirectoryPath(filePath) {
   }
 }
 async function findWorkspaceRoot(filePath, server2, options = {}) {
-  const abs = resolve8(filePath);
+  const abs = resolve9(filePath);
   let dir = abs;
   if (!isDirectoryPath(dir)) {
     dir = dirname7(dir);
@@ -5438,13 +6705,14 @@ var init_workspace_root = __esm({
 });
 
 // src/language.ts
-import { readFile as readFile12, writeFile as writeFile5 } from "node:fs/promises";
-import { dirname as dirname8, extname as extname5, relative as relative5, resolve as resolve9 } from "node:path";
-import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL3 } from "node:url";
+import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
+import { readFile as readFile15 } from "node:fs/promises";
+import { dirname as dirname8, extname as extname5, resolve as resolve10 } from "node:path";
+import { fileURLToPath as fileURLToPath5, pathToFileURL as pathToFileURL4 } from "node:url";
 function diagnosticUriKey(uri) {
   try {
-    const path = fileURLToPath2(uri);
-    return pathToFileURL3(
+    const path = fileURLToPath5(uri);
+    return pathToFileURL4(
       process.platform === "win32" ? path.replace(/^[A-Z]:/, (drive) => drive.toLowerCase()) : path
     ).href;
   } catch {
@@ -5467,12 +6735,14 @@ var init_language = __esm({
     init_metrics();
     init_results();
     init_runners();
+    init_symbols();
     init_tool_resolution();
     Client = class extends LspClient {
       constructor() {
         super(...arguments);
         this.diagnosticsVerified = false;
         this.stopping = false;
+        this.requestSignals = new AsyncLocalStorage3();
         this.published = /* @__PURE__ */ new Map();
         this.capabilities = {};
         this.progress = /* @__PURE__ */ new Set();
@@ -5508,7 +6778,7 @@ var init_language = __esm({
         const busy = () => this.serverBusy || this.progress.size > 0 || Date.now() - this.progressAt < BUDGET.lspQuiet;
         while (busy() && Date.now() < deadline) {
           signal?.throwIfAborted();
-          await new Promise((resolve12) => setTimeout(resolve12, 25));
+          await new Promise((resolve13) => setTimeout(resolve13, 25));
         }
         signal?.throwIfAborted();
         return !busy();
@@ -5561,7 +6831,10 @@ var init_language = __esm({
           }
         } else {
           if (!this.connection) throw new Error("LSP client not started");
-          const signal = this.requestSignal ? AbortSignal.any([this.requestSignal, AbortSignal.timeout(BUDGET.lspRequest)]) : AbortSignal.timeout(BUDGET.lspRequest);
+          const signal = AbortSignal.any([
+            ...this.requestSignals.getStore() ? [this.requestSignals.getStore()] : [],
+            AbortSignal.timeout(BUDGET.lspRequest)
+          ]);
           if (this.isRustAnalyzer() && (method.startsWith("textDocument/") || method === "workspace/symbol") && !await this.settle(Date.now() + BUDGET.lspRequest, signal))
             throw new Error("LSP analysis pending: rust-analyzer is still indexing");
           result = await this.connection.sendRequest(method, params, signal);
@@ -5569,6 +6842,35 @@ var init_language = __esm({
         if (method === "initialize" && record(result) && record(result["capabilities"]))
           this.capabilities = result["capabilities"];
         return result;
+      }
+      async query(method, params) {
+        const capabilities = {
+          definition: "definitionProvider",
+          declaration: "declarationProvider",
+          references: "referencesProvider",
+          hover: "hoverProvider",
+          typeDefinition: "typeDefinitionProvider",
+          implementation: "implementationProvider",
+          signatureHelp: "signatureHelpProvider",
+          completion: "completionProvider",
+          prepareRename: "renameProvider",
+          prepareCallHierarchy: "callHierarchyProvider",
+          prepareTypeHierarchy: "typeHierarchyProvider",
+          codeAction: "codeActionProvider",
+          resolve: "codeActionProvider"
+        };
+        const key = method.split("/").at(-1) ?? "";
+        const capability = capabilities[key];
+        if (capability && !this.capabilities[capability]) return { status: "unsupported", operation: key };
+        if (method === "textDocument/prepareRename" && !this.supports("prepare_rename"))
+          return { status: "unsupported", operation: key };
+        try {
+          return await this.sendRequest(method, params);
+        } catch (error) {
+          if (record(error) && error["code"] === -32601 || /method not found|unsupported|Unhandled method/i.test(message(error)))
+            return { status: "unsupported", operation: key };
+          throw error;
+        }
       }
       async navigation(method, path, line, character) {
         const capability = {
@@ -5580,7 +6882,7 @@ var init_language = __esm({
         if (!this.capabilities[capability[method] ?? ""]) return { status: "unsupported", operation: method };
         await this.openFile(path);
         return this.sendRequest(`textDocument/${method}`, {
-          textDocument: { uri: pathToFileURL3(path).href },
+          textDocument: { uri: pathToFileURL4(path).href },
           position: { line: line - 1, character }
         });
       }
@@ -5619,8 +6921,8 @@ var init_language = __esm({
         });
       }
       async openFile(path) {
-        const uri = pathToFileURL3(path).href;
-        const content = await readFile12(path, "utf8");
+        const uri = pathToFileURL4(path).href;
+        const content = await readFile15(path, "utf8");
         const previous = this.versions.get(uri);
         if (previous?.content === content && !this.dirty.has(uri)) return;
         this.dirty.delete(uri);
@@ -5654,7 +6956,7 @@ var init_language = __esm({
           this.pulls.delete(uri);
         }
         for (const { path, type } of changes) {
-          const uri = pathToFileURL3(path).href;
+          const uri = pathToFileURL4(path).href;
           if (type === 3) {
             if (this.versions.has(uri)) await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
             this.versions.delete(uri);
@@ -5664,11 +6966,11 @@ var init_language = __esm({
           } else if (this.versions.has(uri)) await this.openFile(path);
         }
         await this.sendNotification("workspace/didChangeWatchedFiles", {
-          changes: changes.map(({ path, type }) => ({ uri: pathToFileURL3(path).href, type }))
+          changes: changes.map(({ path, type }) => ({ uri: pathToFileURL4(path).href, type }))
         });
       }
       async collect(path, signal) {
-        const uri = pathToFileURL3(path).href;
+        const uri = pathToFileURL4(path).href;
         const cold = !this.versions.has(uri);
         await this.openFile(path);
         const settling = Date.now() + (cold ? BUDGET.lspCold : BUDGET.lspWarm);
@@ -5715,7 +7017,7 @@ var init_language = __esm({
               };
             }
           }
-          await new Promise((resolve12) => setTimeout(resolve12, 25));
+          await new Promise((resolve13) => setTimeout(resolve13, 25));
         }
         return { items: [], ready: false };
       }
@@ -5723,7 +7025,7 @@ var init_language = __esm({
         if (!this.supports("format")) throw new Error("unsupported: document formatting");
         await this.openFile(path);
         return await this.sendRequest("textDocument/formatting", {
-          textDocument: { uri: pathToFileURL3(path).href },
+          textDocument: { uri: pathToFileURL4(path).href },
           options
         }) ?? [];
       }
@@ -5759,7 +7061,7 @@ var init_language = __esm({
           (path) => files.get(path) !== this.snapshot.get(path)
         );
         const events = changed.map((path) => ({
-          path: resolve9(this.root, path),
+          path: resolve10(this.root, path),
           type: !files.has(path) ? 3 : !this.snapshot.has(path) ? 1 : 2
         }));
         this.snapshot = new Map(files);
@@ -5782,7 +7084,7 @@ var init_language = __esm({
         this.config = config;
       }
       async invalidate(path) {
-        const directory2 = dirname8(resolve9(this.root, path));
+        const directory2 = dirname8(resolve10(this.root, path));
         const language = configurationImpact(path).length ? void 0 : (await resolveServer(this.root, path, this.config).catch(() => void 0))?.language;
         const languages = language ? [language] : configurationLanguages(path);
         for (const managed of this.manager.getSnapshot()) {
@@ -5802,22 +7104,22 @@ var init_language = __esm({
           reason = message(error);
         }
         const failure = resolved ? [...this.failures.values()].filter(
-          (entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve9(this.root, path))
+          (entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve10(this.root, path))
         ).sort((a, b) => b.root.length - a.root.length)[0] : void 0;
         const identity = resolved ? `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}` : "";
         const client = [...this.clients].find(
-          (client2) => client2.isAlive() && client2.serverIdentity() === identity && inside(client2.workspaceRoot(), resolve9(this.root, path))
+          (client2) => client2.isAlive() && client2.serverIdentity() === identity && inside(client2.workspaceRoot(), resolve10(this.root, path))
         );
         let lint;
         try {
-          lint = await select(this.root, resolve9(this.root, path), false, this.config) ?? {
+          lint = await select(this.root, resolve10(this.root, path), false, this.config) ?? {
             unavailable: "Lint disabled or no matching runner"
           };
         } catch (error) {
           lint = { unavailable: message(error) };
         }
         const lintHealth = await lintAvailability(this.root, path, this.config);
-        const formatter = await select(this.root, resolve9(this.root, path), true, this.config).catch(() => void 0);
+        const formatter = await select(this.root, resolve10(this.root, path), true, this.config).catch(() => void 0);
         const unavailable = !this.config.valid || !resolved || resolved.tool.source === "missing" || !!failure;
         const status = (operation) => unavailable ? "unavailable" : !client ? "unverified" : client.supports(operation) ? "available" : "unsupported";
         return {
@@ -5828,15 +7130,21 @@ var init_language = __esm({
           capabilities: {
             diagnostics: unavailable ? "unavailable" : client?.diagnosticsVerified ? "available" : "unverified",
             navigation: status("definition"),
+            declaration: status("declarationProvider"),
+            callHierarchy: status("callHierarchyProvider"),
+            typeHierarchy: status("typeHierarchyProvider"),
+            completion: status("completionProvider"),
+            actions: status("codeActionProvider"),
             rename: status("rename"),
             formatting: !this.config.valid ? "unavailable" : !this.config.formattingEnabled ? "disabled" : formatter && formatter.name !== "eslint" ? "unverified" : status("format"),
-            lint: !this.config.valid || record(lint) && lint["unavailable"] ? "unavailable" : lintHealth.state
+            lint: !this.config.valid || record(lint) && lint["unavailable"] ? "unavailable" : lintHealth.state,
+            lintFixes: !this.config.valid || record(lint) && lint["unavailable"] ? "unavailable" : lintHealth.state
           },
           running: !!client,
           verified: !!client,
           failure: !this.config.valid ? "Configuration error; execution disabled" : failure?.reason ?? (resolved?.tool.source === "missing" ? resolved.tool.note : reason || void 0),
           retryAt: failure?.retryAt,
-          recovery: "Use $setup-lsp to configure, install or repair tools; then lsp_status refresh=true. Status does not start or download tools. Existing commands that fail never fall back."
+          recovery: "Use $setup-lsp to configure, install or repair tools; then status refresh=true. Status does not start or download tools. Existing commands that fail never fall back."
         };
       }
       async preflight(path, signal, operation) {
@@ -5889,10 +7197,8 @@ var init_language = __esm({
         }
         this.failures.delete(failureKey);
         try {
-          if (client instanceof Client) client.requestSignal = options.signal;
-          return await fn(client);
+          return await (client instanceof Client ? client.requestSignals.run(options.signal, () => fn(client)) : fn(client));
         } finally {
-          if (client instanceof Client) client.requestSignal = void 0;
           options.manager.releaseClient(root, resolved.server.id);
         }
       }
@@ -5914,6 +7220,9 @@ var init_language = __esm({
                   column: item.range.start.character + 1,
                   severity: item.severity === 1 ? "error" : "warning",
                   source: `${item.source ?? "lsp"}${item.code === void 0 ? "" : `/${item.code}`}`,
+                  ...item.code !== void 0 ? { rule: String(item.code) } : {},
+                  endLine: item.range.end.line + 1,
+                  endColumn: item.range.end.character + 1,
                   message: item.message
                 })),
                 note: result.ready ? result.evidence ?? "fresh diagnostics" : "No fresh diagnostics published yet"
@@ -5936,113 +7245,121 @@ var init_language = __esm({
           };
         }
       }
+      async request(path, method, params, signal) {
+        return this.withLspClient(
+          await workspacePath(this.root, path),
+          async (client) => {
+            if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+            await client.openFile(await workspacePath(this.root, path));
+            if (method === "textDocument/codeAction") {
+              const diagnostics = await client.collect(await workspacePath(this.root, path), signal);
+              client.diagnosticsVerified = diagnostics.ready;
+              params = { ...params, context: { diagnostics: diagnostics.items } };
+              const result = await client.query(method, params);
+              if (record(result) && result["status"] === "unsupported") return result;
+              return { status: diagnostics.ready ? "complete" : "pending", result };
+            }
+            return client.query(method, params);
+          },
+          method,
+          { manager: this.manager, signal }
+        );
+      }
       async navigate(args, signal) {
         const path = await workspacePath(this.root, text(args["path"]));
         const operation = text(args["operation"]);
-        const line = number(args["line"], 1, 1, 1e7);
-        const column = number(args["column"], 1, 1, 1e6) - 1;
-        const before = operation === "rename" ? await inventory(this.root, 1e4, signal) : void 0;
         return this.withLspClient(
           path,
           async (client) => {
-            if (client instanceof Client && ["definition", "references", "symbols", "prepare_rename"].includes(operation) && !client.supports(operation === "symbols" && args["query"] ? "workspaceSymbolProvider" : operation))
-              return { status: "unsupported", operation };
+            if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+            const symbols = async () => outline(await client.documentSymbols(path) ?? []);
+            if (operation === "symbols") {
+              if (!client.supports(args["query"] ? "workspaceSymbolProvider" : "symbols"))
+                return { status: "unsupported", operation };
+              if (args["query"])
+                return { status: "complete", result: await client.workspaceSymbols(text(args["query"])) ?? [] };
+              const items2 = await symbols();
+              return {
+                status: "complete",
+                result: items2.filter(
+                  (item) => args["symbol"] ? item.parent === args["symbol"] || item.symbol === args["symbol"] : !item.parent
+                ).map(publicOutline)
+              };
+            }
+            const pos = await position2(path, args, symbols);
+            await client.openFile(path);
+            const textDocument = { uri: pathToFileURL4(path).href };
+            const point = { line: pos.line - 1, character: pos.column - 1 };
             let result;
-            switch (operation) {
-              case "hover":
-              case "typeDefinition":
-              case "implementation":
-              case "signatureHelp":
-                if (!(client instanceof Client)) throw new Error("Unexpected client");
-                result = await client.navigation(operation, path, line, column);
-                break;
-              case "definition":
-                result = await client.definition(path, line, column);
-                break;
-              case "references":
-                result = await client.references(path, line, column);
-                break;
-              case "symbols":
-                result = args["query"] ? await client.workspaceSymbols(text(args["query"])) : await client.documentSymbols(path);
-                break;
-              case "prepare_rename":
-                result = await client.prepareRename(path, line, column);
-                break;
-              case "rename": {
-                if (!before?.complete) throw new Error("Cannot safely snapshot workspace for rename");
-                const name = text(args["newName"]);
-                if (!name) throw new Error("newName required");
-                const edit = await client.rename(path, line, column, name);
-                return this.applyRename(edit, before.version, signal);
+            if (operation === "rename") {
+              if (!client.supports("rename")) return { status: "unsupported", operation };
+              result = await client.rename(path, pos.line, pos.column - 1, text(args["newName"]));
+            } else if (["incoming", "outgoing", "supertypes", "subtypes"].includes(operation)) {
+              const call = operation === "incoming" || operation === "outgoing";
+              const prepared = await client.query(
+                call ? "textDocument/prepareCallHierarchy" : "textDocument/prepareTypeHierarchy",
+                { textDocument, position: point }
+              );
+              if (record(prepared) && prepared["status"] === "unsupported") return prepared;
+              const items2 = Array.isArray(prepared) ? prepared : [];
+              const values = [];
+              for (const item of items2) {
+                const value = await client.query(
+                  call ? operation === "incoming" ? "callHierarchy/incomingCalls" : "callHierarchy/outgoingCalls" : `typeHierarchy/${operation}`,
+                  { item }
+                );
+                if (record(value) && value["status"] === "unsupported") return value;
+                if (Array.isArray(value)) values.push(...value);
               }
-              default:
-                throw new Error("Unknown navigation operation");
+              result = values;
+            } else {
+              const methods = { prepare_rename: "prepareRename", completion: "completion" };
+              result = await client.query(`textDocument/${methods[operation] ?? operation}`, {
+                textDocument,
+                position: point,
+                ...operation === "references" ? { context: { includeDeclaration: false } } : {}
+              });
             }
-            const output = JSON.stringify(result ?? []);
-            if (output.length <= 8e3) return { status: "complete", result: result ?? [] };
-            if (!Array.isArray(result)) return { status: "too_large", note: "Narrow query/path" };
-            const items2 = [];
-            for (const item of result) {
-              if (JSON.stringify([...items2, item]).length > 7600) break;
-              items2.push(item);
+            if (record(result) && result["status"] === "unsupported") return result;
+            if (operation === "completion") {
+              const items2 = Array.isArray(result) ? result : record(result) && Array.isArray(result["items"]) ? result["items"] : [];
+              return {
+                status: "complete",
+                incomplete: record(result) && result["isIncomplete"] === true,
+                result: items2.map(
+                  (item) => record(item) ? { label: item["label"], kind: item["kind"], detail: item["detail"] } : item
+                )
+              };
             }
-            return { status: "partial", items: items2, omitted: result.length - items2.length };
+            return { status: "complete", result: result ?? [] };
           },
           operation,
           { manager: this.manager, signal }
         );
       }
-      async applyRename(edit, version, signal) {
-        if (!edit) return { status: "unchanged", modifiedPaths: [] };
-        const changes = /* @__PURE__ */ new Map();
-        for (const [uri, edits] of Object.entries(edit.changes ?? {})) changes.set(uri, edits);
-        for (const change of edit.documentChanges ?? []) {
-          if ("kind" in change) throw new Error("Resource operations are not permitted by rename");
-          if (changes.has(change.textDocument.uri)) throw new Error("Duplicate rename target");
-          changes.set(change.textDocument.uri, change.edits);
-        }
-        const pending = [];
-        for (const [uri, edits] of changes) {
-          const path = await workspacePath(this.root, fileURLToPath2(uri));
-          await this.preflight(path, signal);
-          const before = await readFile12(path, "utf8");
-          pending.push({ path, before, after: applyTextChanges(before, edits) });
-        }
-        if ((await inventory(this.root, 1e4, signal)).version !== version)
-          throw new Error("Workspace changed during rename; retry");
-        for (const item of pending)
-          if (await readFile12(item.path, "utf8") !== item.before) throw new Error("Rename conflict");
-        signal.throwIfAborted();
-        const modified = [];
-        try {
-          for (const item of pending) {
-            signal.throwIfAborted();
-            await writeFile5(item.path, item.after);
-            modified.push(relative5(this.root, item.path));
-          }
-        } catch (error) {
-          throw new WriteFailure(`${message(error)}; modified paths: ${JSON.stringify(modified)}`, modified);
-        }
-        return { status: "renamed", modifiedPaths: modified };
-      }
-      async format(path, signal) {
+      async documentSymbols(path, signal) {
         const absolute = await workspacePath(this.root, path);
-        const before = await readFile12(absolute, "utf8");
-        const edits = await this.withLspClient(
+        return this.withLspClient(absolute, async (client) => await client.documentSymbols(absolute) ?? [], "symbols", {
+          manager: this.manager,
+          signal
+        });
+      }
+      async renameEdit(args, signal) {
+        const result = await this.navigate({ ...args, operation: "rename" }, signal);
+        if (result["status"] === "unsupported") throw new Error("unsupported: rename");
+        return record(result["result"]) ? result["result"] : null;
+      }
+      async formatEdits(path, signal) {
+        const absolute = await workspacePath(this.root, path);
+        return this.withLspClient(
           absolute,
           async (client) => {
-            if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+            if (!(client instanceof Client) || !client.supports("format")) throw new Error("unsupported: formatting");
             return client.formatting(absolute, this.config.formatting);
           },
           "format",
           { manager: this.manager, signal }
         );
-        const after = applyTextChanges(before, edits);
-        if (await readFile12(absolute, "utf8") !== before) throw new Error("File changed during formatting; retry");
-        if (after === before) return { status: "unchanged", path, modifiedPaths: [] };
-        signal.throwIfAborted();
-        await writeFile5(absolute, after);
-        return { status: "formatted", path, modifiedPaths: [path] };
       }
       async close() {
         await this.manager.stopAll();
@@ -6052,9 +7369,9 @@ var init_language = __esm({
 });
 
 // src/engine.ts
-import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFile as readFile13, stat as stat5 } from "node:fs/promises";
-import { dirname as dirname9, relative as relative6, sep as sep3 } from "node:path";
+import { randomUUID as randomUUID8 } from "node:crypto";
+import { readFile as readFile16, stat as stat5 } from "node:fs/promises";
+import { dirname as dirname9, relative as relative8, sep as sep3 } from "node:path";
 var Engine;
 var init_engine = __esm({
   "src/engine.ts"() {
@@ -6064,7 +7381,9 @@ var init_engine = __esm({
     init_config_files();
     init_environment();
     init_files();
+    init_hook_events();
     init_identity();
+    init_intelligence();
     init_language();
     init_metadata();
     init_metrics();
@@ -6184,7 +7503,7 @@ var init_engine = __esm({
           signal.throwIfAborted();
           try {
             const absolute = await workspacePath(this.root, requested);
-            const path = relative6(this.root, absolute);
+            const path = relative8(this.root, absolute);
             session.touched.add(path);
             session.current.add(path);
             if ((await stat5(absolute)).size > BUDGET.fileBytes) {
@@ -6193,7 +7512,7 @@ var init_engine = __esm({
             }
             const identity = await analysisIdentity(this.root, [path], config, signal);
             this.identities.set(path, identity);
-            const content = hash(await readFile13(absolute, { encoding: "utf8", signal }));
+            const content = hash(await readFile16(absolute, { encoding: "utf8", signal }));
             const key = `${source === "both" ? "" : `${source}:`}${path}`;
             const cached = this.cache.get(key);
             if (snapshot.complete && cached?.version === this.projectVersion(snapshot, path, config) && cached.identity === identity && cached.content === content && cached.result.state === "complete")
@@ -6220,7 +7539,7 @@ var init_engine = __esm({
             note: "Checker returned no result"
           };
           try {
-            if (hash(await readFile13(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
+            if (hash(await readFile16(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
               result.state = "stale";
               result.note = "File/tool/configuration changed during diagnostics; retry";
             }
@@ -6251,7 +7570,7 @@ var init_engine = __esm({
         return [...results.values()];
       }
       dispatch(operation, args, signal) {
-        const writes = operation === "lsp_format" || operation === "lsp_rename";
+        const writes = operation === "apply";
         let started = false;
         const task = this.queue.then(() => {
           started = true;
@@ -6259,13 +7578,13 @@ var init_engine = __esm({
           return withToolResolution(() => this.execute(operation, args, signal));
         });
         this.queue = task.catch(() => void 0);
-        return new Promise((resolve12, reject) => {
+        return new Promise((resolve13, reject) => {
           const abort = () => {
             if (!started || !writes) reject(new Error("Request cancelled while queued or executing"));
           };
           signal.addEventListener("abort", abort, { once: true });
           if (signal.aborted) abort();
-          void task.then(resolve12, reject).finally(() => signal.removeEventListener("abort", abort));
+          void task.then(resolve13, reject).finally(() => signal.removeEventListener("abort", abort));
         });
       }
       async paths(args, signal) {
@@ -6279,7 +7598,7 @@ var init_engine = __esm({
           if (typeof value !== "string") continue;
           signal.throwIfAborted();
           const absolute = await workspacePath(this.root, value);
-          if ((await stat5(absolute)).isFile()) paths.add(relative6(this.root, absolute));
+          if ((await stat5(absolute)).isFile()) paths.add(relative8(this.root, absolute));
           else {
             const scoped = await inventory(this.root, BUDGET.files, signal, config.exclude, absolute);
             complete &&= scoped.complete;
@@ -6312,14 +7631,16 @@ var init_engine = __esm({
           this.configVersion = config.version;
         }
         if (config.valid) this.lastConfig = config;
-        if (!config.valid && operation === "lsp_status") {
+        if (!config.valid && operation === "status") {
           await this.language?.update(config);
           this.configVersion = config.version;
         }
         const store = new Metadata(this.root);
-        const ids = await store.ids();
+        const allIds = await store.ids();
+        const ids = [...new Set(allIds.map(rootSession))];
         for (const id2 of this.sessions.keys())
-          if (!ids.includes(id2) && (await store.read(id2)).turn === "__ended__") this.sessions.delete(id2);
+          if (isActorSession(id2) || !ids.includes(id2) && (await store.read(id2)).turn === "__ended__")
+            this.sessions.delete(id2);
         for (const id2 of ids) {
           const state = await store.read(id2);
           if (state.turn === "__ended__") {
@@ -6327,10 +7648,16 @@ var init_engine = __esm({
             continue;
           }
           const session = this.session(id2, state.turn);
-          session.touched = new Set(state.touched);
-          session.current = new Set(state.current);
+          for (const actor of allIds.filter((candidate) => candidate !== id2 && rootSession(candidate) === id2)) {
+            const visible = await store.read(actor);
+            if (visible.epoch !== state.epoch || visible.turn === "__ended__") continue;
+            state.touched.push(...visible.touched);
+            state.current.push(...visible.current);
+          }
+          session.touched = /* @__PURE__ */ new Set([...session.touched, ...state.touched]);
+          session.current = /* @__PURE__ */ new Set([...session.current, ...state.current]);
         }
-        if (operation === "lsp_status") {
+        if (operation === "status") {
           this.language ??= new Languages(this.root, config);
           const targets = args["path"] ? [text(args["path"])] : Object.entries(config.extensions).map(([, extensions]) => `status${extensions[0]}`);
           return {
@@ -6350,13 +7677,13 @@ var init_engine = __esm({
             sessions: [...this.sessions.keys()]
           };
         }
-        if (!(operation === "check_diagnostics" && args["run"] === "cached")) assertConfiguration(config);
+        if (!(operation === "diagnostics" && args["run"] === "cached")) assertConfiguration(config);
         if (operation === "automatic_batch") {
-          const paths2 = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [];
+          const paths = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [];
           return {
             operation,
             results: await this.check(
-              paths2.slice(0, BUDGET.batch),
+              paths.slice(0, BUDGET.batch),
               text(args["session"]),
               text(args["turn"]),
               false,
@@ -6368,12 +7695,12 @@ var init_engine = __esm({
           };
         }
         const id = args["scope"] === "paths" || args["scope"] === void 0 ? text(args["session"], "manual") : this.id(args["session"]);
-        if (operation === "check_diagnostics") {
+        if (operation === "diagnostics") {
           if (!config.valid && args["run"] === "cached" && this.lastConfig) {
             const output = await this.diagnostics(args, id, signal, this.lastConfig, store);
             return {
               ...output,
-              operation: "check_diagnostics",
+              operation: "diagnostics",
               partial: true,
               configurationIssues: config.issues,
               errors: Number(output["errors"]),
@@ -6387,67 +7714,91 @@ var init_engine = __esm({
           }
           return this.diagnostics(args, id, signal, config, store);
         }
-        if (operation === "lsp_rename") args = { ...args, operation: "rename" };
-        if (operation === "lsp_navigation" || operation === "lsp_rename") {
-          const path = relative6(this.root, await workspacePath(this.root, text(args["path"])));
-          const identity = await analysisIdentity(this.root, [path], config, signal);
-          if (this.identities.has(path) && this.identities.get(path) !== identity) {
-            for (const key of this.cache.keys()) if (key.replace(/^(?:lsp|lint):/, "") === path) this.cache.delete(key);
-          }
-          this.identities.set(path, identity);
-          const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, true);
-          snapshot.version = hash(snapshot.version + config.version);
-          await this.synchronize(snapshot);
+        if (["navigate", "rename", "format", "inspect", "actions", "apply"].includes(operation)) {
           this.language ??= new Languages(this.root, config);
-          const before = args["operation"] === "rename" ? await inventory(this.root, BUDGET.files, signal) : void 0;
-          let output;
+          this.intelligence ??= new Intelligence(this.root, this.language);
+          if (args["cursor"]) args = this.intelligence.pageArguments(args);
+          let paths;
+          if (operation === "apply") paths = this.intelligence.planPaths(text(args["plan"]));
+          else if (operation === "actions" && args["operation"] === "preview" && Array.isArray(args["ids"]) && args["ids"].length)
+            paths = this.intelligence.actionPaths(args["ids"]);
+          else {
+            if (!args["path"] && !args["paths"]) throw new Error("Explicit path or paths required");
+            paths = (await this.paths(args, signal)).paths;
+          }
+          if (paths.length > 200 && operation !== "apply" && !args["ids"])
+            throw new Error("At most 200 explicit files; narrow scope");
+          const bindings = [
+            .../* @__PURE__ */ new Set([
+              ...paths,
+              ...typeof args["path"] === "string" ? [args["path"]] : [],
+              ...Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : []
+            ])
+          ];
+          let identity;
           try {
-            output = await this.language.navigate(args, signal);
-          } finally {
-            if (before) this.cache.clear();
-          }
-          if (before) {
-            this.cache.clear();
-            const modifiedPaths = "modifiedPaths" in output ? output.modifiedPaths : [];
-            return { ...output, operation, diagnostics: await this.afterWrite(modifiedPaths, id, signal) };
-          }
-          return { ...output, operation };
-        }
-        const scope2 = await this.paths(args, signal);
-        const paths = scope2.paths;
-        if (operation === "lsp_format") {
-          if (!args["paths"] && !args["path"]) throw new Error("Explicit formatting paths required");
-          if (paths.length > 200) throw new Error("Format at most 200 explicitly scoped files");
-          if (!config.formattingEnabled)
-            throw new Error("Configuration error: formatting disabled; repair formatting configuration");
-          this.language ??= new Languages(this.root, config);
-          for (const path of paths) {
-            const runner = await preflightRunner(this.root, path, config, signal);
-            if (!runner) await this.language.preflight(path, signal, "format");
-          }
-          const writes = [];
-          const modifiedPaths = [];
-          try {
-            for (const path of paths) {
-              signal.throwIfAborted();
-              writes.push(
-                await formatWithRunner(this.root, path, signal, config) ?? await this.language.format(path, signal)
-              );
-              if (writes.at(-1)?.status === "formatted") modifiedPaths.push(path);
-            }
+            identity = await this.intelligenceIdentity(bindings, config, signal);
           } catch (error) {
-            throw new WriteFailure(`${message(error)}; completed writes: ${JSON.stringify(writes)}`, modifiedPaths);
-          } finally {
-            this.cache.clear();
+            if (operation === "apply") this.intelligence.plans.discard(text(args["plan"]));
+            throw error;
           }
-          return { operation, modifiedPaths, results: writes, diagnostics: await this.afterWrite(paths, id, signal) };
+          if (operation === "apply") {
+            try {
+              const modifiedPaths = await this.intelligence.plans.apply(
+                text(args["plan"]),
+                identity,
+                this.root,
+                signal
+              );
+              this.cache.clear();
+              return {
+                operation,
+                status: "applied",
+                modifiedPaths,
+                diagnostics: await this.afterWrite(modifiedPaths, id, signal)
+              };
+            } catch (error) {
+              this.cache.clear();
+              throw error;
+            }
+          }
+          const output = await this.intelligence.execute(operation, args, paths, config, identity, signal, bindings);
+          if (identity !== await this.intelligenceIdentity(bindings, config, signal))
+            throw new Error("Workspace or tools changed during query; repeat without cursor");
+          return { ...output, operation };
         }
         throw new Error("Unknown tool");
       }
+      async intelligenceIdentity(paths, config, signal) {
+        const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, paths);
+        if (!snapshot.complete)
+          throw new Error("Workspace snapshot incomplete; cannot establish query or plan freshness");
+        return hash(
+          JSON.stringify([
+            snapshot.version,
+            config.version,
+            executionEnvironment(),
+            await this.pageIdentity(paths, config, snapshot, signal),
+            await Promise.all(paths.map(async (path) => [path, await workspacePath(this.root, path)]))
+          ])
+        );
+      }
       async afterWrite(paths, id, signal) {
         try {
-          const results = await this.check(paths, id, this.session(id).turn, false, signal);
-          return { state: results.every((result) => result.state === "complete") ? "complete" : "partial", results };
+          const config = await configuration(this.root);
+          const snapshot = await inventory(this.root, BUDGET.files, signal, config.exclude, this.root, false, paths);
+          const results = await this.check(paths, id, this.session(id).turn, false, signal, 0, snapshot, config);
+          return {
+            state: snapshot.complete && results.length === paths.length && results.every((result) => result.state === "complete") ? "complete" : "partial",
+            errors: results.flatMap((result) => result.findings).filter((finding) => finding.severity === "error").length,
+            warnings: results.flatMap((result) => result.findings).filter((finding) => finding.severity === "warning").length,
+            files: results.map((result) => ({
+              path: result.path,
+              state: result.state,
+              ...result.note ? { note: result.note.slice(0, 1e3) } : {}
+            })),
+            note: "Read diagnostics run=cached for finding details; writes are already complete."
+          };
         } catch (error) {
           return {
             state: "unavailable",
@@ -6463,7 +7814,7 @@ var init_engine = __esm({
         const scope2 = text(args["scope"], "paths");
         if (scope2 === "paths" && (!args["path"] && !args["paths"] || args["path"] === "." || Array.isArray(args["paths"]) && args["paths"].includes(".")))
           throw new Error(
-            "Migration required: use check_project for workspace checks; check_diagnostics requires specific paths or turn/session scope"
+            "Migration required: use check for workspace checks; diagnostics requires specific paths or turn/session scope"
           );
         const source = text(args["source"], "both");
         const run2 = text(args["run"], "active");
@@ -6521,7 +7872,7 @@ var init_engine = __esm({
             for (const value of values) {
               if (typeof value !== "string") throw new Error("paths requires strings");
               const absolute = await workspacePath(this.root, value);
-              const path = relative6(this.root, absolute);
+              const path = relative8(this.root, absolute);
               if ((await stat5(absolute)).isFile()) {
                 if (!codeLanguage(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
                 selected2.add(path);
@@ -6570,18 +7921,28 @@ var init_engine = __esm({
             ];
           }
         }
+        const matches = (finding) => (!args["rule"] || finding.rule === args["rule"] || finding.source === args["rule"]) && (!args["severity"] || finding.severity === args["severity"]);
+        results = results.map((result) => ({ ...result, findings: result.findings.filter(matches).map(publicFinding) }));
+        const byRule = {};
+        const byFile = {};
+        for (const result of results)
+          for (const finding of result.findings) {
+            const rule = finding.rule ?? finding.source;
+            byRule[rule] = (byRule[rule] ?? 0) + 1;
+            byFile[result.path] = (byFile[result.path] ?? 0) + 1;
+          }
         const selected = [];
         let size = 0;
         for (const result of results.slice(index)) {
-          const bytes = JSON.stringify(result).length;
-          if (selected.length && (size + bytes > 24e3 || selected.length >= BUDGET.batch)) break;
+          const bytes2 = JSON.stringify(result).length;
+          if (selected.length && (size + bytes2 > 24e3 || selected.length >= BUDGET.batch)) break;
           selected.push(result);
-          size += bytes;
+          size += bytes2;
         }
         let next;
         if (index + selected.length < results.length) {
-          const cursor = randomUUID5();
-          this.pages.set(cursor, {
+          const cursor2 = randomUUID8();
+          this.pages.set(cursor2, {
             version: snapshot.version,
             results,
             index: index + selected.length,
@@ -6590,11 +7951,12 @@ var init_engine = __esm({
             generation: this.generation
           });
           while (this.pages.size > 32) this.pages.delete(this.pages.keys().next().value ?? "");
-          next = { ...args, refresh: void 0, workspace: this.root, cursor };
+          next = { ...args, refresh: void 0, workspace: this.root, cursor: cursor2 };
         }
         const partial = !snapshot.complete || results.some((result) => result.state !== "complete");
         return {
-          operation: "check_diagnostics",
+          operation: "diagnostics",
+          summary: { byRule, byFile },
           inventoryComplete: snapshot.complete,
           scope: scope2,
           source,
@@ -6648,7 +8010,7 @@ var init_engine = __esm({
           const absolute = await workspacePath(this.root, path);
           const info = await stat5(absolute);
           if (info.size > BUDGET.fileBytes) return "oversized";
-          return hash(await readFile13(absolute, { encoding: "utf8", signal }));
+          return hash(await readFile16(absolute, { encoding: "utf8", signal }));
         } catch {
           signal.throwIfAborted();
           return "unavailable";
@@ -6667,6 +8029,8 @@ var init_engine = __esm({
       async close() {
         const language = this.language;
         this.language = void 0;
+        this.intelligence?.clear();
+        this.intelligence = void 0;
         await language?.close();
       }
     };
@@ -6675,18 +8039,18 @@ var init_engine = __esm({
 
 // src/ipc.ts
 import { spawn as spawn4 } from "node:child_process";
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { chmod, lstat as lstat4, mkdir as mkdir5, readFile as readFile14, rename as rename5, writeFile as writeFile6 } from "node:fs/promises";
+import { randomUUID as randomUUID9 } from "node:crypto";
+import { chmod, lstat as lstat5, mkdir as mkdir5, readFile as readFile17, rename as rename5, writeFile as writeFile5 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
 import { join as join15 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 async function serviceLocation(root) {
   const user = process.getuid?.() ?? hash(homedir6()).slice(0, 10);
   const directory2 = join15(tmpdir3(), `clsp6-${user}`);
   await mkdir5(directory2, { recursive: true, mode: 448 });
-  const info = await lstat4(directory2);
+  const info = await lstat5(directory2);
   if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
     throw new Error("Unsafe service directory permissions");
   const identity = await workspaceIdentity(root);
@@ -6695,10 +8059,10 @@ async function serviceLocation(root) {
 }
 async function readEndpoint(location) {
   try {
-    const info = await lstat4(location.endpoint);
+    const info = await lstat5(location.endpoint);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
       throw new Error("Unsafe service endpoint permissions");
-    const value = JSON.parse(await readFile14(location.endpoint, "utf8"));
+    const value = JSON.parse(await readFile17(location.endpoint, "utf8"));
     if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["pid"] !== "number" || typeof value["token"] !== "string" || value["address"] !== location.address)
       throw new Error("Invalid service endpoint");
     return value;
@@ -6709,18 +8073,18 @@ async function readEndpoint(location) {
 }
 async function exchange(endpoint, operation, args, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const socket = createConnection(endpoint.address);
     let received = "";
     let settled = false;
-    const writes = operation === "lsp_rename" || operation === "lsp_format";
+    const writes = operation === "apply";
     const finish = (error, output) => {
       if (settled) return;
       settled = true;
       signal.removeEventListener("abort", cancel);
       socket.destroy();
       if (error) reject(error);
-      else if (output) resolve12(output);
+      else if (output) resolve13(output);
       else reject(new Error("Missing service output"));
     };
     const cancel = () => {
@@ -6804,10 +8168,10 @@ async function ensureService(root, signal) {
   if (previous && alive(previous.pid)) throw new Error("Service process alive but handshake unavailable; retry later");
   const child = spawn4(
     process.execPath,
-    [...process.execArgv, fileURLToPath3(import.meta.url), "service", root, location.identity, randomUUID6()],
+    [...process.execArgv, fileURLToPath6(import.meta.url), "service", root, location.identity, randomUUID9()],
     {
       ...HIDDEN_PROCESS,
-      cwd: root,
+      cwd: location.directory,
       env: executionEnvironment(),
       detached: true,
       stdio: "ignore"
@@ -6833,8 +8197,8 @@ async function ensureService(root, signal) {
 }
 async function publishEndpoint(location, token) {
   if (process.platform !== "win32") await chmod(location.address, 384);
-  const temporary2 = `${location.endpoint}.${randomUUID6()}`;
-  await writeFile6(
+  const temporary2 = `${location.endpoint}.${randomUUID9()}`;
+  await writeFile5(
     temporary2,
     JSON.stringify({
       pid: process.pid,
@@ -6861,25 +8225,92 @@ var init_ipc = __esm({
 });
 
 // src/hook-inbox.ts
-import { randomUUID as randomUUID7 } from "node:crypto";
-import { lstat as lstat5, readdir as readdir4, readFile as readFile15, rm as rm4, writeFile as writeFile7 } from "node:fs/promises";
+import { randomUUID as randomUUID10 } from "node:crypto";
+import { lstat as lstat6, readdir as readdir4, readFile as readFile18, rm as rm4, writeFile as writeFile6 } from "node:fs/promises";
 import { join as join16 } from "node:path";
 async function registerHook(root, input, signal) {
   const location = await serviceLocation(root);
-  const session = text(input["session_id"]);
-  const state = await new Metadata(root).update(session, signal, () => void 0);
-  const path = join16(location.directory, `${location.identity}.${Date.now()}.${randomUUID7()}.hook`);
-  await writeFile7(
+  const parent = text(input["session_id"]);
+  const session = hookSession(input);
+  const store = new Metadata(root);
+  const event = text(input["hook_event_name"]);
+  if (event === "SessionStart") {
+    const previous = await store.read(parent);
+    if (input["source"] !== "resume" || previous.turn === "__ended__" || !previous.baselineAttempted)
+      await store.start(parent, signal);
+    if (input["source"] === "resume" && (previous.turn === "__ended__" || !previous.baselineAttempted))
+      await store.update(parent, signal, (current) => {
+        current.baselineAttempted = true;
+        current.edited = true;
+      });
+  }
+  let state = await store.update(parent, signal, () => void 0);
+  if (state.turn === "__ended__") return;
+  if (event === "SessionStart" && !state.baselineAttempted) {
+    let reference = null;
+    try {
+      const config = await configuration(root);
+      const snapshot = await inventory(
+        root,
+        BUDGET.files,
+        AbortSignal.any([signal, AbortSignal.timeout(200)]),
+        config.exclude
+      );
+      if (snapshot.complete) reference = await store.shared(Object.fromEntries(snapshot.files));
+    } catch {
+    }
+    state = await store.update(parent, signal, (current) => {
+      if (current.epoch !== state.epoch) return false;
+      current.baselineAttempted = true;
+      current.baseline ??= reference;
+      if (!reference) current.edited = true;
+      return true;
+    });
+  }
+  if (event === "PostToolUse")
+    await store.update(parent, signal, (current) => {
+      if (current.epoch !== state.epoch) return false;
+      current.edited = true;
+      return true;
+    });
+  await store.actor(session, signal);
+  const call = text(input["tool_use_id"]);
+  const id = hash(
+    JSON.stringify([state.epoch, session, event, event === "PostToolUse" && call ? call : randomUUID10()])
+  );
+  let terminal = false;
+  await store.update(session, signal, (current) => {
+    if (current.epoch !== state.epoch || current.turn === "__ended__") {
+      terminal = true;
+      return false;
+    }
+    const previous = current.hookEvents[id];
+    if (previous) {
+      terminal = previous.state !== "queued" && previous.state !== "running";
+      return false;
+    }
+    current.hookEvents[id] = { turn: text(input["turn_id"]), state: "queued" };
+    return true;
+  });
+  if (terminal) return { id, session };
+  const path = join16(location.directory, `${location.identity}.${id}.hook`);
+  await writeFile6(
     path,
     JSON.stringify({
       protocol: SERVICE_PROTOCOL,
       identity: location.identity,
+      id,
+      created: Date.now(),
+      session,
       epoch: state.epoch,
       input,
       environment: executionEnvironment()
     }),
     { mode: 384, flag: "wx", signal }
-  );
+  ).catch((error) => {
+    if (!record(error) || error["code"] !== "EEXIST") throw error;
+  });
+  return { id, session };
 }
 async function registeredHooks(root) {
   const location = await serviceLocation(root);
@@ -6888,14 +8319,17 @@ async function registeredHooks(root) {
     if (!name.startsWith(`${location.identity}.`) || !name.endsWith(".hook")) continue;
     const path = join16(location.directory, name);
     try {
-      const info = await lstat5(path);
+      const info = await lstat6(path);
       if (info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
         throw new Error("Unsafe hook registration");
-      const value = JSON.parse(await readFile15(path, "utf8"));
-      if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["epoch"] !== "string" || !record(value["input"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string"))
+      const value = JSON.parse(await readFile18(path, "utf8"));
+      if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["epoch"] !== "string" || typeof value["id"] !== "string" || typeof value["created"] !== "number" || typeof value["session"] !== "string" || !record(value["input"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string"))
         throw new Error("Invalid hook registration");
       result.push({
         path,
+        id: value["id"],
+        created: value["created"],
+        session: value["session"],
         epoch: value["epoch"],
         input: value["input"],
         environment: value["environment"]
@@ -6909,7 +8343,11 @@ async function registeredHooks(root) {
 var init_hook_inbox = __esm({
   "src/hook-inbox.ts"() {
     "use strict";
+    init_budgets();
+    init_config();
     init_environment();
+    init_files();
+    init_hook_events();
     init_ipc();
     init_metadata();
     init_results();
@@ -6927,21 +8365,91 @@ var init_runtime = __esm({
     init_budgets();
     init_config();
     init_engine();
+    init_environment();
+    init_files();
+    init_hook_events();
     init_hook_inbox();
+    init_identity();
     init_ipc();
     init_metadata();
+    init_output_pages();
     init_results();
     init_write_intent();
     Runtime = class {
       constructor() {
         this.active = /* @__PURE__ */ new Set();
+        this.pages = new OutputPages("view:");
+      }
+      outcomeIdentity(root) {
+        return hash(JSON.stringify([root, executionEnvironment(), "apply-outcome"]));
+      }
+      async pageIdentity(root, signal) {
+        const config = await configuration(root);
+        const snapshot = await inventory(root, BUDGET.files, signal, config.exclude);
+        const paths = [
+          ...new Map(
+            [...snapshot.files.keys()].map((path) => [
+              path.replace(/[^/\\]+$/, "") + path.slice(path.lastIndexOf(".")),
+              path
+            ])
+          ).values()
+        ];
+        return hash(
+          JSON.stringify([
+            root,
+            config.version,
+            snapshot.version,
+            executionEnvironment(),
+            await analysisIdentity(root, paths, config, signal).catch(message)
+          ])
+        );
+      }
+      async output(root, operation, args, value, signal) {
+        if (["hook", "hook_wait", "hook_ack", "session_end"].includes(operation)) return value;
+        const clean = (item) => {
+          if (Array.isArray(item)) return item.map(clean);
+          if (!record(item)) return item;
+          if (typeof item["message"] === "string" && typeof item["source"] === "string" && typeof item["line"] === "number" && typeof item["path"] === "string")
+            return publicFinding(item);
+          return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, clean(entry)]));
+        };
+        let output = clean(value);
+        if (operation === "status" && record(output["configuration"])) {
+          const config = output["configuration"];
+          output = {
+            ...output,
+            configuration: {
+              valid: config["valid"],
+              automaticDiagnostics: config["automaticDiagnostics"],
+              stopGate: config["stopGate"]
+            }
+          };
+          if (Array.isArray(output["tools"]))
+            output["tools"] = output["tools"].map(
+              (item) => record(item) ? Object.fromEntries(Object.entries(item).filter(([key]) => !["server", "extensions"].includes(key))) : item
+            );
+        }
+        const compact = (item) => Array.isArray(item) ? item.length <= 20 && item.every(compact) : record(item) ? Object.values(item).every(compact) : true;
+        if (Buffer.byteLength(JSON.stringify(output)) < 6200 && compact(output)) return output;
+        return {
+          ...this.pages.write(
+            output,
+            { ...args, workspace: root },
+            operation === "apply" ? this.outcomeIdentity(root) : await this.pageIdentity(root, signal)
+          ),
+          operation
+        };
       }
       async request(root, operation, args, signal) {
-        const event = operation === "hook" ? text(args["hook_event_name"], "PostToolUse") : "";
-        if (event === "PreToolUse") return { operation: "hook", output: { kind: "silent" } };
+        if (operation === "hook") {
+          const normalized = normalizeHook(args);
+          if (!normalized) return { operation, output: { kind: "silent" } };
+          args = normalized;
+        }
+        const event = operation === "hook" ? text(args["hook_event_name"]) : "";
         if (!isAbsolute7(root)) throw new Error("workspace must be an absolute project directory");
         root = await realpath5(root);
-        if (operation === "hook" && event !== "SessionEnd") {
+        if (operation === "hook" && event !== "SessionEnd" && event !== "Interrupt") {
           const config = await configuration(root);
           if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
             return { operation: "hook", output: { kind: "silent" } };
@@ -6951,19 +8459,52 @@ var init_runtime = __esm({
         this.active.add(controller);
         signal = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(BUDGET.request)]);
         try {
-          const passiveHook = event === "PostToolUse" && writeIntent(root, args).kind === "read" || event === "SessionEnd";
-          if (operation === "hook" && !passiveHook && event !== "PreToolUse" && args["stop_hook_active"] !== true)
-            await registerHook(root, args, signal);
+          if (typeof args["cursor"] === "string" && args["cursor"].startsWith("view:"))
+            return {
+              ...this.pages.read(
+                { ...args, workspace: root },
+                operation === "apply" ? this.outcomeIdentity(root) : await this.pageIdentity(root, signal),
+                operation
+              ),
+              operation
+            };
+          const passiveHook = event === "PostToolUse" && writeIntent(root, args).kind === "read" || ["SessionEnd", "Interrupt", "SubagentStop"].includes(event);
+          if (operation === "hook" && !passiveHook && args["stop_hook_active"] !== true) {
+            const registered = await registerHook(root, args, signal);
+            if (!registered) return { operation, output: { kind: "silent" } };
+            args = { ...args, registration: registered.id };
+          }
           const existing = await existingService(root, signal);
-          const passive = operation === "lsp_status" || passiveHook || operation === "hook_ack" || operation === "check_diagnostics" && args["run"] === "cached" || operation === "session_end" || operation === "check_project" && args["run"] === "cached";
+          const passive = operation === "status" || passiveHook || operation === "hook_ack" || operation === "hook_wait" || operation === "diagnostics" && args["run"] === "cached" || operation === "session_end" || operation === "check" && args["run"] === "cached";
           if (!existing && passive) {
             if (operation === "hook_ack") return { operation };
+            if (operation === "hook_wait") return { operation, state: "unavailable", output: { kind: "silent" } };
             if (operation === "hook") {
-              if (event === "SessionEnd") await new Metadata(root).end(text(args["session_id"]), signal);
+              const store = new Metadata(root), session = text(args["session_id"]);
+              if (event === "SessionEnd") await store.end(session, signal);
+              if (event === "Interrupt")
+                await store.update(session, signal, (state) => {
+                  if (state.turn === "__ended__") return false;
+                  const turn = text(args["turn_id"]);
+                  if (turn) state.interrupts[turn] = (state.interrupts[turn] ?? 0) + 1;
+                  else state.waitEpoch++;
+                  return true;
+                });
+              if (event === "Interrupt" && text(args["turn_id"])) {
+                for (const id of [
+                  session,
+                  ...(await store.ids()).filter((id2) => id2 !== session && rootSession(id2) === session)
+                ])
+                  await store.update(id, signal, (state) => {
+                    for (const entry of Object.values(state.hookEvents))
+                      if (entry.turn === args["turn_id"] && ["queued", "running"].includes(entry.state))
+                        entry.state = "cancelled";
+                  });
+              }
               return { operation, output: { kind: "silent" } };
             }
             if (operation === "session_end") return { operation };
-            if (operation === "check_project")
+            if (operation === "check")
               return {
                 operation,
                 job: typeof args["job"] === "string" ? args["job"] : "",
@@ -6976,13 +8517,42 @@ var init_runtime = __esm({
             const engine = new Engine(root);
             try {
               const output = await engine.dispatch(operation, args, signal);
-              return operation === "lsp_status" ? { ...output, service: { state: "stopped" }, automaticTasks: [] } : output;
+              return operation === "status" ? await this.output(
+                root,
+                operation,
+                args,
+                {
+                  ...output,
+                  service: { state: "stopped" },
+                  automaticTasks: { running: 0, pending: 0, complete: 0 },
+                  hookTasks: { mode: "native-async", queued: 0, running: 0 }
+                },
+                signal
+              ) : await this.output(root, operation, args, output, signal);
             } finally {
               await engine.dispose();
             }
           }
           const endpoint = existing ?? await ensureService(root, signal);
-          return await exchange(endpoint, operation, args, signal);
+          return await this.output(root, operation, args, await exchange(endpoint, operation, args, signal), signal);
+        } catch (error) {
+          if (["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
+            operation
+          ))
+            return this.output(
+              root,
+              operation,
+              args,
+              {
+                operation,
+                isError: true,
+                status: failureKind(message(error)),
+                reason: message(error),
+                ...operation === "apply" ? { modifiedPaths: error instanceof WriteFailure ? error.modifiedPaths : [] } : {}
+              },
+              new AbortController().signal
+            );
+          throw error;
         } finally {
           this.active.delete(controller);
         }
@@ -7013,30 +8583,59 @@ async function runHookCli() {
     throw new Error("Invalid Hook JSON");
   }
   if (!record(parsed)) throw new Error("Hook input must be an object");
-  const event = text(parsed["hook_event_name"], "PostToolUse");
-  if (event === "PreToolUse") return;
-  const cwd = text(parsed["cwd"], process.cwd());
-  const shell = isShellTool(parsed);
-  const budget = event === "SessionEnd" ? 1600 : event === "Stop" || event === "SubagentStop" ? BUDGET.stop : event === "SessionStart" || event === "PostToolUse" && shell ? BUDGET.quickHook : BUDGET.hook;
+  const normalized = normalizeHook(parsed);
+  if (!normalized) return;
+  parsed = normalized;
+  const event = text(normalized["hook_event_name"]);
+  const began = Date.now();
+  const cwd = text(normalized["cwd"], process.cwd());
+  const budget = event === "SessionEnd" ? 1600 : event === "Interrupt" ? 1e3 : event === "Stop" || event === "SubagentStop" ? BUDGET.ordinaryStop : event === "SessionStart" ? BUDGET.quickHook : BUDGET.asyncHook;
   let signal = AbortSignal.timeout(budget);
   try {
-    const intent = shell ? void 0 : writeIntent(cwd, parsed);
+    const intent = writeIntent(cwd, normalized);
     if (event === "PostToolUse" && intent?.kind === "read") signal = AbortSignal.timeout(BUDGET.quickHook);
     const root = await realpath6(cwd);
+    if (event === "Stop" && (await configuration(root)).stopGate === "introduced-errors")
+      signal = AbortSignal.timeout(Math.max(1, BUDGET.stop - (Date.now() - began)));
     const runtime = new Runtime();
     try {
-      const result = await runtime.request(root, "hook", parsed, signal);
+      let result = await runtime.request(root, "hook", normalized, signal);
+      if (event === "PostToolUse" && intent.kind !== "read" && typeof result["registration"] === "string") {
+        do {
+          result = await runtime.request(
+            root,
+            "hook_wait",
+            {
+              ...normalized,
+              registration: result["registration"],
+              revision: result["revision"],
+              waitToken: result["waitToken"]
+            },
+            signal
+          );
+        } while (["queued", "running", "waiting"].includes(text(result["state"])));
+      }
+      if (result["state"] === "failed" || result["state"] === "unavailable") {
+        process.stdout.write(
+          `${JSON.stringify({ systemMessage: "Codex CodeIntel: background analysis failed; uncertain diagnostics remain pending. Use status or cached diagnostics for details." })}
+`
+        );
+        return;
+      }
       const output = renderHook(result["output"]);
       if (output) {
         await new Promise(
-          (resolve12, reject) => process.stdout.write(`${JSON.stringify(output)}
-`, (error) => error ? reject(error) : resolve12())
+          (resolve13, reject) => process.stdout.write(`${JSON.stringify(output)}
+`, (error) => error ? reject(error) : resolve13())
         );
         if (typeof result["deliveryId"] === "string") {
           await runtime.request(
             root,
             "hook_ack",
-            { session: text(parsed["session_id"]), deliveryId: result["deliveryId"] },
+            {
+              session: text(result["deliverySession"], text(normalized["session_id"])),
+              deliveryId: result["deliveryId"]
+            },
             AbortSignal.any([signal, AbortSignal.timeout(100)])
           ).catch(() => void 0);
         }
@@ -7046,17 +8645,17 @@ async function runHookCli() {
     }
   } catch (error) {
     const context = signal.aborted ? "Codex CodeIntel: Hook budget reached; unfinished checks remain pending. Background tasks already registered continue; later Hooks or MCP queries can retrieve results." : `Codex CodeIntel unavailable: ${message(error).slice(0, 300)}`;
-    process.stdout.write(
-      `${JSON.stringify(event === "PostToolUse" ? { hookSpecificOutput: { hookEventName: event, additionalContext: context } } : { systemMessage: context })}
-`
-    );
+    process.stdout.write(`${JSON.stringify({ systemMessage: context })}
+`);
   }
 }
 var init_codex_hook = __esm({
   "src/codex-hook.ts"() {
     "use strict";
     init_budgets();
+    init_config();
     init_hook_engine();
+    init_hook_events();
     init_results();
     init_runtime();
     init_write_intent();
@@ -7074,11 +8673,12 @@ function tool(name, description, properties, required, readOnly) {
   };
 }
 function validateArguments(name, args) {
-  if (args["refresh"] !== void 0 && !(name === "lsp_status" || ["check_diagnostics", "check_project"].includes(name) && args["run"] !== "cached"))
-    throw new Error("refresh requires active diagnostics or lsp_status");
+  if (args["refresh"] !== void 0 && !(name === "status" || ["diagnostics", "check"].includes(name) && args["run"] !== "cached"))
+    throw new Error("refresh requires active diagnostics or status");
   const definition = TOOLS.find((entry) => entry.name === name);
   if (!definition) throw new Error("Unknown tool");
-  for (const key of definition.inputSchema.required) if (args[key] === void 0) throw new Error(`${key} required`);
+  for (const key of definition.inputSchema.required)
+    if (args[key] === void 0 && (key === "workspace" || !args["cursor"])) throw new Error(`${key} required`);
   for (const [key, value] of Object.entries(args)) {
     const schema = definition.inputSchema.properties[key];
     if (!record(schema))
@@ -7124,7 +8724,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     if (method === "initialize") {
       ok({
         protocolVersion: text(params["protocolVersion"], "2024-11-05"),
-        serverInfo: { name: "codex-codeintel", version: "0.9.0" },
+        serverInfo: { name: "codex-codeintel", version: "0.10.0" },
         // keep in sync with package.json
         capabilities: { tools: { listChanged: false } }
       });
@@ -7158,17 +8758,23 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     controllers.set(id, controller);
     try {
       const name = text(params["name"]);
-      if (name === "lsp_diagnostics")
-        throw new Error("Migration required: use check_diagnostics source=lsp; see docs/usage.md#upgrade");
+      if (LEGACY_TOOLS[name])
+        throw new Error(
+          "Migration required: " + name + " was removed; use " + LEGACY_TOOLS[name] + (name === "lsp_rename" || name === "lsp_format" ? " to preview, then apply the plan" : "")
+        );
       if (!TOOLS.some((entry) => entry.name === name)) throw new Error("Unknown tool");
       if (!record(params["arguments"])) throw new Error("Tool arguments required");
       const args = params["arguments"];
       validateArguments(name, args);
       const result = await runtime.request(text(args["workspace"]), name, args, controller.signal);
       const structured = result;
-      const rendered = name === "check_diagnostics" && Array.isArray(result["results"]) ? `${render(result["results"])}${result["next"] ? "\nMore results: follow structured next arguments." : ""}${result["inventoryComplete"] === false ? "\nDependency inventory incomplete; workspace dependency freshness unverified" : ""}` : name === "lsp_format" && Array.isArray(result["results"]) ? result["results"].map(
-        (item) => record(item) ? `${item["status"] === "formatted" ? "Formatted" : "Unchanged"}: ${item["path"]}` : ""
-      ).join("\n") : name === "lsp_rename" && Array.isArray(result["modifiedPaths"]) ? `Renamed: ${result["modifiedPaths"].join(", ")}` : JSON.stringify(result);
+      const rendered = name === "diagnostics" && Array.isArray(result["results"]) ? render(result["results"], 3, 600) + (result["next"] ? "\nContinue with next." : "") : [
+        String(result["status"] ?? result["state"] ?? (result["partial"] ? "partial" : "complete")),
+        result["plan"] ? `plan=${result["plan"]}` : "",
+        Array.isArray(result["modifiedPaths"]) ? `modified=${result["modifiedPaths"].length}` : "",
+        result["reason"] ? String(result["reason"]).slice(0, 200) : "",
+        result["next"] ? "Continue with next." : ""
+      ].filter(Boolean).join("; ");
       ok({
         ...record(structured) ? { structuredContent: structured, ...structured["isError"] === true ? { isError: true } : {} } : {},
         content: [
@@ -7231,7 +8837,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     output.removeListener("error", exit);
   }
 }
-var string, scope, paging, TOOLS;
+var string, scope, paging, selector, cursor, choice, LEGACY_TOOLS, TOOLS;
 var init_protocol = __esm({
   "src/protocol.ts"() {
     "use strict";
@@ -7248,71 +8854,136 @@ var init_protocol = __esm({
       paths: { type: "array", items: string, maxItems: 200 }
     };
     paging = { cursor: string, refresh: { type: "boolean", description: "Force tool and client revalidation" } };
+    selector = {
+      line: { type: "integer", minimum: 1 },
+      column: { type: "integer", minimum: 1 },
+      symbol: string,
+      pattern: string
+    };
+    cursor = { cursor: string };
+    choice = (...values) => ({ type: "string", enum: values });
+    LEGACY_TOOLS = {
+      check_project: "check",
+      check_diagnostics: "diagnostics",
+      lsp_status: "status",
+      lsp_navigation: "navigate",
+      lsp_rename: "rename",
+      lsp_format: "format",
+      lsp_diagnostics: "diagnostics"
+    };
     TOOLS = [
       tool(
-        "check_project",
-        "Run project CLI checkers; active starts background checks, cached reads a job without launching tools. Use for workspace checks.",
-        { workspace: scope.workspace, run: { type: "string", enum: ["active", "cached"] }, job: string, ...paging },
+        "check",
+        "Run or read project checks. Follow next until finished.",
+        { workspace: scope.workspace, run: choice("active", "cached"), job: string, ...paging },
         [],
         true
       ),
       tool(
-        "check_diagnostics",
-        "Check paths (explicit paths), current turn or session. Active runs LSP/lint; cached never starts analysis and shares automatic Hook results. Continue with complete next arguments.",
+        "diagnostics",
+        "Check explicit paths or turn/session; cached reads never analyze. Filters affect display only.",
         {
           ...scope,
           ...paging,
-          scope: { type: "string", enum: ["paths", "turn", "session"] },
-          source: { type: "string", enum: ["lsp", "lint", "both"] },
-          run: { type: "string", enum: ["active", "cached"] }
+          scope: choice("paths", "turn", "session"),
+          source: choice("lsp", "lint", "both"),
+          run: choice("active", "cached"),
+          rule: string,
+          severity: choice("error", "warning")
         },
         [],
         true
       ),
       tool(
-        "lsp_status",
-        "Explain configuration issues, per-capability availability, local tool selection, launchability and running clients without starting LSP. Refresh clears failures and clients.",
-        { workspace: scope.workspace, path: string, refresh: { type: "boolean" } },
+        "status",
+        "Report tool/configuration/capability status without starting servers or downloading tools.",
+        { workspace: scope.workspace, path: string, refresh: { type: "boolean" }, ...cursor },
         [],
         true
       ),
       tool(
-        "lsp_navigation",
-        "Read-only LSP navigation. Positions are 1-based; unsupported capabilities are reported explicitly.",
+        "navigate",
+        "Read-only navigation; 1-based UTF-16 positions, symbol path or @@ anchor. Follow next for large results.",
         {
           ...scope,
-          operation: {
-            type: "string",
-            enum: [
-              "definition",
-              "references",
-              "symbols",
-              "prepare_rename",
-              "hover",
-              "typeDefinition",
-              "implementation",
-              "signatureHelp"
-            ]
-          },
-          line: { type: "integer", minimum: 1 },
-          column: { type: "integer", minimum: 1 },
+          ...selector,
+          ...cursor,
+          operation: choice(
+            "definition",
+            "declaration",
+            "references",
+            "symbols",
+            "prepare_rename",
+            "hover",
+            "typeDefinition",
+            "implementation",
+            "signatureHelp",
+            "incoming",
+            "outgoing",
+            "supertypes",
+            "subtypes",
+            "completion"
+          ),
           query: string
         },
         ["path", "operation"],
         true
       ),
       tool(
-        "lsp_rename",
-        "Rename across workspace files. Preflight all targets, detect conflicts, write sequentially; never replay partial writes.",
-        { ...scope, line: { type: "integer", minimum: 1 }, column: { type: "integer", minimum: 1 }, newName: string },
+        "rename",
+        "Preview a cross-file rename. Returns a plan; only apply writes files.",
+        { ...scope, ...selector, ...cursor, newName: string },
         ["path", "newName"],
-        false
+        true
       ),
       tool(
-        "lsp_format",
-        "Format explicit paths using Ruff for Python or project formatter/LSP. Preflight before writes.",
-        scope,
+        "format",
+        "Preview formatting of explicit files. Returns a plan; only apply writes files.",
+        { ...scope, ...cursor },
         [],
+        true
+      ),
+      tool(
+        "inspect",
+        "Explore a symbol or affected files, callers and candidate tests. Source is opt-in; test links are not coverage.",
+        {
+          ...scope,
+          ...selector,
+          ...cursor,
+          operation: choice("symbol", "impact"),
+          symbols: {
+            type: "array",
+            items: string,
+            maxItems: 200,
+            description: "Explicit symbol paths for impact within path/paths."
+          },
+          source: { type: "boolean" },
+          transitive: { type: "boolean" }
+        },
+        ["operation"],
+        true
+      ),
+      tool(
+        "actions",
+        "List, explain or preview lint/LSP fixes. Batch preview selects only vendor-safe fixes; select ids for other actions.",
+        {
+          ...scope,
+          ...selector,
+          ...cursor,
+          operation: choice("list", "explain", "preview"),
+          source: choice("lint", "lsp", "both"),
+          rule: string,
+          ids: { type: "array", items: string, maxItems: 200 },
+          details: { type: "boolean" }
+        },
+        ["operation"],
+        true
+      ),
+      tool(
+        "apply",
+        "Apply one existing plan once. Conflicts reject before writes; inspect modifiedPaths after cancellation or failure.",
+        { workspace: scope.workspace, session: scope.session, plan: string, ...cursor },
+        ["plan"],
         false
       )
     ];
@@ -7329,6 +9000,7 @@ var init_automatic = __esm({
     init_config();
     init_environment();
     init_files();
+    init_hook_events();
     init_identity();
     init_metadata();
     init_results();
@@ -7342,21 +9014,16 @@ var init_automatic = __esm({
         return [...this.jobs.values()].some((job) => job.state === "running");
       }
       status() {
-        return [...this.jobs.values()].map((job) => ({
-          session: job.session,
-          generation: job.generation,
-          scope: job.scope,
-          state: job.state,
-          total: job.paths.length,
-          processed: job.results.size,
-          checked: [...job.results.values()].filter((result) => result.state === "complete").length,
-          remaining: job.paths.filter((path) => job.results.get(path)?.state !== "complete"),
-          note: job.note
-        }));
+        const jobs = [...this.jobs.values()];
+        return {
+          running: jobs.filter((job) => job.state === "running").length,
+          pending: jobs.filter((job) => job.state === "pending").length,
+          complete: jobs.filter((job) => job.state === "complete").length
+        };
       }
-      cancel(session) {
+      cancel(session, turn) {
         for (const job of this.jobs.values())
-          if (!session || job.session === session) {
+          if ((!session || job.session === session) && (!turn || job.turn === turn)) {
             job.controller.abort();
             job.state = "cancelled";
             this.jobs.delete(job.session);
@@ -7432,7 +9099,7 @@ var init_automatic = __esm({
         try {
           let remaining = [...job.paths];
           if (!remaining.length)
-            await this.engine.dispatch("automatic_batch", { paths: [], session: job.session }, signal);
+            await this.engine.dispatch("automatic_batch", { paths: [], session: rootSession(job.session) }, signal);
           while (remaining.length && !signal.aborted) {
             const retry = [];
             for (let start = 0; start < remaining.length; start += BUDGET.batch) {
@@ -7447,7 +9114,7 @@ var init_automatic = __esm({
               const paths = remaining.slice(start, start + BUDGET.batch);
               const output = await this.engine.dispatch(
                 "automatic_batch",
-                { paths, session: job.session, turn: job.turn },
+                { paths, session: rootSession(job.session) },
                 signal
               );
               const results = output["results"];
@@ -7513,10 +9180,10 @@ var init_automatic = __esm({
 // src/deadline.ts
 function waitWithSignal(task, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve12, reject) => {
+  return new Promise((resolve13, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
-    task.then(resolve12, reject).finally(() => signal.removeEventListener("abort", abort));
+    task.then(resolve13, reject).finally(() => signal.removeEventListener("abort", abort));
   });
 }
 var init_deadline = __esm({
@@ -7527,14 +9194,17 @@ var init_deadline = __esm({
 
 // src/hook-coordinator.ts
 import { rm as rm5 } from "node:fs/promises";
+import { setTimeout as delay4 } from "node:timers/promises";
 var HookCoordinator;
 var init_hook_coordinator = __esm({
   "src/hook-coordinator.ts"() {
     "use strict";
     init_budgets();
+    init_config();
     init_deadline();
     init_environment();
     init_hook_delivery();
+    init_hook_events();
     init_hook_inbox();
     init_log();
     init_metadata();
@@ -7548,13 +9218,23 @@ var init_hook_coordinator = __esm({
         this.jobs = /* @__PURE__ */ new Map();
         this.tasks = /* @__PURE__ */ new Set();
         this.seen = /* @__PURE__ */ new Set();
+        this.listeners = /* @__PURE__ */ new Set();
+        this.revision = 0;
         this.disposed = false;
       }
       get active() {
         return this.tasks.size > 0;
       }
       status() {
-        return [...this.jobs].map(([key]) => ({ key, state: "running" }));
+        return {
+          mode: "native-async",
+          queued: [...this.tasks].filter((job) => !job.running).length,
+          running: [...this.tasks].filter((job) => job.running).length
+        };
+      }
+      changed() {
+        this.revision++;
+        for (const listener of this.listeners) listener();
       }
       ingest() {
         if (this.disposed) return Promise.resolve();
@@ -7566,107 +9246,371 @@ var init_hook_coordinator = __esm({
       async load() {
         for (const entry of await registeredHooks(this.root)) {
           if (this.disposed || this.seen.has(entry.path)) continue;
-          const state = await withExecution(
-            entry.environment,
-            true,
-            () => new Metadata(this.root).read(text(entry.input["session_id"]))
-          );
-          if (state.epoch !== entry.epoch) {
-            await rm5(entry.path, { force: true });
-            continue;
-          }
-          this.seen.add(entry.path);
-          const key = `${text(entry.input["session_id"])}:${text(entry.input["hook_event_name"])}`;
-          const previous = this.jobs.get(key);
-          if (previous) {
-            if (entry.input["hook_event_name"] === "SessionStart") {
-              previous.registrations.add(entry.path);
-              continue;
+          await withExecution(entry.environment, true, async () => {
+            const store = new Metadata(this.root);
+            const parent = await store.read(rootSession(entry.session));
+            const state = await store.read(entry.session);
+            const status = state.hookEvents[entry.id]?.state;
+            if (parent.epoch !== entry.epoch || state.epoch !== entry.epoch || status && !["queued", "running"].includes(status)) {
+              await rm5(entry.path, { force: true });
+              return;
             }
-            previous.controller.abort();
-          }
-          const job = {
-            initial: entry,
-            controller: new AbortController(),
-            done: Promise.resolve(),
-            registrations: /* @__PURE__ */ new Set([entry.path])
-          };
-          this.jobs.set(key, job);
-          this.tasks.add(job);
-          if (entry.input["hook_event_name"] === "SessionStart") this.onStart(entry);
-          job.done = this.run(key, job);
+            this.seen.add(entry.path);
+            const event = text(entry.input["hook_event_name"]);
+            if (event === "Stop" && this.jobs.has(`${entry.session}:PostToolUse`) && (await configuration(this.root)).stopGate !== "introduced-errors") {
+              await store.update(entry.session, AbortSignal.timeout(1e3), (current) => {
+                const item = current.hookEvents[entry.id];
+                if (item) item.state = "complete";
+              });
+              await rm5(entry.path, { force: true });
+              this.seen.delete(entry.path);
+              this.changed();
+              return;
+            }
+            const key = `${entry.session}:${event}`;
+            const previous = this.jobs.get(key);
+            if (previous && !previous.running && event === "PostToolUse") {
+              previous.entries.push(entry);
+              previous.updated = Date.now();
+              this.changed();
+              return;
+            }
+            if (previous && event === "SessionStart") {
+              previous.entries.push(entry);
+              return;
+            }
+            if (previous) previous.controller.abort();
+            const job = {
+              initial: entry,
+              entries: [entry],
+              updated: Date.now(),
+              running: false,
+              hints: previous ? [
+                ...previous.hints,
+                ...previous.entries.flatMap((item) => {
+                  const intent = writeIntent(this.root, item.input);
+                  return intent.kind === "read" ? [] : intent.paths ?? [];
+                })
+              ] : [],
+              controller: new AbortController(),
+              done: Promise.resolve()
+            };
+            this.jobs.set(key, job);
+            this.tasks.add(job);
+            if (event === "SessionStart") this.onStart(entry);
+            job.done = this.run(key, job);
+            this.changed();
+          });
         }
+      }
+      async state(job, status) {
+        await withExecution(
+          job.initial.environment,
+          true,
+          () => new Metadata(this.root).update(job.initial.session, AbortSignal.timeout(1e3), (state) => {
+            if (state.epoch !== job.initial.epoch || state.turn === "__ended__") return false;
+            for (const entry of job.entries)
+              if (state.hookEvents[entry.id])
+                state.hookEvents[entry.id] = {
+                  turn: text(entry.input["turn_id"]),
+                  state: status === "complete" && entry !== job.entries.at(-1) ? "superseded" : status
+                };
+            return true;
+          })
+        ).catch(() => void 0);
+        this.changed();
       }
       async run(key, job) {
         const signal = AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.project)]);
         try {
-          await withExecution(job.initial.environment, true, () => this.hooks.hook(job.initial.input, signal, true));
+          if (job.initial.input["hook_event_name"] === "PostToolUse") {
+            const began = Date.now();
+            while (true) {
+              const remaining = Math.min(job.updated + BUDGET.merge, began + BUDGET.mergeMax) - Date.now();
+              if (remaining <= 0) break;
+              await delay4(remaining, void 0, { signal });
+            }
+          }
+          job.running = true;
+          await this.state(job, "running");
+          const latest = job.entries.at(-1) ?? job.initial;
+          const hints = [
+            ...job.hints,
+            ...job.entries.flatMap((entry) => {
+              const intent = writeIntent(this.root, entry.input);
+              return intent.kind === "read" ? [] : intent.paths ?? [];
+            })
+          ];
+          await withExecution(
+            latest.environment,
+            true,
+            () => this.hooks.hook({ ...internalHook(latest.input), __paths: hints, __epoch: latest.epoch }, signal, true)
+          );
+          await this.state(job, "complete");
         } catch {
+          await this.state(job, job.controller.signal.aborted ? "cancelled" : "failed");
           if (!signal.aborted) await logEvent("background-failure");
         } finally {
           if (this.jobs.get(key) === job) this.jobs.delete(key);
-          for (const path of job.registrations) {
-            await rm5(path, { force: true }).catch(() => logEvent("cancel-cleanup-failure"));
-            this.seen.delete(path);
+          for (const entry of job.entries) {
+            await rm5(entry.path, { force: true }).catch(() => logEvent("cancel-cleanup-failure"));
+            this.seen.delete(entry.path);
           }
           this.tasks.delete(job);
+          this.changed();
         }
       }
-      async request(input, signal) {
-        const began = Date.now();
-        const session = text(input["session_id"]);
-        const event = text(input["hook_event_name"], "PostToolUse");
-        if (event === "PreToolUse") return { output: await this.hooks.hook(input, signal) };
-        if (event === "SessionEnd") {
-          for (const job2 of this.tasks) if (text(job2.initial.input["session_id"]) === session) job2.controller.abort();
-          return { output: await this.hooks.hook(input, signal) };
+      async delivery(input, signal) {
+        const session = hookSession(input);
+        return {
+          ...await consumeDelivery(this.root, session, text(input["hook_event_name"]), signal),
+          deliverySession: session
+        };
+      }
+      async waitToken(input) {
+        const session = hookSession(input);
+        const store = new Metadata(this.root), state = await store.read(session), parent = await store.read(rootSession(session));
+        return `${parent.interrupts[text(input["turn_id"])] ?? 0}:${state.waitEpoch}`;
+      }
+      async wait(input, signal) {
+        const limited = AbortSignal.any([signal, AbortSignal.timeout(BUDGET.hookWait)]);
+        try {
+          return await this.poll(input, limited);
+        } catch (error) {
+          if (signal.aborted || !limited.aborted) throw error;
+          return {
+            output: { kind: "silent" },
+            state: "waiting",
+            registration: text(input["registration"]),
+            revision: this.revision,
+            waitToken: text(input["waitToken"])
+          };
         }
-        if (event === "PostToolUse" && writeIntent(this.root, input).kind === "read")
-          return consumeDelivery(this.root, session, event, signal);
+      }
+      async poll(input, signal) {
+        const session = hookSession(input), id = text(input["registration"]);
+        const interrupted = typeof input["waitToken"] === "string" ? input["waitToken"] : await this.waitToken(input);
+        const inspect = async () => {
+          const store = new Metadata(this.root), state = await store.read(session), parent = await store.read(rootSession(session));
+          const status = parent.epoch !== state.epoch || parent.turn === "__ended__" || `${parent.interrupts[text(input["turn_id"])] ?? 0}:${state.waitEpoch}` !== interrupted ? "cancelled" : state.hookEvents[id]?.state ?? "missing";
+          return {
+            ...status === "complete" ? await this.delivery(input, signal) : { output: { kind: "silent" } },
+            state: status,
+            registration: id,
+            revision: this.revision,
+            waitToken: interrupted
+          };
+        };
+        const first = await inspect();
+        if (!["queued", "running"].includes(first.state ?? "") || input["revision"] !== this.revision) return first;
+        let wake = () => void 0;
+        const change = new Promise((resolve13) => {
+          wake = resolve13;
+          this.listeners.add(wake);
+        });
+        try {
+          if (first.revision === this.revision)
+            await waitWithSignal(change, AbortSignal.any([signal, AbortSignal.timeout(BUDGET.hookWait)])).catch(
+              (error) => {
+                if (signal.aborted) throw error;
+              }
+            );
+          return await inspect();
+        } finally {
+          this.listeners.delete(wake);
+        }
+      }
+      async request(raw, signal) {
+        const input = normalizeHook(raw);
+        if (!input) return { output: { kind: "silent" } };
+        const session = text(input["session_id"]), event = text(input["hook_event_name"]);
+        if (event === "SessionEnd" || event === "Interrupt") {
+          const turn = text(input["turn_id"]);
+          if (event === "Interrupt")
+            await new Metadata(this.root).update(session, signal, (state) => {
+              if (state.turn === "__ended__") return false;
+              if (turn) state.interrupts[turn] = (state.interrupts[turn] ?? 0) + 1;
+              else state.waitEpoch++;
+              return true;
+            });
+          for (const job of this.tasks)
+            if (rootSession(job.initial.session) === session && (event === "SessionEnd" || turn && job.entries.every((entry) => text(entry.input["turn_id"]) === turn)))
+              job.controller.abort();
+          await this.hooks.cancel(session, event === "SessionEnd" ? void 0 : turn || null, signal);
+          this.changed();
+          return { output: { kind: "silent" } };
+        }
+        if (event === "PostToolUse" && writeIntent(this.root, input).kind === "read") return this.delivery(input, signal);
         await this.ingest();
-        if (event === "SessionStart" || input["stop_hook_active"] === true) return { output: { kind: "silent" } };
-        const key = `${session}:${event}`;
-        const job = this.jobs.get(key);
-        let pending = false;
-        if (job && (event === "Stop" || event === "SubagentStop")) {
-          const wait = event === "Stop" || event === "SubagentStop" ? BUDGET.stopWait : BUDGET.postWait;
-          const waiting = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, wait - (Date.now() - began)))]);
-          try {
-            await waitWithSignal(job.done, waiting);
-          } catch (error) {
-            if (signal.aborted || !waiting.aborted) throw error;
-            pending = true;
-          }
+        if (event === "SessionStart") return this.delivery(input, signal);
+        if (input["stop_hook_active"] === true) return { output: { kind: "silent" } };
+        const id = text(input["registration"]);
+        if (event === "PostToolUse") {
+          const state = await new Metadata(this.root).read(hookSession(input));
+          return {
+            output: { kind: "silent" },
+            registration: id,
+            state: state.hookEvents[id]?.state ?? "missing",
+            revision: this.revision,
+            waitToken: await this.waitToken(input)
+          };
         }
-        if (job && event === "PostToolUse") pending = true;
-        const delivery = await consumeDelivery(this.root, session, event, signal);
-        return pending && delivery.output.kind === "silent" ? {
-          output: {
-            kind: "context",
-            event,
-            context: "[Codex CodeIntel automatic diagnostics] Checks still running; results pending. Background work continues and later Hooks can retrieve results."
-          }
-        } : delivery;
+        const config = await configuration(this.root), gate = event === "Stop" && config.stopGate === "introduced-errors";
+        const jobs = [...this.tasks].filter((job) => job.initial.session === hookSession(input));
+        const waiting = AbortSignal.any([signal, AbortSignal.timeout(gate ? BUDGET.stopWait : BUDGET.ordinaryWait)]);
+        await waitWithSignal(Promise.allSettled(jobs.map((job) => job.done)), waiting).catch((error) => {
+          if (signal.aborted) throw error;
+        });
+        let delivery = await this.delivery(input, signal);
+        if (delivery.output.kind === "silent" && config.automaticDiagnostics.stop !== "off") {
+          const store = new Metadata(this.root), target = hookSession(input);
+          await store.update(target, signal, async (state) => {
+            if (state.turn === "__ended__") return false;
+            const pending = Math.max(
+              state.pending.length,
+              [...this.tasks].some((job) => job.initial.session === target) ? 1 : 0
+            );
+            if (!pending) return false;
+            await queueDelivery(
+              store,
+              { ...state, turn: text(input["turn_id"], state.turn) },
+              {
+                kind: "context",
+                event,
+                context: `Automatic diagnostics: introduced=0; resolved=0; unattributed=0; pending=${pending}. Checks still running; results pending. Details: diagnostics(run=cached, scope=session).`
+              },
+              {},
+              config.version,
+              ""
+            );
+            return true;
+          });
+          delivery = await this.delivery(input, signal);
+        }
+        return delivery;
       }
       async dispose() {
         this.disposed = true;
         for (const job of this.tasks) job.controller.abort();
+        this.changed();
         await Promise.allSettled([...this.tasks].map((job) => job.done));
       }
     };
   }
 });
 
+// src/go-output.ts
+function goDocuments(output) {
+  let depth = 0;
+  let start = -1;
+  let quoted = false;
+  let escaped = false;
+  const documents = [];
+  for (let index = 0; index < output.length; index++) {
+    const character = output[index];
+    if (!depth && character === "{" && output.slice(output.lastIndexOf("\n", index) + 1, index).trim() !== "")
+      continue;
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (depth && character === '"') {
+      quoted = true;
+      continue;
+    }
+    if (character === "{") {
+      if (!depth) start = index;
+      depth++;
+    }
+    if (character === "}" && depth) {
+      depth--;
+      if (!depth) documents.push(JSON.parse(output.slice(start, index + 1)));
+    }
+  }
+  if (depth) throw new Error("Truncated Go JSON output");
+  return documents;
+}
+function goFiles(output) {
+  return goDocuments(output).flatMap((document) => {
+    if (!record(document) || document["Incomplete"] || document["Error"])
+      throw new Error("Go package scope incomplete; configure explicit projectChecks");
+    return ["GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"].flatMap(
+      (key) => Array.isArray(document[key]) ? document[key].filter((file) => typeof file === "string").map((file) => `${text(document["Dir"])}/${file}`) : []
+    );
+  });
+}
+var init_go_output = __esm({
+  "src/go-output.ts"() {
+    "use strict";
+    init_results();
+  }
+});
+
 // src/project-output.ts
-import { readFile as readFile16 } from "node:fs/promises";
-import { relative as relative7, resolve as resolve10 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { readFile as readFile19 } from "node:fs/promises";
+import { relative as relative9, resolve as resolve11 } from "node:path";
+import { fileURLToPath as fileURLToPath7 } from "node:url";
 async function projectOutput(check, output, root, cwd) {
   const pathOf = (file) => {
-    const absolute = resolve10(cwd, file);
+    const absolute = resolve11(cwd, file);
     if (!inside(root, absolute)) throw new Error("Checker diagnostic outside workspace");
-    return relative7(root, absolute);
+    return relative9(root, absolute);
   };
+  if (check.parser === "go") {
+    const findings2 = [];
+    const documents = goDocuments(output);
+    for (const document of documents)
+      if (record(document)) {
+        for (const analyzers of Object.values(document))
+          if (record(analyzers)) {
+            for (const [rule, diagnostics] of Object.entries(analyzers))
+              if (Array.isArray(diagnostics))
+                for (const diagnostic of diagnostics) {
+                  if (!record(diagnostic)) continue;
+                  const match = /^(.*):(\d+):(\d+)$/.exec(text(diagnostic["posn"]));
+                  if (!match) throw new Error("Unlocated Go vet diagnostic");
+                  findings2.push({
+                    path: pathOf(match[1] ?? ""),
+                    line: Number(match[2]),
+                    column: Number(match[3]),
+                    severity: "error",
+                    source: `go/${rule}`,
+                    rule,
+                    message: text(diagnostic["message"])
+                  });
+                }
+          }
+      }
+    for (const line of output.split("\n")) {
+      const match = /^(?:vet(?:\.exe)?: )?(.*\.go):(\d+)(?::(\d+))?:\s+(.+)$/.exec(line.trim());
+      if (match)
+        findings2.push({
+          path: pathOf(match[1] ?? ""),
+          line: Number(match[2]),
+          column: Number(match[3] ?? 1),
+          severity: "error",
+          source: "go/compiler",
+          message: match[4] ?? "Go compiler diagnostic"
+        });
+    }
+    const contents = /* @__PURE__ */ new Map();
+    return Promise.all(
+      findings2.map(async (finding) => {
+        let content = contents.get(finding.path);
+        if (!content) {
+          content = readFile19(resolve11(root, finding.path), "utf8");
+          contents.set(finding.path, content);
+        }
+        const line = (await content).split("\n")[finding.line - 1] ?? "";
+        return {
+          ...finding,
+          column: Buffer.from(line).subarray(0, finding.column - 1).toString("utf8").length + 1
+        };
+      })
+    );
+  }
   if (check.parser === "sarif") {
     if (!output.trim()) return [];
     const data = JSON.parse(output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1));
@@ -7676,15 +9620,15 @@ async function projectOutput(check, output, root, cwd) {
       if (!record(run2) || !Array.isArray(run2["results"])) throw new Error("Malformed SARIF run");
       for (const result of run2["results"]) {
         if (!record(result) || !["error", "warning"].includes(String(result["level"]))) continue;
-        const locations = result["locations"];
-        const first = Array.isArray(locations) ? locations[0] : void 0;
+        const locations2 = result["locations"];
+        const first = Array.isArray(locations2) ? locations2[0] : void 0;
         const physical = record(first) && record(first["physicalLocation"]) ? first["physicalLocation"] : {};
         const artifact = record(physical["artifactLocation"]) ? physical["artifactLocation"] : {};
         const region = record(physical["region"]) ? physical["region"] : {};
         const uri = text(artifact["uri"]);
         if (!uri || !record(result["message"])) throw new Error("Unlocated SARIF diagnostic");
         findings2.push({
-          path: pathOf(uri.startsWith("file:") ? fileURLToPath4(uri) : decodeURI(uri)),
+          path: pathOf(uri.startsWith("file:") ? fileURLToPath7(uri) : decodeURI(uri)),
           line: Number(region["startLine"] ?? 1),
           column: Number(region["startColumn"] ?? 1),
           severity: result["level"] === "error" ? "error" : "warning",
@@ -7699,7 +9643,7 @@ async function projectOutput(check, output, root, cwd) {
     const split = splitLint(check.parser, JSON.parse(output), root, cwd);
     const findings2 = [];
     for (const [path, data] of split)
-      findings2.push(...parseLint(check.parser, data, path, await readFile16(resolve10(root, path), "utf8")));
+      findings2.push(...parseLint(check.parser, data, path, await readFile19(resolve11(root, path), "utf8")));
     return findings2;
   }
   if (check.parser === "json") {
@@ -7761,6 +9705,7 @@ var init_project_output = __esm({
   "src/project-output.ts"() {
     "use strict";
     init_files();
+    init_go_output();
     init_lint_output();
     init_results();
     init_runners();
@@ -7768,11 +9713,11 @@ var init_project_output = __esm({
 });
 
 // src/project-checks.ts
-import { randomUUID as randomUUID8 } from "node:crypto";
-import { readdir as readdir5, readFile as readFile17, stat as stat6 } from "node:fs/promises";
+import { randomUUID as randomUUID11 } from "node:crypto";
+import { readdir as readdir5, readFile as readFile20, stat as stat6 } from "node:fs/promises";
 import * as nodePath2 from "node:path";
-import { basename as basename5, join as join17, relative as relative8, resolve as resolve11 } from "node:path";
-import { setTimeout as delay4 } from "node:timers/promises";
+import { basename as basename5, join as join17, relative as relative10, resolve as resolve12 } from "node:path";
+import { setTimeout as delay5 } from "node:timers/promises";
 function normalizedPattern(pattern) {
   return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
 }
@@ -7786,7 +9731,8 @@ function covers(check, path) {
   if ((check.parser === "ty" || check.parser === "ruff") && !/\.pyi?$/.test(path)) return false;
   if (check.parser === "tsc" && !/\.[cm]?[jt]sx?$/.test(path)) return false;
   if (check.parser === "cargo" && !/\.rs$/.test(path)) return false;
-  const local = relative8(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
+  if (check.parser === "go" && !/\.go$/.test(path)) return false;
+  const local = relative10(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
   return local !== ".." && !local.startsWith("../") && check.coverage.some((pattern) => nodePath2.matchesGlob(local, pattern)) && !check.excluded?.some((pattern) => {
     const normalized = normalizedPattern(pattern);
     return normalized === "." || normalized === "" || nodePath2.matchesGlob(local, normalized) || nodePath2.matchesGlob(local, `${normalized}/**`);
@@ -7803,6 +9749,7 @@ var init_project_checks = __esm({
     init_diagnostic_delta();
     init_environment();
     init_files();
+    init_go_output();
     init_identity();
     init_metadata();
     init_project_output();
@@ -7823,6 +9770,35 @@ var init_project_checks = __esm({
       status(configuration2) {
         const job = this.latest ? this.jobs.get(this.latest) : void 0;
         return job ? this.cachedOutput(job, 0, configuration2) : { state: "unverified", checkers: [] };
+      }
+      async attribution(session, results, args, signal) {
+        const findings = results.flatMap((result) => result.findings);
+        const unknown = { introduced: 0, resolved: 0, unattributed: findings.length };
+        const store = new Metadata(this.root);
+        const state = await store.read(session);
+        const config = await configuration(this.root);
+        if (!state.diagnosticBaseline || state.configuration !== config.version || results.some((result) => result.state !== "complete"))
+          return unknown;
+        const baseline = await store.readShared(state.diagnosticBaseline);
+        if (!record(baseline) || !Array.isArray(baseline["results"]) || baseline["identity"] !== await this.identity(await this.discover(config, signal), config, signal))
+          return unknown;
+        let introduced = 0;
+        let resolved = 0;
+        let unattributed = 0;
+        const matches = (finding) => (!args["rule"] || finding.rule === args["rule"] || finding.source === args["rule"]) && (!args["severity"] || finding.severity === args["severity"]) && (args["source"] !== "lint" || !/^(?:ts|ty|go|rust|cargo|compiler)(?:\/|$)/.test(finding.source)) && (args["source"] !== "lsp" || !/^(?:ruff|eslint|biome)\//.test(finding.source));
+        for (const result of results) {
+          const checks = baseline["results"].filter(
+            (check) => check.state === "complete" && covers(check, result.path)
+          );
+          const parsers = checks.map((check) => check.parser);
+          const before = checks.flatMap((check) => check.findings).filter((finding) => finding.path === result.path && matches(finding));
+          const after = result.findings.filter((finding) => attributableFinding(finding, parsers, before));
+          const comparable = before.filter((finding) => attributableFinding(finding, parsers, before));
+          introduced += addedFindings(comparable, after).length;
+          resolved += addedFindings(after, comparable).length;
+          unattributed += result.findings.length - after.length;
+        }
+        return { introduced, resolved, unattributed };
       }
       get active() {
         return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
@@ -7848,6 +9824,14 @@ var init_project_checks = __esm({
             command: ["ty", "check", "--output-format", "concise", "--color", "never"],
             parser: "ty",
             coverage: ["**/*.{py,pyi}"]
+          });
+        if (await has("go.mod"))
+          checks.push({
+            name: "go",
+            cwd: ".",
+            command: ["go", "vet", "-mod=readonly", "-json", "./..."],
+            parser: "go",
+            coverage: ["**/*.go"]
           });
         if (await has("Cargo.toml"))
           checks.push({
@@ -7905,13 +9889,13 @@ var init_project_checks = __esm({
                     basename5(tool2.command[0] ?? "")
                   ) && /\.(?:[cm]?js|py|sh)$/.test(arg) && !args.slice(0, index).some((previous) => /\.(?:[cm]?js|py|sh)$/.test(previous))
                 ).map(async (arg) => {
-                  const info = await stat6(resolve11(cwd, arg)).catch(() => void 0);
+                  const info = await stat6(resolve12(cwd, arg)).catch(() => void 0);
                   return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
                 })
               ),
               await analysisIdentity(
                 this.root,
-                [relative8(this.root, join17(cwd, "representative"))],
+                [relative10(this.root, join17(cwd, "representative"))],
                 config,
                 signal,
                 false
@@ -7921,29 +9905,29 @@ var init_project_checks = __esm({
         );
         return hash(JSON.stringify([config.version, identities]));
       }
-      output(job, cursor = 0) {
+      output(job, cursor2 = 0) {
         const diagnostics = job.results.flatMap((result) => result.findings);
         const state = job.results.some((result) => result.state === "running") ? "running" : job.results.some((result) => result.state === "stale") ? "stale" : job.results.some((result) => result.state === "failed") || !job.checks.length ? "failed" : "complete";
         return {
-          operation: "check_project",
+          operation: "check",
           job: job.id,
           state,
           checkers: job.results.map((result) => ({ ...result, findings: [] })),
-          diagnostics: diagnostics.slice(cursor, cursor + 100),
+          diagnostics: diagnostics.slice(cursor2, cursor2 + 100),
           errors: diagnostics.filter((item) => item.severity === "error").length,
           warnings: diagnostics.filter((item) => item.severity === "warning").length,
-          ...state === "running" || diagnostics.length > cursor + 100 ? {
+          ...state === "running" || diagnostics.length > cursor2 + 100 ? {
             next: {
               workspace: this.root,
               run: "cached",
               job: job.id,
-              cursor: diagnostics.length > cursor + 100 ? String(cursor + 100) : "0"
+              cursor: diagnostics.length > cursor2 + 100 ? String(cursor2 + 100) : "0"
             }
           } : {}
         };
       }
-      cachedOutput(job, cursor, configuration2) {
-        const output = this.output(job, cursor);
+      cachedOutput(job, cursor2, configuration2) {
+        const output = this.output(job, cursor2);
         if (configuration2 === void 0 || configuration2 === job.configuration) return output;
         return {
           ...output,
@@ -7961,7 +9945,7 @@ var init_project_checks = __esm({
         let job = id ? this.jobs.get(id) : void 0;
         if (cached)
           return job ? this.cachedOutput(job, this.cursor(args), (await configuration(this.root)).version) : {
-            operation: "check_project",
+            operation: "check",
             job: id,
             state: "missing",
             checkers: [],
@@ -7979,17 +9963,17 @@ var init_project_checks = __esm({
           job = await this.start(checks, config, environment, identity, before);
         }
         const wait = typeof args["waitMs"] === "number" ? Math.min(BUDGET.stopWait, Math.max(0, args["waitMs"])) : BUDGET.postWait;
-        await Promise.race([Promise.allSettled(job.done), delay4(wait, void 0, { signal }).catch(() => void 0)]);
+        await Promise.race([Promise.allSettled(job.done), delay5(wait, void 0, { signal }).catch(() => void 0)]);
         return this.output(job, this.cursor(args));
       }
       cursor(args) {
-        const cursor = Number(text(args["cursor"], "0"));
-        if (!Number.isInteger(cursor) || cursor < 0) throw new Error("Invalid project cursor");
-        return cursor;
+        const cursor2 = Number(text(args["cursor"], "0"));
+        if (!Number.isInteger(cursor2) || cursor2 < 0) throw new Error("Invalid project cursor");
+        return cursor2;
       }
       async start(checks, config, environment, identity, before) {
         const job = {
-          id: randomUUID8(),
+          id: randomUUID11(),
           identity,
           configuration: config.version,
           environment,
@@ -8026,6 +10010,18 @@ var init_project_checks = __esm({
                   false
                 );
                 if (tool2.source === "missing") throw new Error(tool2.note ?? "Checker missing");
+                if (config.projectChecks === "auto" && check.parser === "go") {
+                  const shown = await run(
+                    tool2.command[0] ?? "go",
+                    ["list", "-json", "-mod=readonly", "./..."],
+                    cwd,
+                    signal,
+                    void 0,
+                    { timeout: BUDGET.project, environment }
+                  );
+                  if (shown.code !== 0) throw new Error(`Go package discovery failed: ${shown.stderr}`);
+                  result.coverage = goFiles(shown.stdout).map((path) => relative10(cwd, path).replaceAll("\\", "/"));
+                }
                 if (config.projectChecks === "auto" && check.parser === "tsc") {
                   const shown = await run(tool2.command[0] ?? "", ["--showConfig"], cwd, signal, void 0, {
                     timeout: BUDGET.project,
@@ -8035,7 +10031,7 @@ var init_project_checks = __esm({
                   if (shown.code !== 0 || !record(data))
                     throw new Error("TypeScript effective configuration unavailable");
                   const pkg = JSON.parse(
-                    await readFile17(join17(cwd, "package.json"), "utf8").catch(() => "{}")
+                    await readFile20(join17(cwd, "package.json"), "utf8").catch(() => "{}")
                   );
                   if (Array.isArray(data["references"]) && data["references"].length || record(pkg) && pkg["workspaces"])
                     throw new Error("TypeScript references/multi-package projects require explicit projectChecks");
@@ -8049,8 +10045,8 @@ var init_project_checks = __esm({
                     result.excluded.push("**/*.{js,jsx,mjs,cjs}");
                 }
                 if (config.projectChecks === "auto" && check.parser === "ty") {
-                  const content = await readFile17(join17(cwd, "ty.toml"), "utf8").catch(() => void 0);
-                  const data = content ? parse(content) : parse(await readFile17(join17(cwd, "pyproject.toml"), "utf8").catch(() => ""));
+                  const content = await readFile20(join17(cwd, "ty.toml"), "utf8").catch(() => void 0);
+                  const data = content ? parse(content) : parse(await readFile20(join17(cwd, "pyproject.toml"), "utf8").catch(() => ""));
                   const toolConfig = content ? data : record(data["tool"]) && record(data["tool"]["ty"]) ? data["tool"]["ty"] : {};
                   const src = record(toolConfig["src"]) ? toolConfig["src"] : {};
                   if (Array.isArray(src["include"]))
@@ -8064,7 +10060,7 @@ var init_project_checks = __esm({
                 });
                 result.findings = await projectOutput(
                   check,
-                  output.stdout + (["tsc", "ty", "sarif"].includes(check.parser) ? output.stderr : ""),
+                  output.stdout + (["tsc", "ty", "go", "sarif"].includes(check.parser) ? output.stderr : ""),
                   this.root,
                   cwd
                 );
@@ -8120,18 +10116,26 @@ var init_project_checks = __esm({
               );
             const snapshot2 = await inventory(this.root, BUDGET.files, signal, config.exclude);
             if (!snapshot2.complete) throw new Error("Baseline inventory incomplete");
+            const current = await store.read(session);
+            if (current.epoch !== state.epoch || current.edited || current.turn === "__ended__")
+              throw new Error("Session changed before baseline started; diagnostics remain unattributed");
+            if (current.baseline) {
+              const before = await store.readShared(current.baseline);
+              if (!record(before) || Object.keys(before).length !== snapshot2.files.size || [...snapshot2.files].some(([path, content]) => before[path] !== content))
+                throw new Error("Files changed before baseline started; diagnostics remain unattributed");
+            }
             job = await this.start(checks, config, environment, identity, snapshot2);
             this.sessionJobs.set(session, job.id);
-            await store.update(session, signal, (current) => {
-              if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-              current.shown["baselineJob"] = job?.id ?? "";
+            await store.update(session, signal, (current2) => {
+              if (current2.epoch !== state.epoch || current2.turn === "__ended__") return false;
+              current2.shown["baselineJob"] = job?.id ?? "";
               return true;
             });
           }
           const selected = job.checks.map((check, index) => ({ check, index })).filter(({ check }) => !paths || paths.some((path) => covers(check, path)));
           await Promise.race([
             Promise.allSettled(selected.map(({ index }) => job?.done[index])),
-            delay4(wait, void 0, { signal }).catch(() => void 0)
+            delay5(wait, void 0, { signal }).catch(() => void 0)
           ]);
           recovered = { identity, results: job.results, before: job.before };
         }
@@ -8156,7 +10160,7 @@ var init_project_checks = __esm({
           const related = results.filter((result) => covers(result, path));
           reliable[path] = related.filter((result) => result.state === "complete").map((result) => result.parser);
           const language = codeLanguage(config, path);
-          const required = language === "typescript" && /\.[cm]?tsx?$/.test(path) ? "tsc" : language === "python" ? "ty" : language === "rust" ? "cargo" : void 0;
+          const required = language === "typescript" && /\.[cm]?tsx?$/.test(path) ? "tsc" : language === "python" ? "ty" : language === "go" ? "go" : language === "rust" ? "cargo" : void 0;
           if (config.projectChecks === "auto" && required && !related.some((result) => result.parser === required))
             failures.push(`${path}: no type checker coverage; configure projectChecks`);
           if (!related.length) failures.push(`${path}: no project checker coverage; configure projectChecks`);
@@ -8241,9 +10245,9 @@ async function serve(root, identity, token) {
       executionEnvironment(),
       signal
     ),
-    end: (session) => {
-      automatic.cancel(session);
-      projects.cancelSession(session);
+    end: (session, turn) => {
+      automatic.cancel(session, turn);
+      if (!turn) projects.cancelSession(session);
     }
   });
   let warmupTimer;
@@ -8301,7 +10305,7 @@ async function serve(root, identity, token) {
       try {
         const output = await withExecution(
           environment,
-          operation === "automatic" || operation === "hook",
+          operation === "automatic" || operation === "hook" || operation === "hook_wait" || operation === "hook_ack",
           async () => {
             if (operation === "handshake")
               return { operation, protocol: SERVICE_PROTOCOL, identity, pid: process.pid };
@@ -8320,7 +10324,9 @@ async function serve(root, identity, token) {
             }
             if (operation === "automatic")
               return { operation, ...await automatic.request(args, environment, controller.signal) };
-            if (operation === "check_project")
+            if (operation === "hook_wait")
+              return { operation, ...await coordinator.wait(args, controller.signal) };
+            if (operation === "check")
               return { ...await projects.request(args, environment, controller.signal) };
             if (operation === "hook") {
               if (args["hook_event_name"] === "SessionEnd" && text(args["session_id"]) === warmupSession) {
@@ -8331,7 +10337,7 @@ async function serve(root, identity, token) {
               }
               return { operation, ...await coordinator.request(args, controller.signal) };
             }
-            if (!["lsp_status", "check_diagnostics", "lsp_navigation", "lsp_rename", "lsp_format"].includes(
+            if (!["status", "diagnostics", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
               operation
             ))
               throw new Error("Unknown service operation");
@@ -8339,7 +10345,15 @@ async function serve(root, identity, token) {
             if (!config.valid || config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
               automatic.cancel();
             const output2 = await engine.dispatch(operation, args, controller.signal);
-            if (operation === "lsp_status")
+            if (operation === "diagnostics" && Array.isArray(output2["results"])) {
+              const results = output2["results"];
+              output2["attribution"] = await projects.attribution(text(args["session"], "manual"), results, args, controller.signal).catch(() => ({
+                introduced: 0,
+                resolved: 0,
+                unattributed: results.flatMap((result) => result.findings).length
+              }));
+            }
+            if (operation === "status")
               return {
                 ...output2,
                 service: { state: "running", pid: process.pid, identity, protocol: SERVICE_PROTOCOL },
@@ -8416,9 +10430,9 @@ async function serve(root, identity, token) {
   process.once("SIGINT", () => {
     void stop();
   });
-  await new Promise((resolve12, reject) => {
+  await new Promise((resolve13, reject) => {
     server2.once("error", reject);
-    server2.listen(location.address, resolve12);
+    server2.listen(location.address, resolve13);
   });
   await publishEndpoint(location, token);
   await coordinator.ingest();
@@ -8454,7 +10468,7 @@ async function main() {
   else if (command === "hook") await runHookCli();
   else if (command === "service")
     await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
-  else if (command === "check_project") {
+  else if (command === "check") {
     const runtime = new Runtime();
     const options = { run: "active" };
     const tokens = process.argv.slice(3);
@@ -8471,13 +10485,13 @@ async function main() {
     if (!["active", "cached"].includes(String(options["run"]))) throw new Error("run must be active or cached");
     try {
       process.stdout.write(
-        `${JSON.stringify(await runtime.request(workspace, "check_project", options, AbortSignal.timeout(BUDGET.request)))}
+        `${JSON.stringify(await runtime.request(workspace, "check", options, AbortSignal.timeout(BUDGET.request)))}
 `
       );
     } finally {
       await runtime.close();
     }
-  } else throw new Error("Usage: codex-codeintel [mcp | hook | check_project [workspace]]");
+  } else throw new Error("Usage: codex-codeintel [mcp | hook | check [workspace]]");
 }
 var init_main = __esm({
   "src/main.ts"() {
@@ -8507,7 +10521,9 @@ if (major < 22 || major === 22 && minor < 12) {
       const parsed = JSON.parse(input);
       if (parsed && typeof parsed === "object" && "hook_event_name" in parsed && typeof parsed.hook_event_name === "string") {
         event = parsed.hook_event_name;
-        passthrough = event === "PreToolUse";
+        passthrough = !["SessionStart", "PostToolUse", "Stop", "SubagentStop", "SessionEnd", "Interrupt"].includes(
+          event
+        );
       }
     } catch {
     }

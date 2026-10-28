@@ -80,13 +80,13 @@ it("batch lint executes once and splits each output file correctly", async () =>
 	expect(results.get("b.ts")?.findings[0]?.path).toBe("b.ts");
 });
 it("shell reads are fast, substitutions and unknown writes require all-project coverage", () => {
-	expect(writeIntent("/workspace", { tool_name: "exec_command", tool_input: { cmd: "git status --short" } })).toEqual({
+	expect(writeIntent("/workspace", { tool_name: "Bash", tool_input: { cmd: "git status --short" } })).toEqual({
 		kind: "read",
 	});
-	expect(writeIntent("/workspace", { tool_name: "exec_command", tool_input: { cmd: "cat $(touch a.ts)" } })).toEqual({
+	expect(writeIntent("/workspace", { tool_name: "Bash", tool_input: { cmd: "cat $(touch a.ts)" } })).toEqual({
 		kind: "write",
 	});
-	expect(writeIntent("/workspace", { tool_name: "Write", tool_input: { path: "tsconfig.json" } }).kind).toBe(
+	expect(writeIntent("/workspace", { tool_name: "apply_patch", tool_input: { path: "tsconfig.json" } }).kind).toBe(
 		"configuration",
 	);
 	expect(writeIntent("/workspace", { tool_name: "Write", tool_input: { path: "config.ts" } }).kind).toBe("write");

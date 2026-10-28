@@ -22,7 +22,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	const env = { PATH: bin, UV_CACHE_DIR: join(dir, "uv-cache"), UV_TOOL_DIR: join(dir, "tools"), UV_TOOL_BIN_DIR: join(dir, "toolbin"), UV_PYTHON: python, UV_PYTHON_DOWNLOADS: "never", CODEX_LSP_CACHE: join(dir, "metadata") };
 	let client = bundleClient(root, home, env);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const check = () => client.call("check_diagnostics", { path: "main.py" });
+	const check = () => client.call("diagnostics", { path: "main.py" });
 	let result = await check();
 	if (result.structuredContent?.results.some(entry => entry.state === "stale")) result = await check();
 	assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0);
@@ -41,7 +41,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	await writeFile(join(root, "main.py"), "import sys\nvalue: int = 1\n");
 	let feedback = hook("PostToolUse").stdout;
 	for(let attempt=0;attempt<20&&!feedback.includes("F401");attempt++){await delay(100);feedback+=hook("PostToolUse","exec_command").stdout;}
-	assert.match(feedback, /F401/, JSON.stringify((await client.call("lsp_status",{path:"main.py"})).structuredContent));
+	assert.match(feedback, /F401/, JSON.stringify((await client.call("status",{path:"main.py"})).structuredContent));
 	assert.equal(await readFile(launcherLog, "utf8").catch(() => ""), "", "Hook uses prepared executable, never launcher");
 	await writeFile(join(home,"lsp-client.json"),JSON.stringify({schemaVersion:1}));
 	await client.close();
@@ -63,8 +63,8 @@ test(`real npx ${server} recipe works offline after preparation`, { timeout: 150
 	const env = { PATH: bin, npm_config_cache: join(dir, "npm-cache"), CODEX_LSP_CACHE: join(dir, "metadata") };
 	let client = bundleClient(root, home, env);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const check = () => client.call("check_diagnostics", { path: "main.ts", source: "lsp" });
-	const status = (await client.call("lsp_status", { path: "main.ts" })).structuredContent.tools[0];
+	const check = () => client.call("diagnostics", { path: "main.ts", source: "lsp" });
+	const status = (await client.call("status", { path: "main.ts" })).structuredContent.tools[0];
 	assert.equal(status.tool.source, "temporary"); assert(status.tool.command.includes(recipe));
 	let result = await check(); assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0, JSON.stringify(result));
 	await client.close(); client = bundleClient(root, home, { ...env, npm_config_offline: "true" });

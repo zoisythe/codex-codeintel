@@ -2,12 +2,12 @@
 	"hooks": {
 		"SessionStart": [
 			{
+				"matcher": "^(startup|resume|clear|fork)$",
 				"hooks": [
 					{
 						"type": "command",
 						"command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook",
-						"timeout": 10,
-						"statusMessage": "registering optional diagnostic baseline"
+						"timeout": 3
 					}
 				]
 			}
@@ -18,21 +18,20 @@
 					{
 						"type": "command",
 						"command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook",
-						"timeout": 3,
-						"statusMessage": "clearing LSP session state"
+						"timeout": 3
 					}
 				]
 			}
 		],
 		"PostToolUse": [
 			{
-				"matcher": "^(apply_patch|Write|Edit|MultiEdit|multi_edit|write|edit|multiedit|Bash|bash|shell|Shell|exec_command|unified_exec)$",
+				"matcher": "^(Bash|apply_patch|mcp__lsp__apply)$",
 				"hooks": [
 					{
 						"type": "command",
 						"command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook",
-						"timeout": 10,
-						"statusMessage": "checking automatic LSP and lint diagnostics"
+						"async": true,
+						"timeout": 330
 					}
 				]
 			}
@@ -43,8 +42,7 @@
 					{
 						"type": "command",
 						"command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook",
-						"timeout": 50,
-						"statusMessage": "reporting current diagnostics"
+						"timeout": 50
 					}
 				]
 			}
@@ -55,11 +53,11 @@
 					{
 						"type": "command",
 						"command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook",
-						"timeout": 50,
-						"statusMessage": "reporting current diagnostics"
+						"timeout": 3
 					}
 				]
 			}
-		]
+		],
+		"Interrupt": [{ "hooks": [{ "type": "command", "command": "node \"${PLUGIN_ROOT}/dist/cli.js\" hook", "timeout": 3 }] }]
 	}
 }

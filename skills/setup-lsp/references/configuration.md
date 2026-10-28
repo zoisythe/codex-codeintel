@@ -9,18 +9,18 @@ A new project feedback configuration can start with:
   "schemaVersion": 1,
   "automaticDiagnostics": { "postToolUse": "delta", "stop": "errors" },
   "projectChecks": "auto",
-  "lsp": { "python": "ty", "typescript": "typescript", "cpp": "clangd", "rust": "rust" },
+  "lsp": { "python": "ty", "typescript": "typescript", "go": "gopls", "cpp": "clangd", "rust": "rust" },
   "lint": { "python": "auto", "javascript": "auto" }
 }
 ```
 
-Limit language additions to the project and preserve existing choices. No configuration means automatic feedback is off while all six MCP tools remain explicitly callable. `automaticDiagnostics.stop="errors"` is feedback only. Ending gates require a separately authorized **global** `stopGate="introduced-errors"`; setup never enables it automatically. An existing global choice is preserved. Project `stopGate` is ignored. No plugin trust field or environment variable is required.
+Limit language additions to the project and preserve existing choices. No configuration means automatic feedback is off while all nine MCP tools remain explicitly callable. `automaticDiagnostics.stop="errors"` is feedback only. Ending gates require a separately authorized **global** `stopGate="introduced-errors"`; setup never enables it automatically. An existing global choice is preserved. Project `stopGate` is ignored. No plugin trust field or environment variable is required.
 
 LSP entries are a built-in name, `false`, or `{command: [program, ...args], extensions: [".ext"], env?: {KEY: "value"}, initialization?: {...}}`. Use `.py/.pyi`, `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, `.c/.h/.cpp/.hpp` and `.rs` as appropriate for custom servers; do not conflict with enabled built-in extensions. Explicit relative commands resolve from the workspace and never fall back. Built-ins resolve the nearest project environment, then PATH; automatic work never downloads missing tools.
 
 `lint.python` accepts `auto/ruff/off`; `lint.javascript` accepts `auto/biome/eslint/off`. Lint-off does not disable explicitly requested formatting. `formatting` accepts `tabSize` (1–16) and `insertSpaces`. `exclude` is an array of relative forward-slash globs, without `..`, absolute paths or negation.
 
-For multi-package or custom checks, replace `projectChecks` with the complete desired array. Each entry has a unique `name`, relative `cwd`, nonempty `command` array, `parser`, and nonempty `coverage` globs relative to that cwd. Relative command paths resolve from that cwd. Automatic commands must check without dependency installation or source modification. Output parsers: `tsc`, concise `ty`, JSON `cargo`, `ruff`, `eslint`, `biome`, `sarif`, and custom `json`:
+For multi-package or custom checks, replace `projectChecks` with the complete desired array. Each entry has a unique `name`, relative `cwd`, nonempty `command` array, `parser`, and nonempty `coverage` globs relative to that cwd. Relative command paths resolve from that cwd. Automatic commands must check without dependency installation or source modification. Output parsers: `tsc`, concise `ty`, JSON `go`/`cargo`, `ruff`, `eslint`, `biome`, `sarif`, and custom `json`:
 
 ```json
 {

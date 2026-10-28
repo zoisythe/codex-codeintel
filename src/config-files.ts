@@ -26,6 +26,8 @@ const exact: Record<string, readonly Impact[]> = {
 	".rustfmt.toml": ["format"],
 	"go.mod": ["types"],
 	"go.sum": ["types"],
+	"go.work": ["types"],
+	"go.work.sum": ["types"],
 	"lsp-client.json": ["types", "lint", "format"],
 };
 export function configurationImpact(path: string): readonly Impact[] {
@@ -49,6 +51,6 @@ export function configurationLanguages(path: string): readonly string[] {
 	if (/^(?:tsconfig|jsconfig|package|pnpm-lock|yarn\.lock)/.test(name)) return ["typescript"];
 	if (["pyproject.toml", "uv.lock", "ty.toml", "pyrightconfig.json"].includes(name)) return ["python"];
 	if ([".clangd", "compile_commands.json", "compile_flags.txt"].includes(name)) return ["cpp"];
-	if (["go.mod", "go.sum"].includes(name)) return ["go"];
+	if (["go.mod", "go.sum", "go.work", "go.work.sum"].includes(name)) return ["go"];
 	return [];
 }

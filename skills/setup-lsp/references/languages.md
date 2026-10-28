@@ -21,6 +21,10 @@ Install only missing project tools with the chosen manager (for example `pnpm ad
 
 For a simple root tsconfig, auto checking reads its effective coverage. For references/multiple packages use explicit per-package type and lint checks. A typical type command is `["node_modules/.bin/tsc", "--noEmit", "--pretty", "false", "-p", "tsconfig.json"]` with parser `tsc`; use actual hoisted/Windows tool paths where appropriate. Biome uses `lint --reporter=json --max-diagnostics=none`; ESLint uses `--format json`. JS type coverage requires both `allowJs` and `checkJs`. Derive globs from each command's actual config, files, include and exclude. Verify representative files from each package.
 
+## Go
+
+Reuse the project's Go version, gopls, modules/workspaces and build flags. Configure `lsp.go="gopls"`; do not replace the module/toolchain to make setup pass. A root go.mod enables `go vet -mod=readonly -json ./...` with parser `go`. Automatic scope is derived from `go list` Go/Test inputs, including platform and build-tag selection. Multi-module workspaces or custom tags require explicit commands and accurate coverage. Prepare dependencies intentionally during setup; automatic checks disable toolchain and module downloads. Verify real diagnostics, definitions/references, and rename/format plans on representative files; apply only if the user authorized modifying them.
+
 ## Rust
 
 Reuse `rust-analyzer`, Cargo, rust-src and the pinned Rustup toolchain. Install missing components within the requested toolchain scope only; avoid a workspace toolchain change as a setup shortcut. Root Cargo auto checking uses `cargo check --workspace --all-targets --message-format=json`. Nested workspaces or special features need explicit checks with their actual cwd, flags and coverage. Prepare dependencies intentionally during setup if needed. Automatic checks disable Rustup auto-install; a missing pinned toolchain remains unavailable. Verify actual diagnostics and navigation after indexing, and CLI checking of the workspace. Explain feature or platform coverage limitations.

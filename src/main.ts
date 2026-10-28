@@ -12,7 +12,7 @@ export async function main(): Promise<void> {
 	else if (command === "hook") await runHookCli();
 	else if (command === "service")
 		await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
-	else if (command === "check_project") {
+	else if (command === "check") {
 		const runtime = new Runtime();
 		const options: Record<string, unknown> = { run: "active" };
 		const tokens = process.argv.slice(3);
@@ -29,10 +29,10 @@ export async function main(): Promise<void> {
 		if (!["active", "cached"].includes(String(options["run"]))) throw new Error("run must be active or cached");
 		try {
 			process.stdout.write(
-				`${JSON.stringify(await runtime.request(workspace, "check_project", options, AbortSignal.timeout(BUDGET.request)))}\n`,
+				`${JSON.stringify(await runtime.request(workspace, "check", options, AbortSignal.timeout(BUDGET.request)))}\n`,
 			);
 		} finally {
 			await runtime.close();
 		}
-	} else throw new Error("Usage: codex-codeintel [mcp | hook | check_project [workspace]]");
+	} else throw new Error("Usage: codex-codeintel [mcp | hook | check [workspace]]");
 }

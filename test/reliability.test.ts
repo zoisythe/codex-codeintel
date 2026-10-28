@@ -104,13 +104,13 @@ it("excludes directory discovery but permits explicit files and invalidates dire
 	});
 	expect((await inventory(root, 10000, signal(), (await configuration(root)).exclude)).files.has("a.js")).toBe(false);
 	const args = { path: "a.js", scope: "paths", session: "s" };
-	await engine.dispatch("check_diagnostics", args, signal());
-	await engine.dispatch("check_diagnostics", args, signal());
+	await engine.dispatch("diagnostics", args, signal());
+	await engine.dispatch("diagnostics", args, signal());
 	expect(count).toBe(1);
 	await writeFile(join(root, "biome.json"), '{"linter":{"enabled":false}}');
-	await engine.dispatch("check_diagnostics", args, signal());
+	await engine.dispatch("diagnostics", args, signal());
 	expect(count).toBe(2);
-	await engine.dispatch("check_diagnostics", { ...args, refresh: true }, signal());
+	await engine.dispatch("diagnostics", { ...args, refresh: true }, signal());
 	expect(count).toBe(3);
 	await engine.close();
 });
@@ -181,10 +181,10 @@ it("cancels a queued request promptly without executing it or cancelling the act
 		return { path, state: "complete", findings: [] };
 	});
 	const args = { path: "a.js", scope: "paths", session: "s" };
-	const first = engine.dispatch("check_diagnostics", args, signal());
+	const first = engine.dispatch("diagnostics", args, signal());
 	await ready;
 	const controller = new AbortController();
-	const second = engine.dispatch("check_diagnostics", args, controller.signal);
+	const second = engine.dispatch("diagnostics", args, controller.signal);
 	controller.abort();
 	await expect(second).rejects.toThrow("cancelled");
 	release();
@@ -235,10 +235,10 @@ it("checks a small scope in a repository over 10000 files without reusing unveri
 		return { path, state: "complete", findings: [] };
 	});
 	const args = { scope: "paths", path: "small", session: "s" };
-	const result = await engine.dispatch("check_diagnostics", args, signal());
+	const result = await engine.dispatch("diagnostics", args, signal());
 	expect(result).toContain("checked=1");
 	expect(result).toContain("dependency freshness unverified");
-	await engine.dispatch("check_diagnostics", args, signal());
+	await engine.dispatch("diagnostics", args, signal());
 	expect(calls).toBe(2);
 	await engine.close();
 });
@@ -247,13 +247,13 @@ it.each(["add", "delete", "modify", "configuration"])("rejects old revision afte
 	const engine = new Engine(root, async (path) => ({ path, state: "complete", findings: [] }));
 	await Promise.all(Array.from({ length: 60 }, (_, i) => writeFile(join(root, `page${i}.js`), "x")));
 	const args = { scope: "paths", paths: Array.from({ length: 60 }, (_, i) => `page${i}.js`), session: "s" };
-	const first = await engine.dispatch("check_diagnostics", args, signal());
+	const first = await engine.dispatch("diagnostics", args, signal());
 	const cursor = (JSON.parse(first) as { next: { cursor: string } }).next.cursor;
 	if (change === "add") await writeFile(join(root, "b.js"), "new");
 	else if (change === "delete") await rm(join(root, "a.js"));
 	else if (change === "modify") await writeFile(join(root, "a.js"), "modified");
 	else await writeFile(project, '{"schemaVersion":1,"lint":{"javascript":"off"}}');
-	await expect(engine.dispatch("check_diagnostics", { ...args, cursor }, signal())).rejects.toThrow("Cursor");
+	await expect(engine.dispatch("diagnostics", { ...args, cursor }, signal())).rejects.toThrow("Cursor");
 	await engine.close();
 });
 
@@ -273,7 +273,8 @@ it("reports completed MCP writes successfully when follow-up diagnostics fail", 
 		},
 	});
 	try {
-		const output = await engine.dispatch("lsp_format", { path: "a.fake" }, signal());
+		const preview = await engine.dispatch("format", { path: "a.fake" }, signal());
+		const output = await engine.dispatch("apply", { plan: preview["plan"] }, signal());
 		expect(output["modifiedPaths"]).toEqual(["a.fake"]);
 		expect(output["diagnostics"]).toMatchObject({ state: "unavailable", note: "follow-up checker unavailable" });
 		expect(await readFile(join(root, "a.fake"), "utf8")).toContain("fixed!");

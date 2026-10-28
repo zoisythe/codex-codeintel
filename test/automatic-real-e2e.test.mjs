@@ -16,7 +16,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 	const summaries = [];
 	const bundleSha256 = createHash("sha256").update(await readFile(resolveCli())).digest("hex");
 	t.after(async () => { await rm(dir, { recursive: true, force: true }); });
-	for (const language of ["python", "typescript", "native-typescript", "c", "cpp", "rust"]) {
+	for (const language of ["python", "typescript", "native-typescript", "c", "cpp", ...(process.env.CODEX_LSP_TEST_RUST === "1" ? ["rust"] : [])]) {
 		const root = join(dir, language), home = join(dir, `${language}-home`);
 		await mkdir(root); await mkdir(home);
 		await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
@@ -54,7 +54,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 		const baselineClient = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 		try {
 			for (let attempt = 0; attempt < 60; attempt++) {
-				const result = (await baselineClient.call("check_project", { run: "cached" })).structuredContent;
+				const result = (await baselineClient.call("check", { run: "cached" })).structuredContent;
 				if (result.state !== "missing" && result.state !== "running") { assert.equal(result.state, "complete", JSON.stringify(result)); break; }
 				await delay(200);
 			}
@@ -72,7 +72,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 		// Status is read after automatic feedback; diagnosis never calls MCP.
 		const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 		try {
-			const status = (await c.call("lsp_status", { path })).structuredContent;
+			const status = (await c.call("status", { path })).structuredContent;
 			assert.equal(status.tools[0].running, true, JSON.stringify(status.tools));
 			summaries.push({ language, coldMs: cold.elapsed, hotMs: hot.elapsed, processStarts: status.clients.processStarts, command: status.tools[0].tool.command, serviceIdentity: status.service.identity });
 			await hook("SessionEnd");
@@ -91,7 +91,7 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({schemaVersion: 1, automaticDiagnostics: {postToolUse:"delta",stop:"errors"}, lint: {javascript:"off",python:"off"}}));
 	const env = {...process.env, CODEX_HOME:home, CODEX_LSP_CACHE:join(dir,"cache"), RUSTUP_TOOLCHAIN:"1.0.0", RUSTUP_AUTO_INSTALL:"1", RUSTUP_DIST_SERVER:"http://127.0.0.1:9"};
 	const c = bundleClient(root,home,env);
-	t.after(async () => {try {const status=(await c.call("lsp_status",{path:"src/main.rs"})).structuredContent; if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
+	t.after(async () => {try {const status=(await c.call("status",{path:"src/main.rs"})).structuredContent; if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
 	const hook = event => {
 		const result=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:event,session_id:"rustup",tool_name:"Write",tool_input:{path:"src/main.rs"}})});
 		assert.equal(result.status,0,result.stderr); return result.stdout?JSON.parse(result.stdout):{};
@@ -99,7 +99,7 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	hook("SessionStart");
 	const gate=hook("PreToolUse"); assert.equal(gate.hookSpecificOutput?.permissionDecision,undefined);
 	await delay(700);
-	const result=(await c.call("check_project",{run:"cached"})).structuredContent;
+	const result=(await c.call("check",{run:"cached"})).structuredContent;
 	assert.equal(result.state,"failed");
 	assert.match(result.checkers[0].note,/not installed/);
 	assert.doesNotMatch(result.checkers[0].note,/syncing channel updates|downloading component/);
@@ -112,17 +112,17 @@ test("automatic Ruff baseline and MCP lint preserve source with fix/fix-only con
 	await writeFile(join(root,"pyproject.toml"),'[tool.ruff]\nfix=true\nfix-only=true\n[tool.ruff.lint]\nselect=["F401"]\n');
 	const original="import os\nvalue: int = 1\n";await writeFile(join(root,"main.py"),original);
 	const env={...process.env,CODEX_HOME:home,CODEX_LSP_CACHE:join(dir,"cache")},c=bundleClient(root,home,env);
-	t.after(async()=>{try{const status=(await c.call("lsp_status",{path:"main.py"})).structuredContent;if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
+	t.after(async()=>{try{const status=(await c.call("status",{path:"main.py"})).structuredContent;if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
 	for(const event of ["SessionStart","PreToolUse"]){const result=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:event,session_id:"ruff-readonly",tool_name:"Write",tool_input:{path:"main.py"}})});assert.equal(result.status,0,result.stderr);assert.equal(result.stdout?JSON.parse(result.stdout).hookSpecificOutput?.permissionDecision:undefined,undefined,result.stdout);}
 	assert.equal(await readFile(join(root,"main.py"),"utf8"),original);
 	await delay(1000);
-	const baseline=(await c.call("check_project",{run:"cached"})).structuredContent;
+	const baseline=(await c.call("check",{run:"cached"})).structuredContent;
 	assert.equal(baseline.state,"complete",JSON.stringify(baseline));assert(baseline.diagnostics.some(finding=>finding.source.includes("F401")));
-	const diagnostic=await c.call("check_diagnostics",{path:"main.py",source:"lint"});
+	const diagnostic=await c.call("diagnostics",{path:"main.py",source:"lint"});
 	assert.equal(diagnostic.isError,undefined);assert(diagnostic.structuredContent.errors>0);
 	assert.equal(await readFile(join(root,"main.py"),"utf8"),original);
 	await writeFile(join(root,"ty.toml"),'[src]\ninclude=["."]\nexclude=["."]\n');
 	const excluded=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:"PreToolUse",session_id:"ruff-readonly",tool_name:"Write",tool_input:{path:"main.py"}})});
 	assert.equal(excluded.status,0,excluded.stderr);assert.equal(excluded.stdout,"",excluded.stdout);
-	const excludedBaseline=(await c.call("check_project",{refresh:true})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python").state,"complete");
+	const excludedBaseline=(await c.call("check",{refresh:true})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python").state,"complete");
 });

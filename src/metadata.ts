@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { directoryLock } from "./directory-lock.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
+import { rootSession } from "./hook-events.js";
 import type { Finding } from "./results.js";
 import { record } from "./results.js";
 import { workspaceIdentity } from "./service-identity.js";
@@ -29,6 +30,14 @@ export interface SessionState {
 	delivery: string[];
 	shown: Record<string, string>;
 	blocked: string[];
+	hookEvents: Record<
+		string,
+		{ turn: string; state: "queued" | "running" | "complete" | "superseded" | "cancelled" | "failed" }
+	>;
+	feedback: Record<string, { bytes: number; signatures: string[] }>;
+	baselineAttempted: boolean;
+	waitEpoch: number;
+	interrupts: Record<string, number>;
 }
 const empty = (id: string): SessionState => ({
 	id,
@@ -50,6 +59,11 @@ const empty = (id: string): SessionState => ({
 	delivery: [],
 	shown: {},
 	blocked: [],
+	hookEvents: {},
+	feedback: {},
+	baselineAttempted: false,
+	waitEpoch: 0,
+	interrupts: {},
 });
 export class Metadata {
 	constructor(private readonly root: string) {}
@@ -57,7 +71,7 @@ export class Metadata {
 		const user = process.getuid?.() ?? hash(homedir()).slice(0, 10);
 		const base = join(
 			executionEnvironment()["CODEX_LSP_CACHE"] ?? join(tmpdir(), `codex-lsp-${user}`),
-			`metadata-v7-${user}`,
+			`metadata-v8-${user}`,
 		);
 		await mkdir(base, { recursive: true, mode: 0o700 });
 		const info = await lstat(base);
@@ -124,14 +138,40 @@ export class Metadata {
 				)
 			)
 				throw new Error("Invalid channel metadata");
-			data["epoch"] ??= "legacy";
-			data["outbox"] ??= {};
 			if (
 				typeof data["epoch"] !== "string" ||
 				!record(data["outbox"]) ||
 				!Object.values(data["outbox"]).every((value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value))
 			)
 				throw new Error("Invalid delivery metadata");
+			if (!record(data["hookEvents"]) || !record(data["feedback"]) || typeof data["baselineAttempted"] !== "boolean")
+				throw new Error("Invalid hook metadata");
+			if (
+				!Number.isSafeInteger(data["waitEpoch"]) ||
+				!record(data["interrupts"]) ||
+				!Object.values(data["interrupts"]).every(
+					(value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+				)
+			)
+				throw new Error("Invalid interrupt metadata");
+			for (const entry of Object.values(data["hookEvents"]))
+				if (
+					!record(entry) ||
+					typeof entry["turn"] !== "string" ||
+					!["queued", "running", "complete", "superseded", "cancelled", "failed"].includes(String(entry["state"]))
+				)
+					throw new Error("Invalid hook registration state");
+			for (const entry of Object.values(data["feedback"]))
+				if (
+					!record(entry) ||
+					typeof entry["bytes"] !== "number" ||
+					!Number.isFinite(entry["bytes"]) ||
+					entry["bytes"] < 0 ||
+					entry["bytes"] > 8192 ||
+					!Array.isArray(entry["signatures"]) ||
+					!entry["signatures"].every((item: unknown) => typeof item === "string" && /^[a-f0-9]{64}$/.test(item))
+				)
+					throw new Error("Invalid feedback budget");
 			return data as unknown as SessionState;
 		} catch (error) {
 			if (record(error) && error["code"] === "ENOENT") return empty(id);
@@ -202,6 +242,30 @@ export class Metadata {
 			Object.assign(state, { ...empty(id), version: state.version, generation: state.generation + 1 });
 			state.epoch = randomUUID();
 			state.turn = "__ended__";
+		});
+	}
+	async start(id: string, signal: AbortSignal): Promise<SessionState> {
+		return this.update(id, signal, (state) => {
+			Object.assign(state, { ...empty(id), version: state.version, epoch: randomUUID() });
+		});
+	}
+	async actor(id: string, signal: AbortSignal): Promise<SessionState> {
+		const parent = await this.read(rootSession(id));
+		if (rootSession(id) === id) return parent;
+		return this.update(id, signal, (state) => {
+			if (state.epoch === parent.epoch) return false;
+			Object.assign(state, {
+				...empty(id),
+				version: state.version,
+				epoch: parent.epoch,
+				baseline: parent.baseline,
+				diagnosticBaseline: parent.diagnosticBaseline,
+				baselineAttempted: parent.baselineAttempted,
+				edited: parent.edited,
+				configuration: parent.configuration,
+				shown: parent.shown["baselineJob"] ? { baselineJob: parent.shown["baselineJob"] } : {},
+			});
+			return true;
 		});
 	}
 }

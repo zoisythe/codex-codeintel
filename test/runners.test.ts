@@ -32,10 +32,9 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 	expect(result?.findings.some((item) => item.line === 2 && item.source.includes("noUnusedVariables"))).toBe(true);
 	expect(await readFile(join(root, "a.js"), "utf8")).toBe(before);
 	expect(await formatWithRunner(root, "a.js", new AbortController().signal)).toMatchObject({
-		status: "formatted",
-		modifiedPaths: ["a.js"],
+		before,
 	});
-	expect(await readFile(join(root, "a.js"), "utf8")).not.toBe(before);
+	expect(await readFile(join(root, "a.js"), "utf8")).toBe(before);
 });
 it("reports unavailable lint without requiring directory trust", async () => {
 	vi.stubEnv("PATH", "");

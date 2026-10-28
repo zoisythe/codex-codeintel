@@ -47,14 +47,14 @@ async function fixture(t, extra = {}, mode = "pull") {
 			child.stdin.end(JSON.stringify({ cwd: root, session_id: session, turn_id: "turn-1", hook_event_name: event, ...input }));
 		});
 	};
-	const pre = () => hook("PreToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } });
-	const post = () => hook("PostToolUse", { tool_name: "Write", tool_input: { path: "main.fake" } });
-	const read = () => hook("PostToolUse", { tool_name: "exec_command", tool_input: { cmd: "rg clean .\\main.fake" } });
+	const pre = () => hook("PreToolUse", { tool_name: "apply_patch", tool_input: { path: "main.fake" } });
+	const post = () => hook("PostToolUse", { tool_name: "apply_patch", tool_input: { path: "main.fake" } });
+	const read = () => hook("PostToolUse", { tool_name: "Bash", tool_input: { cmd: "rg clean .\\main.fake" } });
 	const state = async () => {
 		for (const path of await readdir(env.CODEX_LSP_CACHE, { recursive: true }).catch(() => [])) {
 			if (!path.endsWith(".json")) continue;
-			const value = JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8"));
-			if (value.id === session) return value;
+			const value = JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8").catch(error => { if (error.code === "ENOENT") return "null"; throw error; }));
+			if (value?.id === session) return value;
 		}
 	};
 	const identity = digest(JSON.stringify([process.getuid?.() ?? homedir(), await realpath(root), await realpath(home), digest(await readFile(cli, "utf8")), 1]));
@@ -69,7 +69,7 @@ async function fixture(t, extra = {}, mode = "pull") {
 			socket.on("data", (part) => { buffer += part; if (buffer.includes("\n")) { const result = JSON.parse(buffer); socket.destroy(); result.error ? reject(new Error(result.error)) : resolve(result.output); } });
 		});
 	};
-	const consume = () => raw("hook", { session_id: session, turn_id: "turn-1", hook_event_name: "PostToolUse", tool_name: "exec_command", tool_input: { cmd: "rg clean ." } });
+	const consume = () => raw("hook", { session_id: session, turn_id: "turn-1", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { cmd: "rg clean ." } });
 	const clients = [];
 	const client = () => { const instance = bundleClient(root, home, env); clients.push(instance); return instance; };
 	const write = (value) => writeFile(join(root, "main.fake"), value);
@@ -88,21 +88,22 @@ async function fixture(t, extra = {}, mode = "pull") {
 	return { root, home, env, config, configure, hook, pre, post, read, state, records, write, consume, raw, session, client, lspLog };
 }
 
-test("cold shell passthrough, bounded startup and explicit write baseline", { timeout: 30000 }, async (t) => {
+test("cold shell passthrough, bounded startup and uncertain late baseline", { timeout: 30000 }, async (t) => {
 	const f = await fixture(t, { CODEINTEL_SERVICE_DELAY: "5200", CHECK_DELAY: "1500" });
 	await f.configure({ schemaVersion: 999 });
 	for (const cmd of ["rg clean .\\main.fake", 'rg "\\bclean\\b" .', "Get-Content main.fake; Get-ChildItem", "Set-Content main.fake x", "cat $(touch main.fake)"]) {
-		const result = await f.hook("PreToolUse", { session_id: "", tool_name: "exec_command", tool_input: { cmd } });
+		const result = await f.hook("PreToolUse", { session_id: "", tool_name: "Bash", tool_input: { cmd } });
 		assert.equal(result.text, ""); assert(result.ms < 1000, `Shell pre-hook took ${result.ms}ms`);
 	}
 	assert.equal((await f.records()).length, 0, "Pre hooks did not start a service or analysis");
 	await f.configure();
 	const start = await f.hook("SessionStart"); assert(start.ms < 1200, `SessionStart took ${start.ms}ms`);
 	const waiting = f.pre(); await delay(200);
-	assert.equal((await f.hook("PreToolUse", { tool_name: "exec_command", tool_input: { cmd: "rg clean ." } })).text, "");
+	assert.equal((await f.hook("PreToolUse", { tool_name: "Bash", tool_input: { cmd: "rg clean ." } })).text, "");
 	const gate = await waiting;
 	assert.equal(gate.text, ""); assert(gate.ms < 5100, `Write startup wait exceeded its budget: ${gate.ms}`);
-	await delay(7100);
+	await f.write("broken before the service starts\n"); const late = await f.post();
+	assert.match(late.text, /unattributed=1/); assert.equal((await f.state()).diagnosticBaseline, null, "A late registration cannot manufacture a pre-edit baseline");
 	assert.equal((await f.pre()).text, "", "The independently started service and baseline remain reusable");
 	const before = (await f.records()).filter((entry) => entry.args?.includes("ls-files")).length;
 	const read = await f.read(); assert(read.ms < 1200);
@@ -110,55 +111,51 @@ test("cold shell passthrough, bounded startup and explicit write baseline", { ti
 	t.diagnostic(JSON.stringify({ sessionStartMs: Math.round(start.ms), writeWaitMs: Math.round(gate.ms), readPostMs: Math.round(read.ms) }));
 });
 
-test("late delivery, acknowledgement retry, stale hashes, Stop repair and session epochs", { timeout: 35000 }, async (t) => {
-	const f = await fixture(t, {}, "cold");
-	await f.hook("SessionStart");
-	await until(async () => (await f.state())?.diagnosticBaseline);
-	await delay(150);
-	assert.equal((await f.pre()).text, "");
-	await f.write("broken\n"); const initial = await f.post();
-	assert(!initial.text.includes("broken fixture"), "A cold analysis did not block the hook until completion");
-	await until(async () => Object.keys((await f.state()).outbox).length);
-	const before = (await f.records()).length;
-	const first = await f.consume(), retry = await f.consume();
-	assert(first.deliveryId); assert.equal(retry.deliveryId, first.deliveryId);
-	assert.match(first.output.context, /automatic diagnostics.*deliveryId=/); assert.match(first.output.context, /broken fixture/);
-	assert.equal((await f.records()).length, before, "Consuming completed results starts no processes");
-	await f.raw("hook_ack", { session: f.session, deliveryId: first.deliveryId });
-	assert.equal((await f.consume()).output.kind, "silent", "Acknowledged results are not repeated");
-	assert.equal((await f.hook("Stop")).value.decision, "block");
-	assert.notEqual((await f.hook("Stop")).value.decision, "block");
-	await f.write("clean\n"); await f.post();
-	await until(async () => /repaired/.test((await f.read()).text));
-	const epoch = (await f.state()).epoch;
-	await f.hook("SessionEnd"); assert.notEqual((await f.state()).epoch, epoch);
-	assert.equal((await f.consume()).output.kind, "silent");
-	const stale = await fixture(t, {}, "cold");
-	await stale.hook("SessionStart"); await until(async () => (await stale.state())?.diagnosticBaseline); await delay(150); await stale.pre(); await stale.write("broken old\n"); await stale.post();
-	await until(async () => Object.keys((await stale.state()).outbox).length);
-	await stale.write("clean\n");
-	assert.equal((await stale.consume()).output.kind, "silent", "Changed contents invalidate an unacknowledged result");
-	assert((await stale.state()).pending.includes("main.fake"));
-	assert.notEqual((await stale.hook("Stop")).value.decision, "block");
-	t.diagnostic(JSON.stringify({ coldPostMs: Math.round(initial.ms), deliveryId: first.deliveryId }));
+test("stdout failure retains the same delivery through service restart and rejects stale content", { timeout: 20000 }, async (t) => {
+	const f = await fixture(t); await f.hook("SessionStart");
+	const fail = join(f.home, "stdout-failure.mjs");
+	await writeFile(fail, 'if(process.argv[2]==="hook"){const write=process.stdout.write.bind(process.stdout);process.stdout.write=(chunk,...args)=>{if(String(chunk).includes("deliveryId=")){const callback=args.at(-1);if(typeof callback==="function")queueMicrotask(()=>callback(new Error("fixture stdout failure")));return false;}return write(chunk,...args);};}');
+	f.env.NODE_OPTIONS += ` --import=${pathToFileURL(fail).href}`;
+	await f.write("broken retained\n"); const failed = await f.post(); assert.match(failed.text, /stdout failure/);
+	const first = await f.consume(), retry = await f.consume(); assert(first.deliveryId); assert.equal(first.deliveryId, retry.deliveryId);
+	const service = (await f.records()).find(entry => entry.args?.includes("service")); assert(service);
+	if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(service.pid), "/f", "/t"], { windowsHide: true, stdio: "ignore" });
+	else process.kill(service.pid, "SIGTERM");
+	await delay(200); const client = f.client(); await client.call("diagnostics", { path: "main.fake", session: f.session });
+	const restarted = await f.consume(); assert.equal(restarted.deliveryId, first.deliveryId, "Restart preserves unacknowledged delivery IDs");
+	await f.write("clean now\n"); assert.equal((await f.consume()).output.kind, "silent"); assert((await f.state()).pending.includes("main.fake"));
 });
 
+test("native async waits independently; ordinary Stop is bounded and epochs discard stale work", { timeout: 35000 }, async (t) => {
+	const f = await fixture(t, {}, "cold");
+	await f.configure({ ...f.config, stopGate: "off" });
+	await f.hook("SessionStart"); await until(async () => (await f.state())?.diagnosticBaseline);
+	await f.write("broken new\n"); const native = f.post();
+	await until(async () => (await f.state())?.pending?.includes("main.fake"));
+	const stop = await f.hook("Stop"); assert(stop.ms < 1800, `Ordinary Stop took ${stop.ms}ms`); assert.notEqual(stop.value.decision, "block");
+	const result = await native; assert.match(result.text, /broken fixture/); assert(result.ms > 1500, "The async process waits for background completion");
+	assert(Buffer.byteLength(result.text) <= 2048); assert.equal((await f.read()).text, "");
+	await f.write("clean\n"); const repair = await f.post(); assert.match(repair.text, /repaired/);
+	const epoch = (await f.state()).epoch;
+	await f.hook("SessionEnd"); assert.notEqual((await f.state()).epoch, epoch); assert.equal((await f.consume()).output.kind, "silent");
+	t.diagnostic(JSON.stringify({ nativeAsyncMs: Math.round(result.ms), ordinaryStopMs: Math.round(stop.ms) }));
+});
 test("hidden subprocesses, bounded Windows cleanup, shared startup and failure cooldown", { timeout: 20000 }, async (t) => {
 	const f = await fixture(t, {}, "startup-fail");
 	await f.hook("SessionStart"); await f.pre();
 	const a = f.client(), b = f.client();
-	const check = () => a.call("check_diagnostics", { path: "main.fake", source: "lsp", session: f.session });
+	const check = () => a.call("diagnostics", { path: "main.fake", source: "lsp", session: f.session });
 	await check(); await f.write("clean second\n"); await check(); await f.write("clean third\n"); await check();
 	const count = async () => (await readFile(f.lspLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).length;
 	assert.equal(await count(), 1, "Repeated initialization failures are cooled down");
-	await a.call("lsp_status", { path: "main.fake", refresh: true }); await check();
+	await a.call("status", { path: "main.fake", refresh: true }); await check();
 	assert.equal(await count(), 2, "Explicit refresh resets cooldown");
-	const statusA = (await a.call("lsp_status", { path: "main.fake" })).structuredContent;
-	const statusB = (await b.call("lsp_status", { path: "main.fake" })).structuredContent;
+	const statusA = (await a.call("status", { path: "main.fake" })).structuredContent;
+	const statusB = (await b.call("status", { path: "main.fake" })).structuredContent;
 	assert.equal(statusA.service.pid, statusB.service.pid);
 	await f.configure({ ...f.config, lsp: { fake: { ...f.config.lsp.fake, env: { CODEX_LSP_TEST_MODE: "slow", CODEX_LSP_TEST_LOG: f.lspLog } } } });
 	await check();
-	const began = performance.now(); await a.call("lsp_status", { path: "main.fake", refresh: true });
+	const began = performance.now(); await a.call("status", { path: "main.fake", refresh: true });
 	assert(performance.now() - began < 2500, "Cleanup does not synchronously stall the service");
 	const records = await f.records();
 	assert(records.length > 0); assert(records.every((entry) => entry.windowsHide === true), "Every production process launch hides its console");

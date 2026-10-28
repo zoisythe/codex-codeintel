@@ -1,7 +1,7 @@
 {
 	"name": "codex-codeintel",
-	"version": "0.9.0",
-	"description": "Nonblocking code intelligence with six MCP tools, optional automatic feedback, and setupLSP configuration.",
+	"version": "0.10.0",
+	"description": "Nine compact MCP tools for checks, navigation, context and previewed edits; apply is the only source writer.",
 	"author": {
 		"name": "zoisythe",
 		"url": "https://github.com/zoisythe"
@@ -21,8 +21,8 @@
 	"mcpServers": "./.mcp.json",
 	"interface": {
 		"displayName": "Codex CodeIntel",
-		"shortDescription": "Code diagnostics, symbol navigation, rename, and formatting",
-		"longDescription": "Codex CodeIntel shares local LSP and project CLI checks across MCP and Hooks. Edits always proceed. Automatic feedback is off until configured; optional ending gates require an explicit global setting and reliable baselines. Six tools provide project checks, scoped diagnostics, navigation, rename and formatting. Use setupLSP to configure and repair project tools.",
+		"shortDescription": "Code intelligence and previewed lint/LSP fixes",
+		"longDescription": "Codex CodeIntel shares local LSP and CLI checks across MCP and optional nonblocking Hooks. Nine tools provide diagnostics, navigation, context and edit previews. Only apply writes source files; plans are single-use. Use setupLSP to configure project tools.",
 		"developerName": "zoisythe",
 		"category": "Developer Tools",
 		"capabilities": [
@@ -34,9 +34,9 @@
 		"privacyPolicyURL": "https://github.com/zoisythe/codex-codeintel#privacy",
 		"termsOfServiceURL": "https://github.com/zoisythe/codex-codeintel#license",
 		"defaultPrompt": [
-			"Run check_diagnostics on the files I just edited.",
-			"Use lsp_navigation to find references before changing this symbol.",
-			"Format the scoped files with lsp_format after I approve the paths."
+			"Run diagnostics on the files I just edited.",
+			"Use inspect to understand the affected symbols and candidate tests.",
+			"Preview formatting with format, then apply the plan to the authorized files."
 		],
 		"brandColor": "#0F766E",
 		"screenshots": []

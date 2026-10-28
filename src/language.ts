@@ -1,29 +1,22 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { dirname, extname, relative, resolve } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { readFile } from "node:fs/promises";
+import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BUDGET } from "./budgets.js";
 import type { Config } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
 import { executionEnvironment } from "./environment.js";
-import { applyTextChanges, hash, inside, inventory, workspacePath } from "./files.js";
+import { hash, inside, workspacePath } from "./files.js";
 import { logEvent } from "./log.js";
 import { LspClient } from "./lsp/client.js";
 import { getLanguageId } from "./lsp/language-mappings.js";
 import { LspManager } from "./lsp/manager.js";
-import type { Diagnostic, TextEdit, WorkspaceEdit } from "./lsp/types.js";
+import type { Diagnostic, DocumentSymbol, SymbolInfo, TextEdit, WorkspaceEdit } from "./lsp/types.js";
 import { findWorkspaceRoot } from "./lsp/workspace-root.js";
 import { measured } from "./metrics.js";
-import {
-	type FileResult,
-	type FormatResult,
-	message,
-	type NavigationResult,
-	number,
-	record,
-	text,
-	WriteFailure,
-} from "./results.js";
+import { type FileResult, message, record, text } from "./results.js";
 import { lintAvailability, select } from "./runners.js";
+import { outline, position, publicOutline } from "./symbols.js";
 import { codeLanguage, resolveServer } from "./tool-resolution.js";
 
 function diagnosticUriKey(uri: string): string {
@@ -48,7 +41,7 @@ class Client extends LspClient {
 		return this.server.id;
 	}
 	private stopping = false;
-	requestSignal: AbortSignal | undefined;
+	readonly requestSignals = new AsyncLocalStorage<AbortSignal>();
 	private stopTask: Promise<void> | undefined;
 	override stop(): Promise<void> {
 		if (this.stopTask) return this.stopTask;
@@ -131,9 +124,10 @@ class Client extends LspClient {
 			}
 		} else {
 			if (!this.connection) throw new Error("LSP client not started");
-			const signal = this.requestSignal
-				? AbortSignal.any([this.requestSignal, AbortSignal.timeout(BUDGET.lspRequest)])
-				: AbortSignal.timeout(BUDGET.lspRequest);
+			const signal = AbortSignal.any([
+				...(this.requestSignals.getStore() ? [this.requestSignals.getStore() as AbortSignal] : []),
+				AbortSignal.timeout(BUDGET.lspRequest),
+			]);
 			if (
 				this.isRustAnalyzer() &&
 				(method.startsWith("textDocument/") || method === "workspace/symbol") &&
@@ -145,6 +139,39 @@ class Client extends LspClient {
 		if (method === "initialize" && record(result) && record(result["capabilities"]))
 			this.capabilities = result["capabilities"];
 		return result;
+	}
+
+	async query(method: string, params: Record<string, unknown>): Promise<unknown> {
+		const capabilities: Record<string, string> = {
+			definition: "definitionProvider",
+			declaration: "declarationProvider",
+			references: "referencesProvider",
+			hover: "hoverProvider",
+			typeDefinition: "typeDefinitionProvider",
+			implementation: "implementationProvider",
+			signatureHelp: "signatureHelpProvider",
+			completion: "completionProvider",
+			prepareRename: "renameProvider",
+			prepareCallHierarchy: "callHierarchyProvider",
+			prepareTypeHierarchy: "typeHierarchyProvider",
+			codeAction: "codeActionProvider",
+			resolve: "codeActionProvider",
+		};
+		const key = method.split("/").at(-1) ?? "";
+		const capability = capabilities[key];
+		if (capability && !this.capabilities[capability]) return { status: "unsupported", operation: key };
+		if (method === "textDocument/prepareRename" && !this.supports("prepare_rename"))
+			return { status: "unsupported", operation: key };
+		try {
+			return await this.sendRequest(method, params);
+		} catch (error) {
+			if (
+				(record(error) && error["code"] === -32601) ||
+				/method not found|unsupported|Unhandled method/i.test(message(error))
+			)
+				return { status: "unsupported", operation: key };
+			throw error;
+		}
 	}
 	async navigation(method: string, path: string, line: number, character: number): Promise<unknown> {
 		const capability: Record<string, string> = {
@@ -463,6 +490,11 @@ export class Languages {
 			capabilities: {
 				diagnostics: unavailable ? "unavailable" : client?.diagnosticsVerified ? "available" : "unverified",
 				navigation: status("definition"),
+				declaration: status("declarationProvider"),
+				callHierarchy: status("callHierarchyProvider"),
+				typeHierarchy: status("typeHierarchyProvider"),
+				completion: status("completionProvider"),
+				actions: status("codeActionProvider"),
 				rename: status("rename"),
 				formatting: !this.config.valid
 					? "unavailable"
@@ -472,6 +504,7 @@ export class Languages {
 							? "unverified"
 							: status("format"),
 				lint: !this.config.valid || (record(lint) && lint["unavailable"]) ? "unavailable" : lintHealth.state,
+				lintFixes: !this.config.valid || (record(lint) && lint["unavailable"]) ? "unavailable" : lintHealth.state,
 			},
 			running: !!client,
 			verified: !!client,
@@ -480,7 +513,7 @@ export class Languages {
 				: (failure?.reason ?? (resolved?.tool.source === "missing" ? resolved.tool.note : reason || undefined)),
 			retryAt: failure?.retryAt,
 			recovery:
-				"Use $setup-lsp to configure, install or repair tools; then lsp_status refresh=true. Status does not start or download tools. Existing commands that fail never fall back.",
+				"Use $setup-lsp to configure, install or repair tools; then status refresh=true. Status does not start or download tools. Existing commands that fail never fall back.",
 		};
 	}
 	async preflight(path: string, signal: AbortSignal, operation?: string): Promise<void> {
@@ -548,10 +581,10 @@ export class Languages {
 		}
 		this.failures.delete(failureKey);
 		try {
-			if (client instanceof Client) client.requestSignal = options.signal;
-			return await fn(client);
+			return await (client instanceof Client
+				? client.requestSignals.run(options.signal, () => fn(client))
+				: fn(client));
 		} finally {
-			if (client instanceof Client) client.requestSignal = undefined;
 			options.manager.releaseClient(root, resolved.server.id);
 		}
 	}
@@ -576,6 +609,9 @@ export class Languages {
 								column: item.range.start.character + 1,
 								severity: item.severity === 1 ? ("error" as const) : ("warning" as const),
 								source: `${item.source ?? "lsp"}${item.code === undefined ? "" : `/${item.code}`}`,
+								...(item.code !== undefined ? { rule: String(item.code) } : {}),
+								endLine: item.range.end.line + 1,
+								endColumn: item.range.end.character + 1,
 								message: item.message,
 							})),
 						note: result.ready ? (result.evidence ?? "fresh diagnostics") : "No fresh diagnostics published yet",
@@ -601,123 +637,134 @@ export class Languages {
 			};
 		}
 	}
-	async navigate(args: Record<string, unknown>, signal: AbortSignal): Promise<NavigationResult> {
+
+	async request(path: string, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+		return this.withLspClient(
+			await workspacePath(this.root, path),
+			async (client) => {
+				if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+				await client.openFile(await workspacePath(this.root, path));
+				if (method === "textDocument/codeAction") {
+					const diagnostics = await client.collect(await workspacePath(this.root, path), signal);
+					client.diagnosticsVerified = diagnostics.ready;
+					params = { ...params, context: { diagnostics: diagnostics.items } };
+					const result = await client.query(method, params);
+					if (record(result) && result["status"] === "unsupported") return result;
+					return { status: diagnostics.ready ? "complete" : "pending", result };
+				}
+				return client.query(method, params);
+			},
+			method,
+			{ manager: this.manager, signal },
+		);
+	}
+	async navigate(args: Record<string, unknown>, signal: AbortSignal): Promise<Record<string, unknown>> {
 		const path = await workspacePath(this.root, text(args["path"]));
 		const operation = text(args["operation"]);
-		const line = number(args["line"], 1, 1, 10000000);
-		const column = number(args["column"], 1, 1, 1000000) - 1;
-		const before = operation === "rename" ? await inventory(this.root, 10000, signal) : undefined;
 		return this.withLspClient(
 			path,
 			async (client) => {
-				if (
-					client instanceof Client &&
-					["definition", "references", "symbols", "prepare_rename"].includes(operation) &&
-					!client.supports(operation === "symbols" && args["query"] ? "workspaceSymbolProvider" : operation)
-				)
-					return { status: "unsupported", operation };
+				if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+				const symbols = async () => outline((await client.documentSymbols(path)) ?? []);
+				if (operation === "symbols") {
+					if (!client.supports(args["query"] ? "workspaceSymbolProvider" : "symbols"))
+						return { status: "unsupported", operation };
+					if (args["query"])
+						return { status: "complete", result: (await client.workspaceSymbols(text(args["query"]))) ?? [] };
+					const items = await symbols();
+					return {
+						status: "complete",
+						result: items
+							.filter((item) =>
+								args["symbol"]
+									? item.parent === args["symbol"] || item.symbol === args["symbol"]
+									: !item.parent,
+							)
+							.map(publicOutline),
+					};
+				}
+				const pos = await position(path, args, symbols);
+				await client.openFile(path);
+				const textDocument = { uri: pathToFileURL(path).href };
+				const point = { line: pos.line - 1, character: pos.column - 1 };
 				let result: unknown;
-				switch (operation) {
-					case "hover":
-					case "typeDefinition":
-					case "implementation":
-					case "signatureHelp":
-						if (!(client instanceof Client)) throw new Error("Unexpected client");
-						result = await client.navigation(operation, path, line, column);
-						break;
-					case "definition":
-						result = await client.definition(path, line, column);
-						break;
-					case "references":
-						result = await client.references(path, line, column);
-						break;
-					case "symbols":
-						result = args["query"]
-							? await client.workspaceSymbols(text(args["query"]))
-							: await client.documentSymbols(path);
-						break;
-					case "prepare_rename":
-						result = await client.prepareRename(path, line, column);
-						break;
-					case "rename": {
-						if (!before?.complete) throw new Error("Cannot safely snapshot workspace for rename");
-						const name = text(args["newName"]);
-						if (!name) throw new Error("newName required");
-						const edit = await client.rename(path, line, column, name);
-						return this.applyRename(edit, before.version, signal);
+				if (operation === "rename") {
+					if (!client.supports("rename")) return { status: "unsupported", operation };
+					result = await client.rename(path, pos.line, pos.column - 1, text(args["newName"]));
+				} else if (["incoming", "outgoing", "supertypes", "subtypes"].includes(operation)) {
+					const call = operation === "incoming" || operation === "outgoing";
+					const prepared = await client.query(
+						call ? "textDocument/prepareCallHierarchy" : "textDocument/prepareTypeHierarchy",
+						{ textDocument, position: point },
+					);
+					if (record(prepared) && prepared["status"] === "unsupported") return prepared;
+					const items = Array.isArray(prepared) ? prepared : [];
+					const values: unknown[] = [];
+					for (const item of items) {
+						const value = await client.query(
+							call
+								? operation === "incoming"
+									? "callHierarchy/incomingCalls"
+									: "callHierarchy/outgoingCalls"
+								: `typeHierarchy/${operation}`,
+							{ item },
+						);
+						if (record(value) && value["status"] === "unsupported") return value;
+						if (Array.isArray(value)) values.push(...value);
 					}
-					default:
-						throw new Error("Unknown navigation operation");
+					result = values;
+				} else {
+					const methods: Record<string, string> = { prepare_rename: "prepareRename", completion: "completion" };
+					result = await client.query(`textDocument/${methods[operation] ?? operation}`, {
+						textDocument,
+						position: point,
+						...(operation === "references" ? { context: { includeDeclaration: false } } : {}),
+					});
 				}
-				const output = JSON.stringify(result ?? []);
-				if (output.length <= 8000) return { status: "complete", result: result ?? [] };
-				if (!Array.isArray(result)) return { status: "too_large", note: "Narrow query/path" };
-				const items: unknown[] = [];
-				for (const item of result) {
-					if (JSON.stringify([...items, item]).length > 7600) break;
-					items.push(item);
+				if (record(result) && result["status"] === "unsupported") return result;
+				if (operation === "completion") {
+					const items = Array.isArray(result)
+						? result
+						: record(result) && Array.isArray(result["items"])
+							? result["items"]
+							: [];
+					return {
+						status: "complete",
+						incomplete: record(result) && result["isIncomplete"] === true,
+						result: items.map((item) =>
+							record(item) ? { label: item["label"], kind: item["kind"], detail: item["detail"] } : item,
+						),
+					};
 				}
-				return { status: "partial", items, omitted: result.length - items.length };
+				return { status: "complete", result: result ?? [] };
 			},
 			operation,
 			{ manager: this.manager, signal },
 		);
 	}
-	private async applyRename(
-		edit: WorkspaceEdit | null,
-		version: string,
-		signal: AbortSignal,
-	): Promise<NavigationResult> {
-		if (!edit) return { status: "unchanged", modifiedPaths: [] };
-		const changes = new Map<string, TextEdit[]>();
-		for (const [uri, edits] of Object.entries(edit.changes ?? {})) changes.set(uri, edits);
-		for (const change of edit.documentChanges ?? []) {
-			if ("kind" in change) throw new Error("Resource operations are not permitted by rename");
-			if (changes.has(change.textDocument.uri)) throw new Error("Duplicate rename target");
-			changes.set(change.textDocument.uri, change.edits);
-		}
-		const pending = [];
-		for (const [uri, edits] of changes) {
-			const path = await workspacePath(this.root, fileURLToPath(uri));
-			await this.preflight(path, signal);
-			const before = await readFile(path, "utf8");
-			pending.push({ path, before, after: applyTextChanges(before, edits) });
-		}
-		if ((await inventory(this.root, 10000, signal)).version !== version)
-			throw new Error("Workspace changed during rename; retry");
-		for (const item of pending)
-			if ((await readFile(item.path, "utf8")) !== item.before) throw new Error("Rename conflict");
-		signal.throwIfAborted();
-		const modified: string[] = [];
-		try {
-			for (const item of pending) {
-				signal.throwIfAborted();
-				await writeFile(item.path, item.after);
-				modified.push(relative(this.root, item.path));
-			}
-		} catch (error) {
-			throw new WriteFailure(`${message(error)}; modified paths: ${JSON.stringify(modified)}`, modified);
-		}
-		return { status: "renamed", modifiedPaths: modified };
-	}
-	async format(path: string, signal: AbortSignal): Promise<FormatResult> {
+	async documentSymbols(path: string, signal: AbortSignal): Promise<Array<DocumentSymbol | SymbolInfo>> {
 		const absolute = await workspacePath(this.root, path);
-		const before = await readFile(absolute, "utf8");
-		const edits = await this.withLspClient(
+		return this.withLspClient(absolute, async (client) => (await client.documentSymbols(absolute)) ?? [], "symbols", {
+			manager: this.manager,
+			signal,
+		});
+	}
+	async renameEdit(args: Record<string, unknown>, signal: AbortSignal): Promise<WorkspaceEdit | null> {
+		const result = await this.navigate({ ...args, operation: "rename" }, signal);
+		if (result["status"] === "unsupported") throw new Error("unsupported: rename");
+		return record(result["result"]) ? (result["result"] as unknown as WorkspaceEdit) : null;
+	}
+	async formatEdits(path: string, signal: AbortSignal): Promise<import("./lsp/types.js").TextEdit[]> {
+		const absolute = await workspacePath(this.root, path);
+		return this.withLspClient(
 			absolute,
 			async (client) => {
-				if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+				if (!(client instanceof Client) || !client.supports("format")) throw new Error("unsupported: formatting");
 				return client.formatting(absolute, this.config.formatting);
 			},
 			"format",
 			{ manager: this.manager, signal },
 		);
-		const after = applyTextChanges(before, edits);
-		if ((await readFile(absolute, "utf8")) !== before) throw new Error("File changed during formatting; retry");
-		if (after === before) return { status: "unchanged", path, modifiedPaths: [] };
-		signal.throwIfAborted();
-		await writeFile(absolute, after);
-		return { status: "formatted", path, modifiedPaths: [path] };
 	}
 	async close(): Promise<void> {
 		await this.manager.stopAll();

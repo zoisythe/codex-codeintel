@@ -21,13 +21,13 @@ test("no config or trust file: default Hooks do no analysis and all pre-edit cal
 		for (const cwd of [root, child]) for (const event of ["SessionStart", "PreToolUse", "PostToolUse", "Stop", "SubagentStop"]) hook(event, cwd);
 	}
 	assert.equal(await readFile(join(dir, "cache", "sentinel"), "utf8").catch(() => "missing"), "missing");
-	const status = (await c.call("lsp_status", { path: "main.py" })).structuredContent;
+	const status = (await c.call("status", { path: "main.py" })).structuredContent;
 	assert.equal(status.trusted, undefined); assert.equal(status.configuration.trust, undefined); assert.deepEqual(status.configuration.automaticDiagnostics, { postToolUse: "off", stop: "off" });
 	assert.equal(status.service.state, "stopped"); assert.equal(status.clients.processStarts, 0); assert.equal(status.index.fullScans ?? status.index.scans ?? 0, 0);
 	assert(status.configurationIssues.some(issue => issue.scope === "CODEX_LSP_TRUST_PROJECT"));
 	for (const raw of ["invalid JSON", '{"schemaVersion":0}', '{"schemaVersion":1,"lsp":42}', '{"schemaVersion":1,"automaticDiagnostics":{"stop":"full"}}']) {
 		await writeFile(join(home, "lsp-client.json"), raw); hook("PreToolUse", root, ""); hook("SessionStart"); hook("Stop");
-		assert(!(await c.call("lsp_status")).isError);
+		assert(!(await c.call("status")).isError);
 	}
 	hook("SessionEnd");
 });
@@ -39,12 +39,12 @@ test("parent and child configs load without trust; canonical boundaries and inst
 	await writeFile(join(child, ".codex", "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } } }));
 	const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 	t.after(async () => { await c.close(); await rm(dir, { recursive: true, force: true }); });
-	const status = (await c.call("lsp_status", { workspace: child, path: "main.fake" })).structuredContent;
+	const status = (await c.call("status", { workspace: child, path: "main.fake" })).structuredContent;
 	assert.equal(status.configurationSources[1].path, join(child, ".codex", "lsp-client.json")); assert.equal(status.tools[0].capabilities.diagnostics, "unverified");
 	assert.equal(await readFile(log, "utf8").catch(() => ""), "", "status starts no LSP");
-	assert.equal((await c.call("check_diagnostics", { workspace: child, path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
-	const escaped = await c.call("check_diagnostics", { workspace: child, path: "../outside.py" }); assert(escaped.isError);
-	await writeFile(join(dir, "outside.fake"), "outside\n"); await symlink(join(dir, "outside.fake"), join(child, "escape.fake")); assert((await c.call("lsp_format", { workspace: child, path: "escape.fake" })).isError);
+	assert.equal((await c.call("diagnostics", { workspace: child, path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
+	const escaped = await c.call("diagnostics", { workspace: child, path: "../outside.py" }); assert(escaped.isError);
+	await writeFile(join(dir, "outside.fake"), "outside\n"); await symlink(join(dir, "outside.fake"), join(child, "escape.fake")); assert((await c.call("format", { workspace: child, path: "escape.fake" })).isError);
 	const installed = join(home, "plugins/cache/example/plugin/0.9.0/dist/cli.js"); await mkdir(resolve(installed, ".."), { recursive: true }); await cp(resolve("dist/cli.js"), installed);
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" } }));
 	const sanitized = { ...process.env, CODEX_LSP_CACHE: join(dir, "installed-cache") }; delete sanitized.CODEX_HOME;
@@ -58,11 +58,11 @@ test("localized config errors degrade independently; malformed JSON keeps status
 	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake, python: { command: [] }, cpp: { command: ["missing-explicit"], extensions: [".c"] } } }));
 	const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 	t.after(async () => { await c.close(); await rm(dir, { recursive: true, force: true }); });
-	const status = (await c.call("lsp_status")).structuredContent; assert(status.configurationIssues.some(issue => issue.scope === "lsp.python")); assert.equal(status.configuration.valid, true);
-	assert.equal((await c.call("lsp_status", { path: "main.c" })).structuredContent.tools[0].tool.source, "missing");
-	assert.equal((await c.call("check_diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
-	await writeFile(path, "invalid JSON"); const broken = await c.call("lsp_status"); assert.equal(broken.isError, undefined); assert.equal(broken.structuredContent.configuration.valid, false);
-	const cached = await c.call("check_diagnostics", { path: "main.fake", source: "lsp", run: "cached" }); assert.equal(cached.isError, undefined, JSON.stringify(cached)); assert.equal(cached.structuredContent.errors, 1); assert.equal(cached.structuredContent.results[0].state, "stale");
-	assert.match((await c.call("lsp_navigation", { path: "main.fake", operation: "symbols" })).content[0].text, /Configuration error/);
-	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake } })); assert.equal((await c.call("check_diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
+	const status = (await c.call("status")).structuredContent; assert(status.configurationIssues.some(issue => issue.scope === "lsp.python")); assert.equal(status.configuration.valid, true);
+	assert.equal((await c.call("status", { path: "main.c" })).structuredContent.tools[0].tool.source, "missing");
+	assert.equal((await c.call("diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
+	await writeFile(path, "invalid JSON"); const broken = await c.call("status"); assert.equal(broken.isError, undefined); assert.equal(broken.structuredContent.configuration.valid, false);
+	const cached = await c.call("diagnostics", { path: "main.fake", source: "lsp", run: "cached" }); assert.equal(cached.isError, undefined, JSON.stringify(cached)); assert.equal(cached.structuredContent.errors, 1); assert.equal(cached.structuredContent.results[0].state, "stale");
+	assert.match((await c.call("navigate", { path: "main.fake", operation: "symbols" })).content[0].text, /Configuration error/);
+	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake } })); assert.equal((await c.call("diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);
 });

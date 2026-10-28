@@ -16,6 +16,13 @@ export class LspClientConnection extends LspClientTransport {
 			workspaceFolders: [{ uri: rootUri, name: "workspace" }],
 			capabilities: {
 				textDocument: {
+					callHierarchy: { dynamicRegistration: false },
+					typeHierarchy: { dynamicRegistration: false },
+					completion: { dynamicRegistration: false, completionItem: { snippetSupport: false } },
+					declaration: { dynamicRegistration: false, linkSupport: true },
+					typeDefinition: { dynamicRegistration: false, linkSupport: true },
+					implementation: { dynamicRegistration: false, linkSupport: true },
+					signatureHelp: { dynamicRegistration: false },
 					hover: { contentFormat: ["markdown", "plaintext"] },
 					definition: { linkSupport: true },
 					references: {},
@@ -53,7 +60,7 @@ export class LspClientConnection extends LspClientTransport {
 					symbol: {},
 					workspaceFolders: true,
 					configuration: true,
-					applyEdit: true,
+					applyEdit: false,
 					workspaceEdit: {
 						documentChanges: true,
 					},

@@ -20,7 +20,9 @@ if (major < 22 || (major === 22 && minor < 12)) {
 				typeof parsed.hook_event_name === "string"
 			) {
 				event = parsed.hook_event_name;
-				passthrough = event === "PreToolUse";
+				passthrough = !["SessionStart", "PostToolUse", "Stop", "SubagentStop", "SessionEnd", "Interrupt"].includes(
+					event,
+				);
 			}
 		} catch {
 			/* Runtime message remains useful for invalid input. */

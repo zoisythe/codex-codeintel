@@ -3,7 +3,7 @@ export interface ProjectCheck {
 	name: string;
 	cwd: string;
 	command: string[];
-	parser: "sarif" | "tsc" | "ty" | "cargo" | "ruff" | "eslint" | "biome" | "json";
+	parser: "sarif" | "tsc" | "ty" | "go" | "cargo" | "ruff" | "eslint" | "biome" | "json";
 	coverage: string[];
 }
 export interface CheckerResult {
@@ -17,7 +17,7 @@ export interface CheckerResult {
 	note?: string;
 }
 export interface ProjectResult {
-	operation: "check_project";
+	operation: "check";
 	job: string;
 	state: "running" | "complete" | "failed" | "stale" | "missing";
 	checkers: CheckerResult[];

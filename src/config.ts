@@ -308,7 +308,7 @@ export async function configuration(root: string): Promise<Config> {
 						problem(
 							source,
 							`automaticDiagnostics.${key}`,
-							"Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check_project for full checks",
+							"Migration required: automaticDiagnostics uses postToolUse=delta/off and stop=errors/off; use check for full checks",
 						);
 					}
 				}
@@ -332,7 +332,7 @@ export async function configuration(root: string): Promise<Config> {
 						typeof check["cwd"] !== "string" ||
 						isAbsolute(check["cwd"]) ||
 						check["cwd"].split(/[\\/]/).includes("..") ||
-						!["tsc", "ty", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
+						!["tsc", "ty", "go", "cargo", "ruff", "eslint", "biome", "json", "sarif"].includes(
 							typeof check["parser"] === "string" ? check["parser"] : "",
 						) ||
 						!Array.isArray(check["command"]) ||

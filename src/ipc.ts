@@ -82,7 +82,7 @@ export async function exchange(
 		const socket = createConnection(endpoint.address);
 		let received = "";
 		let settled = false;
-		const writes = operation === "lsp_rename" || operation === "lsp_format";
+		const writes = operation === "apply";
 		const finish = (error?: Error, output?: ToolOutput) => {
 			if (settled) return;
 			settled = true;
@@ -183,7 +183,7 @@ export async function ensureService(root: string, signal: AbortSignal): Promise<
 		[...process.execArgv, fileURLToPath(import.meta.url), "service", root, location.identity, randomUUID()],
 		{
 			...HIDDEN_PROCESS,
-			cwd: root,
+			cwd: location.directory,
 			env: executionEnvironment(),
 			detached: true,
 			stdio: "ignore",

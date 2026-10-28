@@ -69,3 +69,35 @@ jobs:
           node-version: "24.20.0"
       - name: Execute delivered bundle without installing dependencies
         run: node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs
+
+  real-features:
+    name: real LSP and lint features (without Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CODEX_LSP_REAL_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24.20.0"
+          cache: npm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+      - name: Prepare local test tools
+        run: |
+          npm ci --ignore-scripts
+          go install golang.org/x/tools/gopls@v0.24.0
+          uv tool install ruff==0.17.3
+          uv tool install ty==0.0.92
+          sudo apt-get update
+          sudo apt-get install -y clangd
+      - name: Build and validate real capabilities
+        run: |
+          npm run build
+          npm run test:features
