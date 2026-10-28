@@ -112,10 +112,13 @@ test("cold shell passthrough, bounded startup and uncertain late baseline", { ti
 });
 
 test("stdout failure retains the same delivery through service restart and rejects stale content", { timeout: 20000 }, async (t) => {
-	const f = await fixture(t); await f.hook("SessionStart");
+	const f = await fixture(t);
 	const fail = join(f.home, "stdout-failure.mjs");
 	await writeFile(fail, 'if(process.argv[2]==="hook"){const write=process.stdout.write.bind(process.stdout);process.stdout.write=(chunk,...args)=>{if(String(chunk).includes("deliveryId=")){const callback=args.at(-1);if(typeof callback==="function")queueMicrotask(()=>callback(new Error("fixture stdout failure")));return false;}return write(chunk,...args);};}');
 	f.env.NODE_OPTIONS += ` --import=${pathToFileURL(fail).href}`;
+	await f.hook("SessionStart");
+	const baseline = f.client();
+	await until(async () => (await baseline.call("check", { run: "cached" })).structuredContent.state === "complete");
 	await f.write("broken retained\n"); const failed = await f.post(); assert.match(failed.text, /stdout failure/);
 	const first = await f.consume(), retry = await f.consume(); assert(first.deliveryId); assert.equal(first.deliveryId, retry.deliveryId);
 	const service = (await f.records()).find(entry => entry.args?.includes("service")); assert(service);
