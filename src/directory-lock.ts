@@ -55,7 +55,23 @@ export async function directoryLock(
 	}
 	return async () => {
 		const released = `${lock}.released-${nonce}`;
-		await rename(lock, released);
-		await rm(released, { recursive: true, force: true });
+		const deadline = Date.now() + BUDGET.cleanup;
+		for (;;) {
+			try {
+				await rename(lock, released);
+				break;
+			} catch (error) {
+				if (
+					!record(error) ||
+					!["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) ||
+					Date.now() >= deadline
+				)
+					throw error;
+				// Windows scanners/readers may briefly deny renaming a live lock.
+				// Keep ownership until it can be released, even after cancellation.
+				await delay(20);
+			}
+		}
+		await rm(released, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 	};
 }

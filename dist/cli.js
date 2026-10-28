@@ -2111,8 +2111,18 @@ async function directoryLock(lock, signal, budget = BUDGET.lock) {
   }
   return async () => {
     const released = `${lock}.released-${nonce}`;
-    await rename3(lock, released);
-    await rm2(released, { recursive: true, force: true });
+    const deadline2 = Date.now() + BUDGET.cleanup;
+    for (; ; ) {
+      try {
+        await rename3(lock, released);
+        break;
+      } catch (error) {
+        if (!record(error) || !["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) || Date.now() >= deadline2)
+          throw error;
+        await delay(20);
+      }
+    }
+    await rm2(released, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
   };
 }
 var init_directory_lock = __esm({
