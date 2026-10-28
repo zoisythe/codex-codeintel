@@ -90,3 +90,7 @@ CI retains Linux/macOS/Windows and Node 22.12/24 delivery coverage. Local engine
 No telemetry. Source, diagnostic baselines and unresolved findings stay in private local caches. Plans and action payloads stay in bounded service memory and expire on service restart. Request environments use authenticated local IPC. Logs use fixed categories, not source or credentials.
 
 MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Project origin
+
+Codex CodeIntel originated from [code-yeongyu/codex-lsp](https://github.com/code-yeongyu/codex-lsp) and is independently maintained by zoisythe. The adapted LSP runtime was originally developed for [pi-lsp-client](https://github.com/code-yeongyu/pi-lsp-client) and extracted into [lsp-tools-mcp](https://github.com/code-yeongyu/lsp-tools-mcp). Original authorship and MIT copyright/license notices are retained in [NOTICE](NOTICE).

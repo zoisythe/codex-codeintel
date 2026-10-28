@@ -64,6 +64,23 @@ export function forgetIndex(root: string): void {
 	indexes.delete(root);
 	snapshots.delete(root);
 }
+async function gitWorkspace(scope: string, environment: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<boolean> {
+	if (environment["GIT_DIR"] || environment["GIT_WORK_TREE"]) return true;
+	let directory = scope;
+	for (;;) {
+		signal?.throwIfAborted();
+		try {
+			await lstat(join(directory, ".git"));
+			return true;
+		} catch (error) {
+			// On uncertain permissions let Git resolve its own worktree rules.
+			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return true;
+		}
+		const parent = nodePath.dirname(directory);
+		if (parent === directory) return false;
+		directory = parent;
+	}
+}
 async function scanInventory(
 	root: string,
 	maxFiles = 10000,
@@ -80,13 +97,15 @@ async function scanInventory(
 	let names: string[];
 	let complete = true;
 	try {
+		const environment = executionEnvironment();
+		if (!(await gitWorkspace(scope, environment, signal))) throw new Error("Filesystem discovery outside Git");
 		const { stdout } = await exec(
 			"git",
 			["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
 			{
 				...HIDDEN_PROCESS,
 				cwd: scope,
-				env: executionEnvironment(),
+				env: environment,
 				timeout: 5000,
 				maxBuffer: 4 * 1024 * 1024,
 				...(signal ? { signal } : {}),

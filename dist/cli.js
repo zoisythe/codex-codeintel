@@ -174,19 +174,37 @@ function latestInventory(root) {
 function indexStatistics() {
   return { ...counters };
 }
+async function gitWorkspace(scope2, environment, signal) {
+  if (environment["GIT_DIR"] || environment["GIT_WORK_TREE"]) return true;
+  let directory2 = scope2;
+  for (; ; ) {
+    signal?.throwIfAborted();
+    try {
+      await lstat(join(directory2, ".git"));
+      return true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return true;
+    }
+    const parent = nodePath.dirname(directory2);
+    if (parent === directory2) return false;
+    directory2 = parent;
+  }
+}
 async function scanInventory(root, maxFiles = 1e4, signal, exclude = [], scope2 = root, dependencyOnly = false, force = []) {
   signal?.throwIfAborted();
   const included = (name) => !name.split(/[\\/]/).some((part) => SKIP.has(part)) && !exclude.some((pattern) => nodePath.matchesGlob(name.split(sep).join("/"), pattern));
   let names;
   let complete = true;
   try {
+    const environment = executionEnvironment();
+    if (!await gitWorkspace(scope2, environment, signal)) throw new Error("Filesystem discovery outside Git");
     const { stdout } = await exec(
       "git",
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
       {
         ...HIDDEN_PROCESS,
         cwd: scope2,
-        env: executionEnvironment(),
+        env: environment,
         timeout: 5e3,
         maxBuffer: 4 * 1024 * 1024,
         ...signal ? { signal } : {}
@@ -1509,7 +1527,7 @@ var init_prepared_tools = __esm({
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { constants as constants2 } from "node:fs";
 import { access as access2, stat as stat2 } from "node:fs/promises";
-import { basename as basename3, delimiter as delimiter2, dirname as dirname2, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve2 } from "node:path";
+import { basename as basename3, delimiter as delimiter2, dirname as dirname3, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve2 } from "node:path";
 async function executable(path) {
   try {
     await access2(path, constants2.X_OK);
@@ -1544,7 +1562,7 @@ function withToolResolution(action) {
 }
 function resolveTool(...args) {
   const cache = requestTools.getStore();
-  const key = JSON.stringify([args[0], dirname2(resolve2(args[0], args[1])), ...args.slice(2)]);
+  const key = JSON.stringify([args[0], dirname3(resolve2(args[0], args[1])), ...args.slice(2)]);
   const existing = cache?.get(key);
   if (existing) return existing;
   const task = findTool(...args);
@@ -1569,7 +1587,7 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
       entry && await executable(entry) ? void 0 : `Explicit command missing: ${name}; no fallback`
     );
   }
-  let dir = dirname2(resolve2(root, path));
+  let dir = dirname3(resolve2(root, path));
   while (inside(root, dir)) {
     for (const candidate of [
       ...suffixes(name).map(
@@ -1579,7 +1597,7 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
     ])
       if (await executable(candidate)) return resolution([candidate, ...command.slice(1)], "project");
     if (dir === root) break;
-    dir = dirname2(dir);
+    dir = dirname3(dir);
   }
   const local = await pathExecutable(name);
   if (local) return resolution([local, ...command.slice(1)], "PATH");
@@ -1668,7 +1686,7 @@ var init_tool_resolution = __esm({
 // src/runners.ts
 import { spawn as spawn2 } from "node:child_process";
 import { access as access3, readFile as readFile4, realpath as realpath2, stat as stat3 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname3, extname as extname2, join as join7, relative as relative2, resolve as resolve3 } from "node:path";
+import { basename as basename4, dirname as dirname4, extname as extname2, join as join7, relative as relative2, resolve as resolve3 } from "node:path";
 async function run(command, args, cwd, signal, input, options = {}) {
   signal.throwIfAborted();
   const environment = subprocessEnvironment(options.environment ?? executionEnvironment());
@@ -1731,20 +1749,20 @@ async function exists(path) {
   }
 }
 async function configured(root, path, names) {
-  let dir = dirname3(path);
+  let dir = dirname4(path);
   while (inside(root, dir)) {
     for (const name of names) if (await exists(join7(dir, name))) return true;
     if (dir === root) break;
-    dir = dirname3(dir);
+    dir = dirname4(dir);
   }
   return false;
 }
 async function executable2(root, target, packageName, entry) {
-  let dir = dirname3(target);
+  let dir = dirname4(target);
   while (inside(root, dir)) {
     const path = join7(dir, "node_modules", packageName, entry);
     if (await exists(path)) return realpath2(path);
-    const parent = dirname3(dir);
+    const parent = dirname4(dir);
     if (dir === root) break;
     dir = parent;
   }
@@ -1842,11 +1860,11 @@ async function reportLint(root, path, config, reason) {
   while (lintReports.size > 1e3) lintReports.delete(lintReports.keys().next().value ?? "");
 }
 async function lintDirectory(root, absolute) {
-  let cwd = dirname3(absolute);
+  let cwd = dirname4(absolute);
   while (cwd !== root && inside(root, cwd)) {
     const names = await import("node:fs/promises").then((fs) => fs.readdir(cwd));
     if (names.some((name) => configurationImpact(name).includes("lint"))) break;
-    cwd = dirname3(cwd);
+    cwd = dirname4(cwd);
   }
   return cwd;
 }
@@ -1966,7 +1984,7 @@ async function formatWithRunner(root, path, signal, provided) {
   if (!runner || runner.name === "eslint") return void 0;
   const before = await readFile4(absolute, "utf8");
   const args = runner.name === "biome" ? ["format", `--stdin-file-path=${absolute}`] : ["format", "--no-cache", "--stdin-filename", absolute, "-"];
-  const result = await run(runner.command, [...runner.prefix, ...args], dirname3(absolute), signal, before);
+  const result = await run(runner.command, [...runner.prefix, ...args], dirname4(absolute), signal, before);
   if (result.code !== 0) throw new Error(result.stderr || "Format failed");
   if (await readFile4(absolute, "utf8") !== before) throw new Error("File changed during format; retry");
   return { before, after: result.stdout };
@@ -1994,20 +2012,20 @@ var init_runners = __esm({
 
 // src/identity.ts
 import { readdir as readdir2, readFile as readFile5, stat as stat4 } from "node:fs/promises";
-import { dirname as dirname4, extname as extname3, join as join8, resolve as resolve4 } from "node:path";
+import { dirname as dirname5, extname as extname3, join as join8, resolve as resolve4 } from "node:path";
 async function analysisIdentity(root, paths, config, signal, lsp = true) {
   const dirs = /* @__PURE__ */ new Set();
   const runners = /* @__PURE__ */ new Map();
   for (const path of paths) {
     signal.throwIfAborted();
     const absolute = resolve4(root, path);
-    const key = `${dirname4(absolute)}:${extname3(path)}`;
+    const key = `${dirname5(absolute)}:${extname3(path)}`;
     if (!runners.has(key)) runners.set(key, await runnerIdentity(root, absolute, config));
-    let dir = dirname4(absolute);
+    let dir = dirname5(absolute);
     while (inside(root, dir)) {
       dirs.add(dir);
       if (dir === root) break;
-      dir = dirname4(dir);
+      dir = dirname5(dir);
     }
   }
   const contents = [];
@@ -2031,7 +2049,7 @@ async function analysisIdentity(root, paths, config, signal, lsp = true) {
       }
     }
   }
-  const representatives = [...new Map(paths.map((path) => [`${dirname4(path)}:${extname3(path)}`, path])).values()];
+  const representatives = [...new Map(paths.map((path) => [`${dirname5(path)}:${extname3(path)}`, path])).values()];
   const servers = lsp ? await Promise.all(
     representatives.map((path) => resolveServer(root, path, config).catch((error) => String(error)))
   ) : [];
@@ -5140,7 +5158,7 @@ var init_abortable_shared_operation = __esm({
 
 // src/lsp/cargo-manifest-snapshot.ts
 import { readFileSync as readFileSync3 } from "node:fs";
-import { dirname as dirname5, join as join11 } from "node:path";
+import { dirname as dirname6, join as join11 } from "node:path";
 function isMissingManifestError(error) {
   if (!(error instanceof Error)) return false;
   const code = "code" in error ? error.code : void 0;
@@ -5178,7 +5196,7 @@ function ancestorManifestPaths(manifestDir) {
       paths.push(manifestPath);
     }
     prev = dir;
-    dir = dirname5(dir);
+    dir = dirname6(dir);
   }
   return paths;
 }
@@ -6485,7 +6503,7 @@ var init_cargo_metadata_process = __esm({
 
 // src/lsp/cargo-workspace-root.ts
 import { existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
-import { dirname as dirname6, join as join13 } from "node:path";
+import { dirname as dirname7, join as join13 } from "node:path";
 function realpathSafe(path) {
   try {
     return realpathSync2.native(path);
@@ -6499,7 +6517,7 @@ function nearestCargoManifestDir(startDir) {
   while (dir !== prev) {
     if (existsSync2(join13(dir, "Cargo.toml"))) return dir;
     prev = dir;
-    dir = dirname6(dir);
+    dir = dirname7(dir);
   }
   return void 0;
 }
@@ -6510,14 +6528,14 @@ function cacheEntryFor(root, memberManifestDir) {
 function prepareCargoWorkspaceCache(manifestDir, metadata) {
   const entries = /* @__PURE__ */ new Map();
   for (const manifestPath of metadata.memberManifestPaths) {
-    const manifestDir2 = dirname6(manifestPath);
+    const manifestDir2 = dirname7(manifestPath);
     const entry = cacheEntryFor(metadata.workspaceRoot, manifestDir2);
     if (entry === void 0) return void 0;
     entries.set(manifestDir2, entry);
   }
   const requestedManifestPath = canonicalManifest(join13(manifestDir, "Cargo.toml"));
   if (requestedManifestPath === void 0) return void 0;
-  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname6(requestedManifestPath));
+  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname7(requestedManifestPath));
   if (requestedEntry === void 0) return void 0;
   entries.set(manifestDir, requestedEntry);
   return { root: metadata.workspaceRoot, entries };
@@ -6664,7 +6682,7 @@ var init_cargo_workspace_root = __esm({
 
 // src/lsp/workspace-root.ts
 import { existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname7, join as join14, resolve as resolve9 } from "node:path";
+import { dirname as dirname8, join as join14, resolve as resolve9 } from "node:path";
 function isDirectoryPath(filePath) {
   try {
     return statSync3(filePath).isDirectory();
@@ -6676,7 +6694,7 @@ async function findWorkspaceRoot(filePath, server2, options = {}) {
   const abs = resolve9(filePath);
   let dir = abs;
   if (!isDirectoryPath(dir)) {
-    dir = dirname7(dir);
+    dir = dirname8(dir);
   }
   if (server2?.id === "rust") {
     const cargoRoot = await resolveCargoWorkspaceRoot(dir, options);
@@ -6691,9 +6709,9 @@ async function findWorkspaceRoot(filePath, server2, options = {}) {
       }
     }
     prevDir = dir;
-    dir = dirname7(dir);
+    dir = dirname8(dir);
   }
-  return dirname7(abs);
+  return dirname8(abs);
 }
 var WORKSPACE_MARKERS;
 var init_workspace_root = __esm({
@@ -6707,7 +6725,7 @@ var init_workspace_root = __esm({
 // src/language.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 import { readFile as readFile15 } from "node:fs/promises";
-import { dirname as dirname8, extname as extname5, resolve as resolve10 } from "node:path";
+import { dirname as dirname9, extname as extname5, resolve as resolve10 } from "node:path";
 import { fileURLToPath as fileURLToPath5, pathToFileURL as pathToFileURL4 } from "node:url";
 function diagnosticUriKey(uri) {
   try {
@@ -7084,7 +7102,7 @@ var init_language = __esm({
         this.config = config;
       }
       async invalidate(path) {
-        const directory2 = dirname8(resolve10(this.root, path));
+        const directory2 = dirname9(resolve10(this.root, path));
         const language = configurationImpact(path).length ? void 0 : (await resolveServer(this.root, path, this.config).catch(() => void 0))?.language;
         const languages = language ? [language] : configurationLanguages(path);
         for (const managed of this.manager.getSnapshot()) {
@@ -7167,7 +7185,7 @@ var init_language = __esm({
         let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
         if (!inside(this.root, root)) root = this.root;
         if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
-          root = dirname8(dirname8(dirname8(resolved.tool.command[0])));
+          root = dirname9(dirname9(dirname9(resolved.tool.command[0])));
         const failureKey = hash(JSON.stringify([root, resolved.server, resolved.tool.identity]));
         const failed = this.failures.get(failureKey);
         if (failed && Date.now() < failed.retryAt) throw new Error(failed.reason);
@@ -7371,7 +7389,7 @@ var init_language = __esm({
 // src/engine.ts
 import { randomUUID as randomUUID8 } from "node:crypto";
 import { readFile as readFile16, stat as stat5 } from "node:fs/promises";
-import { dirname as dirname9, relative as relative8, sep as sep3 } from "node:path";
+import { dirname as dirname10, relative as relative8, sep as sep3 } from "node:path";
 var Engine;
 var init_engine = __esm({
   "src/engine.ts"() {
@@ -7989,11 +8007,11 @@ var init_engine = __esm({
       }
       projectVersion(snapshot, path, config) {
         const language = codeLanguage(config, path);
-        let owner = dirname9(path);
+        let owner = dirname10(path);
         while (owner !== "." && ![...snapshot.files.keys()].some(
-          (candidate) => dirname9(candidate) === owner && configurationLanguages(candidate).includes(language ?? "")
+          (candidate) => dirname10(candidate) === owner && configurationLanguages(candidate).includes(language ?? "")
         ))
-          owner = dirname9(owner);
+          owner = dirname10(owner);
         const prefix = owner === "." ? "" : `${owner}/`;
         return hash(
           JSON.stringify(

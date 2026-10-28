@@ -224,6 +224,16 @@ it("kills a slow Runner before resolving cancellation", async () => {
 		await task.catch(() => undefined);
 	}
 }, 10000);
+it("preserves Git exclusions when the workspace is below a repository root", async () => {
+	const { root, dir } = await fixture();
+	await promisify(execFile)("git", ["init", "-q"], { cwd: dir });
+	await writeFile(join(dir, ".gitignore"), "project/ignored.ts\n");
+	await writeFile(join(root, "ignored.ts"), "ignored");
+	const snapshot = await inventory(root);
+	expect(snapshot.complete).toBe(true);
+	expect(snapshot.files.has("a.js")).toBe(true);
+	expect(snapshot.files.has("ignored.ts")).toBe(false);
+});
 it("keeps baseline when discovery is aborted", async () => {
 	const { root } = await fixture();
 	const store = new Metadata(root);
