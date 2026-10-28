@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { alive } from "./directory-lock.js";
+import { alive, renameWithRetry } from "./directory-lock.js";
 
 export { alive } from "./directory-lock.js";
 
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -222,5 +222,5 @@ export async function publishEndpoint(location: ServiceLocation, token: string):
 		}),
 		{ mode: 0o600 },
 	);
-	await rename(temporary, location.endpoint);
+	await renameWithRetry(temporary, location.endpoint);
 }

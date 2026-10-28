@@ -2084,6 +2084,20 @@ function alive(pid) {
     return !(record(error) && ["ESRCH", "ENOENT"].includes(String(error["code"])));
   }
 }
+async function renameWithRetry(source, target, signal) {
+  const deadline = Date.now() + BUDGET.cleanup;
+  for (; ; ) {
+    signal?.throwIfAborted();
+    try {
+      await rename3(source, target);
+      return;
+    } catch (error) {
+      if (!record(error) || !["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) || Date.now() >= deadline)
+        throw error;
+      await delay(20, void 0, signal ? { signal } : {});
+    }
+  }
+}
 async function directoryLock(lock, signal, budget = BUDGET.lock) {
   const nonce = randomUUID3();
   const candidate = `${lock}.claim-${nonce}`;
@@ -2111,17 +2125,7 @@ async function directoryLock(lock, signal, budget = BUDGET.lock) {
   }
   return async () => {
     const released = `${lock}.released-${nonce}`;
-    const deadline2 = Date.now() + BUDGET.cleanup;
-    for (; ; ) {
-      try {
-        await rename3(lock, released);
-        break;
-      } catch (error) {
-        if (!record(error) || !["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) || Date.now() >= deadline2)
-          throw error;
-        await delay(20);
-      }
-    }
+    await renameWithRetry(lock, released);
     await rm2(released, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
   };
 }
@@ -2165,7 +2169,7 @@ var init_service_identity = __esm({
 
 // src/metadata.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile8, realpath as realpath4, rename as rename4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
+import { lstat as lstat3, mkdir as mkdir4, readdir as readdir3, readFile as readFile8, realpath as realpath4, rm as rm3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
 import { join as join10 } from "node:path";
 var empty, Metadata;
@@ -2318,11 +2322,14 @@ var init_metadata = __esm({
           for (const key of ["touched", "current", "pending", "delivery", "blocked"])
             state[key] = [...new Set(state[key])];
           await writeFile3(temp, JSON.stringify(state), { mode: 384 });
-          await rename4(temp, path);
+          await renameWithRetry(temp, path, signal);
           return state;
         } finally {
-          await rm3(temp, { force: true });
-          await release();
+          try {
+            await rm3(temp, { force: true });
+          } finally {
+            await release();
+          }
         }
       }
       async end(id, signal) {
@@ -8068,7 +8075,7 @@ var init_engine = __esm({
 // src/ipc.ts
 import { spawn as spawn4 } from "node:child_process";
 import { randomUUID as randomUUID9 } from "node:crypto";
-import { chmod, lstat as lstat5, mkdir as mkdir5, readFile as readFile17, rename as rename5, writeFile as writeFile5 } from "node:fs/promises";
+import { chmod, lstat as lstat5, mkdir as mkdir5, readFile as readFile17, writeFile as writeFile5 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
 import { join as join15 } from "node:path";
@@ -8237,7 +8244,7 @@ async function publishEndpoint(location, token) {
     }),
     { mode: 384 }
   );
-  await rename5(temporary2, location.endpoint);
+  await renameWithRetry(temporary2, location.endpoint);
 }
 var init_ipc = __esm({
   "src/ipc.ts"() {

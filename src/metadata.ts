@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { directoryLock } from "./directory-lock.js";
+import { directoryLock, renameWithRetry } from "./directory-lock.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
 import { rootSession } from "./hook-events.js";
@@ -229,11 +229,14 @@ export class Metadata {
 			for (const key of ["touched", "current", "pending", "delivery", "blocked"] as const)
 				state[key] = [...new Set(state[key])];
 			await writeFile(temp, JSON.stringify(state), { mode: 0o600 });
-			await rename(temp, path);
+			await renameWithRetry(temp, path, signal);
 			return state;
 		} finally {
-			await rm(temp, { force: true });
-			await release();
+			try {
+				await rm(temp, { force: true });
+			} finally {
+				await release();
+			}
 		}
 	}
 	async end(id: string, signal: AbortSignal): Promise<void> {

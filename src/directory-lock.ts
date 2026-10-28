@@ -18,6 +18,20 @@ export function alive(pid: number): boolean {
 		return !(record(error) && ["ESRCH", "ENOENT"].includes(String(error["code"])));
 	}
 }
+export async function renameWithRetry(source: string, target: string, signal?: AbortSignal): Promise<void> {
+	const deadline = Date.now() + BUDGET.cleanup;
+	for (;;) {
+		signal?.throwIfAborted();
+		try {
+			await rename(source, target);
+			return;
+		} catch (error) {
+			if (!record(error) || !["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) || Date.now() >= deadline)
+				throw error;
+			await delay(20, undefined, signal ? { signal } : {});
+		}
+	}
+}
 export async function directoryLock(
 	lock: string,
 	signal: AbortSignal,
@@ -55,23 +69,8 @@ export async function directoryLock(
 	}
 	return async () => {
 		const released = `${lock}.released-${nonce}`;
-		const deadline = Date.now() + BUDGET.cleanup;
-		for (;;) {
-			try {
-				await rename(lock, released);
-				break;
-			} catch (error) {
-				if (
-					!record(error) ||
-					!["EPERM", "EACCES", "EBUSY"].includes(String(error["code"])) ||
-					Date.now() >= deadline
-				)
-					throw error;
-				// Windows scanners/readers may briefly deny renaming a live lock.
-				// Keep ownership until it can be released, even after cancellation.
-				await delay(20);
-			}
-		}
+		// Release ownership even if the request was cancelled during its write.
+		await renameWithRetry(lock, released);
 		await rm(released, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 	};
 }
