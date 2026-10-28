@@ -11,7 +11,7 @@
 - Add symbol paths, unique @@ anchors, compact outlines and recoverable paging; add declarations, call/type hierarchy, completions, symbol exploration and bounded impact analysis with candidate test links.
 - Preserve lint rule/fix metadata internally; add filtered diagnostics, summaries, rule explanations and previewed Ruff/Biome/ESLint and LSP text actions. Vendor-safe bulk selection stays distinct from unknown/unsafe/suggestions; command/resource actions do not execute.
 - Expand Go support with gopls and go vet JSON project checks scoped by go list. Normalize Windows Path/PATH across IPC, preserve cancellation and nonblocking Hook behavior.
-- Update Skills/docs and delivered-bundle/real-tool acceptance. Retain Linux/macOS/Windows coverage; add Go/Ruff/ty/clangd feature CI. Keep Rust acceptance separate from default local tests.
+- Update Skills/docs and delivered-bundle/real-tool acceptance. Retain Linux/macOS/Windows coverage and local Go/Ruff/ty/clangd feature tests. Keep Rust acceptance separate from default local tests.
 - Add an independent Linux/Windows Rust CI with a pinned matching toolchain, offline Cargo fixtures, delivered-bundle navigation/edit/check acceptance and retained failure evidence; ordinary local tests require no Rust.
 
 ## 0.9.0

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { HookEngine as Engine } from "./engine-harness.js";
 
 const roots: string[] = [];
 async function fixture(): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), "codex-lsp-hook-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "codex-lsp-hook-")));
 	roots.push(root);
 	await mkdir(join(root, ".codex"));
 	await writeFile(

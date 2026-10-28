@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -24,7 +24,7 @@ async function fixture(
 	action: (root: string, store: Metadata, coordinator: HookCoordinator, calls: string[][]) => Promise<void>,
 	slow = 0,
 ): Promise<void> {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-hook-flow-")),
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-hook-flow-"))),
 		root = join(dir, "project"),
 		home = join(dir, "home");
 	await mkdir(root);

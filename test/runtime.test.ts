@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,7 +8,7 @@ import { Engine } from "./engine-harness.js";
 
 const roots: string[] = [];
 async function fixture() {
-	const root = await mkdtemp(join(tmpdir(), "codex-lsp-test-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "codex-lsp-test-")));
 	roots.push(root);
 	await writeFile(join(root, "a.ts"), "broken");
 	return root;

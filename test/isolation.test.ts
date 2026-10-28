@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -11,9 +11,9 @@ afterEach(async () => {
 	await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 async function fixture() {
-	const root = await mkdtemp(join(tmpdir(), "isolation-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "isolation-")));
 	roots.push(root);
-	const cache = await mkdtemp(join(tmpdir(), "metadata-"));
+	const cache = await realpath(await mkdtemp(join(tmpdir(), "metadata-")));
 	roots.push(cache);
 	vi.stubEnv("CODEX_LSP_CACHE", cache);
 	await mkdir(join(root, ".codex"));

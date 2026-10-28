@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -10,7 +10,7 @@ afterEach(async () => {
 	await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 it("runs real Biome without modifying code, then explicitly formats it", async () => {
-	const root = await mkdtemp(join(tmpdir(), "codex-lint-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "codex-lint-")));
 	roots.push(root);
 	await symlink(
 		resolve("node_modules"),
@@ -38,7 +38,7 @@ it("runs real Biome without modifying code, then explicitly formats it", async (
 });
 it("reports unavailable lint without requiring directory trust", async () => {
 	vi.stubEnv("PATH", "");
-	const root = await mkdtemp(join(tmpdir(), "codex-untrusted-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "codex-untrusted-")));
 	roots.push(root);
 	await mkdir(join(root, "home"));
 	vi.stubEnv("CODEX_HOME", join(root, "home"));

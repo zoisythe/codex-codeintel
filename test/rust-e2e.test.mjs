@@ -231,7 +231,8 @@ test("real Rust: rename, rustfmt and Code Action plans write only through apply"
 	before = await f.hashes();
 	const conflict = await f.raw("apply", { plan: stale.plan });
 	assert(conflict.isError);
-	assert.equal(conflict.structuredContent.status, "stale");
+	assert.equal(conflict.structuredContent.status, "conflict");
+	assert.match(conflict.structuredContent.reason, /Plan stale/);
 	assert.deepEqual(conflict.structuredContent.modifiedPaths, []);
 	assert.deepEqual(await f.hashes(), before);
 	const format = await f.call("format", { paths: files.filter((path) => path.endsWith(".rs")) });

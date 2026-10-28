@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,7 +13,7 @@ import { outline, position } from "../src/symbols.js";
 afterEach(() => vi.unstubAllEnvs());
 const signal = () => new AbortController().signal;
 async function fixture() {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-v10-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-v10-")));
 	const root = join(dir, "project");
 	const home = join(dir, "home");
 	await mkdir(root);

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -43,7 +43,7 @@ it("compares duplicate diagnostic counts independently from line shifts and norm
 	expect(retainedFindings([old], [])).toEqual([]);
 });
 it("empty discovery reads zero bodies and same-size replacement is verified", async () => {
-	const root = await mkdtemp(join(tmpdir(), "codeintel-index-"));
+	const root = await realpath(await mkdtemp(join(tmpdir(), "codeintel-index-")));
 	temps.push(root);
 	await writeFile(join(root, "a.ts"), "one");
 	const first = await inventory(root);
@@ -57,7 +57,7 @@ it("empty discovery reads zero bodies and same-size replacement is verified", as
 	expect(indexStatistics().contentReads).toBe(forced.contentReads + 1);
 });
 it("batch lint executes once and splits each output file correctly", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-lint-batch-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-lint-batch-")));
 	temps.push(dir);
 	const root = join(dir, "project"),
 		home = join(dir, "home"),

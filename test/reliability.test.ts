@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { configuration } from "../src/config.js";
@@ -19,7 +20,7 @@ afterEach(async () => {
 	await Promise.all(temps.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 async function fixture() {
-	const dir = await mkdtemp(join(tmpdir(), "codex-reliable-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-reliable-")));
 	temps.push(dir);
 	const root = join(dir, "project");
 	const home = join(dir, "home");
@@ -195,6 +196,7 @@ it("cancels a queued request promptly without executing it or cancelling the act
 it("kills a slow Runner before resolving cancellation", async () => {
 	const { root, dir } = await fixture();
 	const pidFile = join(dir, "runner.pid");
+	const controller = new AbortController();
 	const task = run(
 		process.execPath,
 		[
@@ -203,12 +205,25 @@ it("kills a slow Runner before resolving cancellation", async () => {
 			pidFile,
 		],
 		root,
-		AbortSignal.timeout(250),
+		controller.signal,
 	);
-	await expect(task).rejects.toThrow("cancelled");
-	const pid = Number(await readFile(pidFile, "utf8"));
-	expect(() => process.kill(pid, 0)).toThrow();
-});
+	void task.catch(() => undefined);
+	try {
+		const deadline = Date.now() + 4000;
+		let pid = 0;
+		while (!pid && Date.now() < deadline) {
+			pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+			if (!pid) await delay(20);
+		}
+		expect(pid).toBeGreaterThan(0);
+		controller.abort();
+		await expect(task).rejects.toThrow("cancelled");
+		expect(() => process.kill(pid, 0)).toThrow();
+	} finally {
+		controller.abort();
+		await task.catch(() => undefined);
+	}
+}, 10000);
 it("keeps baseline when discovery is aborted", async () => {
 	const { root } = await fixture();
 	const store = new Metadata(root);

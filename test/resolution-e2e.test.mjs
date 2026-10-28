@@ -126,7 +126,9 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	assert((await client.call("diagnostics",{path:"main.fake"})).isError);
 	await rm(join(root, ".codex"), { recursive: true });
 	await writeFile(join(home, "lsp-client.json"), "{}");
-	assert.match((await client.call("status")).content[0].text, /Migration required/);
+	const migration = (await client.call("status")).structuredContent;
+	assert.equal(migration.configuration.valid, false);
+	assert(migration.configurationIssues.some(issue => /Migration required/.test(issue.message)), JSON.stringify(migration));
 	const hook = spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, CODEX_HOME: home, PATH: bin, CODEX_LSP_CACHE: join(dir, "cache"), LSP_TOOLS_MCP_USER_CONFIG: "obsolete" }, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: "SessionEnd" }), encoding: "utf8" });
 	assert.equal(hook.status, 0); assert.equal(hook.stdout, "", "cleanup survives configuration errors");
 });
