@@ -41,7 +41,7 @@ async function fixture(t, name) {
 			try {
 				await client?.close();
 			} finally {
-				assert.equal(dirname(dir), tmpdir());
+				assert.equal(dirname(dir), await realpath(tmpdir()));
 				assert(basename(dir).startsWith("codeintel-rust-"));
 				await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 			}
