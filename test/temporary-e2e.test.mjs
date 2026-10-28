@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -12,7 +12,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	const uvx = spawnSync("which", ["uvx"], { encoding: "utf8" }).stdout.trim();
 	const python = spawnSync(uv, ["python", "find"], { encoding: "utf8" }).stdout.trim();
 	assert(uv && python);
-	const dir = await mkdtemp(join(tmpdir(), "codex-temporary-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-temporary-")));
 	const root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(uvx, join(bin, "uvx"));
@@ -53,7 +53,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 for (const [server, recipe] of [["typescript", "typescript@5.9.3"], ["tsc", "typescript@7.0.2"]]) {
 test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env.CODEX_LSP_REAL_TOOLS !== "1" || process.platform !== "linux" }, async t => {
 	const npx = spawnSync("which", ["npx"], { encoding: "utf8" }).stdout.trim(); assert(npx);
-	const dir = await mkdtemp(join(tmpdir(), "codex-npx-")), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-npx-"))), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
 	await symlink(npx, join(bin, "npx")); await symlink(process.execPath, join(bin, "node")); await symlink("/bin/sh", join(bin, "sh"));
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);

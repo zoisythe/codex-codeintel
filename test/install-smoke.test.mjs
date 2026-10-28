@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -12,7 +12,7 @@ import { test } from "node:test";
 const repo = resolve(import.meta.dirname, "..");
 
 test("bundle initializes without development dependencies", async (t) => {
-	const temp = await mkdtemp(join(tmpdir(), "codex-lsp-bundle-"));
+	const temp = await realpath(await mkdtemp(join(tmpdir(), "codex-lsp-bundle-")));
 	t.after(() => rm(temp, { recursive: true, force: true }));
 	await cp(join(repo, "dist"), join(temp, "dist"), { recursive: true });
 	await writeFile(join(temp, "package.json"), '{"type":"module"}');
@@ -32,7 +32,7 @@ test(
 	"non-recursive plugin delivery: isolated initialize, tools, missing server, ping and EOF",
 	{ timeout: 20000 },
 	async (t) => {
-		const temp = await mkdtemp(join(tmpdir(), "codex-lsp-install-"));
+		const temp = await realpath(await mkdtemp(join(tmpdir(), "codex-lsp-install-")));
 		t.after(() => rm(temp, { recursive: true, force: true }));
 		const root = join(temp, "插件 root with spaces");
 		const workspace = join(temp, "用户 workspace");

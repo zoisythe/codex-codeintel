@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,7 +9,7 @@ import { bundleClient } from "./bundle-client.mjs";
 
 const enabled = process.env.CODEX_LSP_REAL_TOOLS === "1";
 test("packed setupLSP: isolated global defaults, mixed project coverage, read-only validation and offline failure", { skip: !enabled, timeout: 120000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-setup-")), root = join(dir, "mixed"), home = join(dir, "global"), install = join(dir, "installed");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-setup-"))), root = join(dir, "mixed"), home = join(dir, "global"), install = join(dir, "installed");
 	await mkdir(root); await mkdir(home);
 	const run = (command, args, cwd = root, env = process.env) => spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 30000 });
 	const packed = run("npm", ["pack", "--json", "--pack-destination", dir], resolve(".")); assert.equal(packed.status, 0, packed.stderr);

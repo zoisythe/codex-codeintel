@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,7 +10,7 @@ import { bundleClient } from "./bundle-client.mjs";
 
 const enabled = process.env.CODEX_LSP_REAL_TOOLS === "1";
 test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic edit and repair feedback", { skip: !enabled, timeout: 240000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-auto-real-")), tools = join(dir, "tools");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-auto-real-"))), tools = join(dir, "tools");
 	const setup = spawnSync("npm", ["install", "--prefix", tools, "--no-audit", "--no-fund", "typescript-language-server", "typescript@5.9.3"], { encoding: "utf8", timeout: 90000 });
 	assert.equal(setup.status, 0, setup.stderr);
 	const summaries = [];
@@ -83,7 +83,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 });
 function resolveCli() { return resolve("dist/cli.js"); }
 test("automatic Cargo baseline refuses a missing Rustup toolchain without downloading", {skip: !enabled, timeout: 20000}, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-rustup-gate-")), root = join(dir, "project"), home = join(dir, "home");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-rustup-gate-"))), root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(join(root, "src"), {recursive: true}); await mkdir(home);
 	await writeFile(join(root, "Cargo.toml"), '[package]\nname="no_download_fixture"\nversion="0.1.0"\nedition="2021"\n');
 	await writeFile(join(root, "src/main.rs"), "fn main() {}\n");
@@ -105,7 +105,7 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	assert.doesNotMatch(result.checkers[0].note,/syncing channel updates|downloading component/);
 });
 test("automatic Ruff baseline and MCP lint preserve source with fix/fix-only configured", {skip: !enabled, timeout:20000}, async t => {
-	const dir=await mkdtemp(join(tmpdir(),"codeintel-ruff-readonly-")),root=join(dir,"project"),home=join(dir,"home");
+	const dir=await realpath(await mkdtemp(join(tmpdir(), "codeintel-ruff-readonly-"))),root=join(dir,"project"),home=join(dir,"home");
 	await mkdir(root);await mkdir(home);
 	await writeFile(join(home,"config.toml"),`[projects.${JSON.stringify(root)}]\ntrust_level="trusted"\n`);
 	await writeFile(join(home,"lsp-client.json"),JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"delta",stop:"errors"}}));

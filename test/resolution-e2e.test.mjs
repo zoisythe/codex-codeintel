@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, readFile, rm, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, chmod, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
 test("bundle local priority, ecosystem launchers, failure isolation, trust and migration", { timeout: 60000, skip: process.platform === "win32" }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-resolution-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-resolution-")));
 	const root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin"), log = join(dir, "launchers");
 	await mkdir(join(root, "pkg", "src"), { recursive: true }); await mkdir(home); await mkdir(bin);
-	t.after(() => rm(dir, { recursive: true, force: true }));
 	const script = async (path, body) => { await mkdir(resolve(path, ".."), { recursive: true }); await writeFile(path, `#!${process.execPath}\n${body}\n`); await chmod(path, 0o755); };
 	const fake = resolve("test/fixtures/fake-lsp.mjs");
 	const fakeLsp = `import(${JSON.stringify(fake)});`;
@@ -25,7 +24,10 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	};
 	await configure({});
 	const client = bundleClient(root, home, { PATH: bin, CODEX_LSP_CACHE: join(dir, "cache") });
-	t.after(() => client.close());
+	t.after(async () => {
+		try { await client.close(); }
+		finally { await rm(dir, { recursive: true, force: true }); }
+	});
 	const status = async path => { const result = await client.call("status", { path }); assert(!result.isError, JSON.stringify(result)); return result.structuredContent.tools[0]; };
 	assert.equal((await status("pkg/src/main.py")).tool.command[0], join(bin, "ty"));
 	assert.equal((await status("pkg/src/main.py")).lint.command, join(bin, "ruff"));

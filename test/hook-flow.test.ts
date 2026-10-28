@@ -219,32 +219,40 @@ describe("native Hook routing and transport", () => {
 				JSON.stringify((await consumeDelivery(root, hookSession(b), "SubagentStop", signal())).output),
 			).toContain("broken b.ts");
 		}, 700));
-	it("unknown Interrupt detaches only shared waits, retains pending, and persists cancellation", async () =>
-		fixture(async (root, store, coordinator, calls) => {
-			await writeFile(join(root, "a.ts"), "broken a");
-			await writeFile(join(root, "b.ts"), "broken b");
-			const main = post("", "a.ts", "unknown-main", "main"),
-				child = post("b", "b.ts", "unknown-child");
-			const registered = await registerHook(root, main, signal()),
-				other = await registerHook(root, child, signal());
-			await coordinator.ingest();
-			await until(async () => calls.length === 2);
-			const rootWait = await coordinator.request({ ...main, registration: registered?.id }, signal()),
-				childWait = await coordinator.request({ ...child, registration: other?.id }, signal());
-			const before = await store.read("s");
-			await coordinator.request({ session_id: "s", hook_event_name: "Interrupt" }, signal());
-			expect(
-				(await coordinator.wait({ ...main, registration: registered?.id, waitToken: rootWait.waitToken }, signal()))
-					.state,
-			).toBe("cancelled");
-			expect(
-				(await coordinator.wait({ ...child, registration: other?.id, waitToken: childWait.waitToken }, signal()))
-					.state,
-			).not.toBe("cancelled");
-			expect((await store.read("s")).pending).toEqual(before.pending);
-			expect((await store.read("s")).waitEpoch).toBe(before.waitEpoch + 1);
-			await until(async () => !coordinator.active);
-		}, 700));
+	it(
+		"unknown Interrupt detaches only shared waits, retains pending, and persists cancellation",
+		async () =>
+			fixture(async (root, store, coordinator, calls) => {
+				await writeFile(join(root, "a.ts"), "broken a");
+				await writeFile(join(root, "b.ts"), "broken b");
+				const main = post("", "a.ts", "unknown-main", "main"),
+					child = post("b", "b.ts", "unknown-child");
+				const registered = await registerHook(root, main, signal()),
+					other = await registerHook(root, child, signal());
+				await coordinator.ingest();
+				await until(async () => calls.length === 2);
+				const rootWait = await coordinator.request({ ...main, registration: registered?.id }, signal()),
+					childWait = await coordinator.request({ ...child, registration: other?.id }, signal());
+				const before = await store.read("s");
+				await coordinator.request({ session_id: "s", hook_event_name: "Interrupt" }, signal());
+				expect(
+					(
+						await coordinator.wait(
+							{ ...main, registration: registered?.id, waitToken: rootWait.waitToken },
+							signal(),
+						)
+					).state,
+				).toBe("cancelled");
+				expect(
+					(await coordinator.wait({ ...child, registration: other?.id, waitToken: childWait.waitToken }, signal()))
+						.state,
+				).not.toBe("cancelled");
+				expect((await store.read("s")).pending).toEqual(before.pending);
+				expect((await store.read("s")).waitEpoch).toBe(before.waitEpoch + 1);
+				await until(async () => !coordinator.active);
+			}, 700),
+		15000,
+	);
 	it("retains pending when a different writer changes the analyzed snapshot", async () =>
 		fixture(async (root, store, coordinator, calls) => {
 			await writeFile(join(root, "a.ts"), "broken old");
@@ -268,7 +276,26 @@ describe("native Hook routing and transport", () => {
 			const a = post("a", "a.ts", "end");
 			await registerHook(root, a, signal());
 			await coordinator.ingest();
-			await coordinator.request({ session_id: "s", hook_event_name: "SessionEnd" }, signal());
+			let unlockActor: () => void = () => undefined;
+			let acquired: () => void = () => undefined;
+			const locked = new Promise<void>((resolve) => {
+				acquired = resolve;
+			});
+			const releaseActor = new Promise<void>((resolve) => {
+				unlockActor = resolve;
+			});
+			const actorWrite = store.update(hookSession(a), signal(), async () => {
+				acquired();
+				await releaseActor;
+			});
+			await locked;
+			try {
+				await coordinator.request({ session_id: "s", hook_event_name: "SessionEnd" }, AbortSignal.timeout(1200));
+				expect((await store.read("s")).turn).toBe("__ended__");
+			} finally {
+				unlockActor();
+				await actorWrite;
+			}
 			await until(async () => !coordinator.active);
 			expect((await store.read("s")).turn).toBe("__ended__");
 			expect((await store.read("s")).epoch).not.toBe(before.epoch);

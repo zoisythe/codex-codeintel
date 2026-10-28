@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
 test("native TypeScript 7 through delivered MCP: diagnostics, navigation, rename and format", { timeout: 60000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-tsc-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-tsc-")));
 	const root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,7 +17,7 @@ const usage = "#[test]\nfn uses_twice() {\n    assert_eq!(codeintel_fixture_core
 const local = (value) => value.replaceAll("\\", "/");
 
 async function fixture(t, name) {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-rust-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-rust-")));
 	const root = join(dir, "project"),
 		home = join(dir, "home");
 	const trace = [];

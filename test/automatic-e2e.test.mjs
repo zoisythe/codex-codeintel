@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,7 +13,7 @@ async function until(action, timeout = 12000) {
 	assert.fail("Background analysis did not finish");
 }
 async function fixture(t, extra = {}, environment = {}) {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-auto-")), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "lsp.log");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-auto-"))), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "lsp.log");
 	await mkdir(root); await mkdir(home); await writeFile(join(root, "main.fake"), "clean\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), ...environment };
 	const config = { schemaVersion: 1, automaticDiagnostics: { postToolUse: "delta", stop: "errors" }, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } }, ...extra };

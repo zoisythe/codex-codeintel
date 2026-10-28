@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
 test("bundle pull reports, push freshness, failure expiry and refresh", { timeout: 40000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-diagnostics-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-diagnostics-")));
 	const root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
@@ -49,7 +49,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 });
 
 test("bundle idle release keeps stdio alive and starts a new client", { timeout: 15000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-idle-")), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-idle-"))), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));

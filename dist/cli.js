@@ -2583,17 +2583,17 @@ var init_hook_engine = __esm({
       async cancel(parent, turn, signal) {
         if (turn === null) return;
         const ids = [parent, ...(await this.store.ids()).filter((id) => id !== parent && rootSession(id) === parent)];
+        if (turn === void 0) {
+          await this.store.end(parent, signal);
+          for (const id of ids) this.dependencies.end(id);
+          return;
+        }
         for (const id of ids) {
-          if (turn === void 0) {
-            await this.store.end(id, signal);
-            this.dependencies.end(id);
-          } else {
-            this.dependencies.end(id, turn);
-            await this.store.update(id, signal, (state) => {
-              for (const entry of Object.values(state.hookEvents))
-                if (entry.turn === turn && ["queued", "running"].includes(entry.state)) entry.state = "cancelled";
-            });
-          }
+          this.dependencies.end(id, turn);
+          await this.store.update(id, signal, (state) => {
+            for (const entry of Object.values(state.hookEvents))
+              if (entry.turn === turn && ["queued", "running"].includes(entry.state)) entry.state = "cancelled";
+          });
         }
       }
       hook(input, signal, background = false) {

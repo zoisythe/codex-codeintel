@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
 test("no config or trust file: default Hooks do no analysis and all pre-edit calls pass", { timeout: 15000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-defaults-")), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-defaults-"))), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home");
 	await mkdir(child, { recursive: true }); await mkdir(home); await writeFile(join(root, "main.py"), "value: int = 1\n");
 	const env = { ...process.env, PATH: "", CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), CODEX_LSP_TRUST_PROJECT: "1", LSP_TOOLS_MCP_USER_CONFIG: "obsolete" };
 	const cli = resolve("dist/cli.js"), c = bundleClient(root, home, env);
@@ -33,7 +33,7 @@ test("no config or trust file: default Hooks do no analysis and all pre-edit cal
 });
 
 test("parent and child configs load without trust; canonical boundaries and installed home remain enforced", { timeout: 12000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-scope-")), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home"), log = join(dir, "launches");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-scope-"))), root = join(dir, "parent"), child = join(root, "child"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(join(child, ".codex"), { recursive: true }); await mkdir(home);
 	await writeFile(join(child, "main.fake"), "broken\n");
 	await writeFile(join(child, ".codex", "lsp-client.json"), JSON.stringify({ schemaVersion: 1, trustedWorkspaces: [root], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } } }));
@@ -52,7 +52,7 @@ test("parent and child configs load without trust; canonical boundaries and inst
 });
 
 test("localized config errors degrade independently; malformed JSON keeps status and cached diagnostics", { timeout: 15000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-config-")), root = join(dir, "project"), home = join(dir, "home"); await mkdir(root); await mkdir(home);
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-config-"))), root = join(dir, "project"), home = join(dir, "home"); await mkdir(root); await mkdir(home);
 	const path = join(home, "lsp-client.json"), fake = { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull" } };
 	await writeFile(join(root, "main.fake"), "broken\n"); await writeFile(join(root, "main.py"), "import os\n");
 	await writeFile(path, JSON.stringify({ schemaVersion: 1, lsp: { fake, python: { command: [] }, cpp: { command: ["missing-explicit"], extensions: [".c"] } } }));

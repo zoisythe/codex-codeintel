@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, symlink, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -7,7 +7,7 @@ import { bundleClient } from "./bundle-client.mjs";
 import { completeOutput } from "./page-output.mjs";
 
 async function fixture(t, lsp = { typescript: false, python: false }) {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-feature-")), root = join(dir, "project"), home = join(dir, "home");
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-feature-"))), root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
 	await symlink(resolve("node_modules"), join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp }));

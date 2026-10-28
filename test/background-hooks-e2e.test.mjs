@@ -22,7 +22,7 @@ async function until(action, timeout = 12000) {
 	assert.fail("Background task did not reach the expected state");
 }
 async function fixture(t, extra = {}, mode = "pull") {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-background-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-background-")));
 	const root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "children.jsonl"), lspLog = join(dir, "lsp.log");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "main.fake"), "clean\n");
@@ -82,7 +82,7 @@ async function fixture(t, extra = {}, mode = "pull") {
 		}
 		await delay(150);
 		// dir is the exact mkdtemp result, never a project or computed parent.
-		assert.equal(dirname(dir), tmpdir()); assert(basename(dir).startsWith("codeintel-background-"));
+		assert.equal(dirname(dir), await realpath(tmpdir())); assert(basename(dir).startsWith("codeintel-background-"));
 		await rm(dir, { recursive: true, force: true });
 	});
 	return { root, home, env, config, configure, hook, pre, post, read, state, records, write, consume, raw, session, client, lspLog };

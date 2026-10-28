@@ -2,7 +2,7 @@ import { stopTestService } from "./bundle-client.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, writeFile, rm, cp } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, cp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 
 // This suite also runs in CI's no-submodule/no-node_modules delivery job.
 test("shared MCP and Hook reuse, explicit writes and connection cleanup", { timeout: 60000 }, async (t) => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-isolated-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-isolated-")));
 	const root = join(dir, "project");
 	const home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
@@ -100,7 +100,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 });
 
 test("MCP cancellation, partial writes, schema errors and recovery through the delivered bundle", {timeout: 30000}, async (t) => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-cancel-e2e-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-cancel-e2e-")));
 	const root = join(dir, "project"); await mkdir(root);
 	const cli = join(dir, "cli.mjs"); await cp(resolve("dist/cli.js"), cli);
 	const log = join(dir, "spawns");
@@ -174,7 +174,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 });
 
 test("disabled automatic diagnostics establish no baseline and full mode requires migration", {timeout: 10000}, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codeintel-disabled-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-disabled-")));
 	t.after(() => rm(dir, {recursive: true, force: true}));
 	await writeFile(join(dir,"lsp-client.json"), JSON.stringify({schemaVersion:1, automaticDiagnostics:{postToolUse:"off",stop:"off"}}));
 	for (const event of ["SessionStart","PreToolUse","PostToolUse","Stop"]) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -10,7 +10,7 @@ import { test } from "node:test";
 // Opt-in actual toolchain acceptance; ordinary bundle tests remain hermetic.
 const enabled = process.env.CODEX_LSP_REAL_TOOLS === "1";
 test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, timeout: 180000 }, async t => {
-	const dir = await mkdtemp(join(tmpdir(), "codex-three-"));
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-three-")));
 	const root = join(dir, "project"), home = join(dir, "home");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
