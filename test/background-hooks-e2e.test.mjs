@@ -11,7 +11,8 @@ import { pathToFileURL } from "node:url";
 import { bundleClient } from "./bundle-client.mjs";
 
 const cli = resolve("dist/cli.js");
-const digest = (value) => createHash("sha256").update(value).digest("hex");
+const digest = (/** @type {string | Buffer} */ value) => createHash("sha256").update(value).digest("hex");
+/** @template T @param {() => Promise<T>} action */
 async function until(action, timeout = 12000) {
 	const deadline = performance.now() + timeout;
 	while (performance.now() < deadline) {
@@ -21,21 +22,21 @@ async function until(action, timeout = 12000) {
 	}
 	assert.fail("Background task did not reach the expected state");
 }
-async function fixture(t, extra = {}, mode = "pull") {
+async function fixture(/** @type {import("node:test").TestContext} */ t, extra = {}, mode = "pull") {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-background-")));
 	const root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "children.jsonl"), lspLog = join(dir, "lsp.log");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "main.fake"), "clean\n");
 	await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config = { schemaVersion: 1, stopGate: "introduced-errors", automaticDiagnostics: {postToolUse: "delta", stop: "errors"}, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: lspLog } } } };
-	const configure = (value = config) => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
+	const configure = (/** @type {Record<string, unknown>} */ value = config) => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
 	await configure();
 	const preload = join(dir, "observe.mjs");
-	await writeFile(preload, `import cp from "node:child_process";import {appendFileSync} from "node:fs";const original=cp.ChildProcess.prototype.spawn;cp.ChildProcess.prototype.spawn=function(options){const result=original.call(this,options);appendFileSync(process.env.CODEINTEL_CHILD_LOG,JSON.stringify({parent:process.pid,pid:this.pid,file:options.file,args:options.args?.includes("service")?[...options.args.slice(0,-1),"<redacted>"]:options.args,windowsHide:options.windowsHide})+"\\n");return result;};if(process.argv[2]==="service"&&process.env.CODEINTEL_SERVICE_DELAY)await new Promise(resolve=>setTimeout(resolve,Number(process.env.CODEINTEL_SERVICE_DELAY)));`);
-	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), CODEINTEL_CHILD_LOG: log, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(preload).href}`, ...extra };
+	await writeFile(preload, `import cp from "node:child_process";import {appendFileSync} from "node:fs";const original=cp.ChildProcess.prototype.spawn;cp.ChildProcess.prototype.spawn=function(options){const result=original.call(this,options);appendFileSync(process.env["CODEINTEL_CHILD_LOG"],JSON.stringify({parent:process.pid,pid:this.pid,file:options.file,args:options.args?.includes("service")?[...options.args.slice(0,-1),"<redacted>"]:options.args,windowsHide:options.windowsHide})+"\\n");return result;};if(process.argv[2]==="service"&&process.env["CODEINTEL_SERVICE_DELAY"])await new Promise(resolve=>setTimeout(resolve,Number(process.env["CODEINTEL_SERVICE_DELAY"])));`);
+	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), CODEINTEL_CHILD_LOG: log, NODE_OPTIONS: `${process.env["NODE_OPTIONS"] ?? ""} --import=${pathToFileURL(preload).href}`, ...extra };
 	const records = async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 	const session = "background-session";
-	const hook = async (event, input = {}) => {
+	const hook = async (/** @type {string} */ event, input = {}) => {
 		const began = performance.now();
 		const child = spawn(process.execPath, [cli, "hook"], { cwd: root, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
 		let text = "", stderr = "";
@@ -59,7 +60,7 @@ async function fixture(t, extra = {}, mode = "pull") {
 	};
 	const identity = digest(JSON.stringify([process.getuid?.() ?? homedir(), await realpath(root), await realpath(home), digest(await readFile(cli, "utf8")), 1]));
 	const endpointPath = join(tmpdir(), `clsp6-${process.getuid?.() ?? digest(homedir()).slice(0, 10)}`, `${identity}.endpoint`);
-	const raw = async (operation, args) => {
+	const raw = async (/** @type {string} */ operation, /** @type {import("./protocol-types.js").Arguments} */ args) => {
 		const endpoint = JSON.parse(await readFile(endpointPath, "utf8"));
 		return new Promise((resolve, reject) => {
 			const socket = createConnection(endpoint.address); let buffer = "";
@@ -70,9 +71,9 @@ async function fixture(t, extra = {}, mode = "pull") {
 		});
 	};
 	const consume = () => raw("hook", { session_id: session, turn_id: "turn-1", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { cmd: "rg clean ." } });
-	const clients = [];
+	/** @type {ReturnType<typeof bundleClient>[]} */ const clients = [];
 	const client = () => { const instance = bundleClient(root, home, env); clients.push(instance); return instance; };
-	const write = (value) => writeFile(join(root, "main.fake"), value);
+	const write = (/** @type {string} */ value) => writeFile(join(root, "main.fake"), value);
 	t.after(async () => {
 		await hook("SessionEnd").catch(() => undefined);
 		await Promise.all(clients.map((instance) => instance.close()));

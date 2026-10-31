@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { record } from "./protocol.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile, realpath } from "node:fs/promises";
@@ -50,7 +51,8 @@ test(
 		const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 		assert.equal(plugin.name, "codex-codeintel");
 		assert.equal(pkg.name, "@zoisythe/codex-codeintel");
-		assert.equal(pkg.bin["codex-codeintel"], "./dist/cli.js");
+		assert.equal(pkg.bin["codeintel"], "./dist/cli.js");
+		assert.equal(pkg.bin["codex-codeintel"], undefined);
 		assert.equal(plugin.skills, "./skills/");
 		assert(pkg.files.includes("skills"));
 		assert.equal(pkg.dependencies, undefined);
@@ -107,10 +109,10 @@ test(
 				stderr += text;
 			});
 			const lines = createInterface({ input: child.stdout });
-			const responses = [];
+			/** @type {{ id?: number; result?: unknown }[]} */ const responses = [];
 			lines.on("line", (line) => responses.push(JSON.parse(line)));
-			const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-			const response = async (id) => {
+			const send = (/** @type {Record<string, unknown>} */ message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+			const response = async (/** @type {number} */ id) => {
 				for (let i = 0; i < 800; i++) {
 					const found = responses.find((value) => value.id === id);
 					if (found) return found;
@@ -129,12 +131,16 @@ test(
 					clientInfo: { name: "clean-install", version: "1" },
 				},
 			});
-			assert.equal((await response(1)).result.protocolVersion, "2024-11-05");
+			const initialized = (await response(1)).result;
+			assert(record(initialized));
+			assert.equal(initialized["protocolVersion"], "2024-11-05");
 			assert(performance.now() - start < 2000, "initialize must not start or await LSP");
 			send({ method: "notifications/initialized" });
 			send({ id: 2, method: "tools/list" });
-			const tools = (await response(2)).result.tools.map((tool) => tool.name);
-			assert.deepEqual(tools, ["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions", "apply"]);
+			const listed = (await response(2)).result;
+			assert(record(listed) && Array.isArray(listed["tools"]));
+			const tools = listed["tools"].map((tool) => { assert(record(tool)); return tool["name"]; });
+			assert.deepEqual(tools, ["check", "diagnostics", "status", "warmup", "navigate", "rename", "format", "inspect", "actions", "apply"]);
 			await delay(100);
 			send({ id: 3, method: "ping" });
 			assert.deepEqual((await response(3)).result, {});

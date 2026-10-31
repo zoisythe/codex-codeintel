@@ -1,12 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFile } from "node:fs/promises";
-import { dirname, extname, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, dirname, extname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BUDGET } from "./budgets.js";
 import type { Config } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
-import { executionEnvironment } from "./environment.js";
+import type { PlannedFile } from "./edit-plans.js";
+import { executionEnvironment, withExecution } from "./environment.js";
 import { hash, inside, workspacePath } from "./files.js";
+import { validateBiome } from "./lint-preview.js";
 import { logEvent } from "./log.js";
 import { LspClient } from "./lsp/client.js";
 import { getLanguageId } from "./lsp/language-mappings.js";
@@ -14,8 +16,16 @@ import { LspManager } from "./lsp/manager.js";
 import type { Diagnostic, DocumentSymbol, SymbolInfo, TextEdit, WorkspaceEdit } from "./lsp/types.js";
 import { findWorkspaceRoot } from "./lsp/workspace-root.js";
 import { measured } from "./metrics.js";
+import {
+	combineValidation,
+	diagnosticFindings,
+	type PlanValidation,
+	type ValidationCheck,
+	validationResult,
+} from "./plan-validation.js";
+import { withPreviewWorkspace } from "./preview-workspace.js";
 import { type FileResult, message, record, text } from "./results.js";
-import { lintAvailability, select } from "./runners.js";
+import { lintAvailability, lintContent, type Runner, select } from "./runners.js";
 import { outline, position, publicOutline } from "./symbols.js";
 import { codeLanguage, resolveServer } from "./tool-resolution.js";
 
@@ -225,10 +235,12 @@ class Client extends LspClient {
 	}
 	private readonly dirty = new Set<string>();
 	override async openFile(path: string): Promise<void> {
+		await this.openContent(path, await readFile(path, "utf8"));
+	}
+	async openContent(path: string, content: string, force = false): Promise<void> {
 		const uri = pathToFileURL(path).href;
-		const content = await readFile(path, "utf8");
 		const previous = this.versions.get(uri);
-		if (previous?.content === content && !this.dirty.has(uri)) return;
+		if (!force && previous?.content === content && !this.dirty.has(uri)) return;
 		this.dirty.delete(uri);
 		this.published.delete(diagnosticUriKey(uri));
 		const version = (previous?.version ?? 0) + 1;
@@ -244,6 +256,97 @@ class Client extends LspClient {
 			});
 		}
 		if (this.isRustAnalyzer()) this.progressAt = Date.now();
+	}
+	async overlayDiagnostics(path: string, signal: AbortSignal): Promise<Diagnostic[]> {
+		if (!this.connection) throw new Error("LSP connection unavailable");
+		const uri = pathToFileURL(path).href;
+		const version = this.versions.get(uri)?.version;
+		if (!this.capabilities["diagnosticProvider"]) {
+			if (this.server.command.some((part) => /typescript-language-server/.test(part)))
+				return this.typescriptOverlayDiagnostics(path, signal);
+			return this.versionedOverlayDiagnostics(uri, version, signal);
+		}
+		const result = await this.connection.sendRequest<{ kind: string; items?: Diagnostic[] }>(
+			"textDocument/diagnostic",
+			{ textDocument: { uri } },
+			signal,
+		);
+		signal.throwIfAborted();
+		if (result.kind !== "full" && this.server.command.some((part) => /gopls(?:\.exe)?$/.test(part)))
+			return this.versionedOverlayDiagnostics(uri, version, signal);
+		if (version !== this.versions.get(uri)?.version || result.kind !== "full" || !Array.isArray(result.items))
+			throw new Error("pending: no full diagnostics for the expected overlay version");
+		return result.items;
+	}
+	private async versionedOverlayDiagnostics(
+		uri: string,
+		version: number | undefined,
+		signal: AbortSignal,
+	): Promise<Diagnostic[]> {
+		while (!signal.aborted) {
+			const published = this.published.get(diagnosticUriKey(uri));
+			if (
+				published &&
+				version !== undefined &&
+				published.version === version &&
+				Date.now() - published.time >= BUDGET.lspQuiet &&
+				!this.progress.size
+			)
+				return published.items;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		signal.throwIfAborted();
+		throw new Error("pending: no versioned overlay diagnostics");
+	}
+	async reassertOverlay(path: string, content: string): Promise<void> {
+		// clangd suppresses no-op changes, including their version publications.
+		// A transient trailing newline forces analysis; only the final version is read.
+		if (this.server.command.some((part) => /clangd(?:\.exe)?$/.test(part))) {
+			await this.openContent(path, `${content}\n`, true);
+			await this.query("textDocument/documentSymbol", { textDocument: { uri: pathToFileURL(path).href } });
+		}
+		await this.openContent(path, content, true);
+	}
+	private async typescriptOverlayDiagnostics(path: string, signal: AbortSignal): Promise<Diagnostic[]> {
+		if (!this.connection) throw new Error("LSP connection unavailable");
+		const items: Diagnostic[] = [];
+		// The traditional adapter publishes unversioned diagnostics. Use only these
+		// read-only, synchronous tsserver commands as an ordered overlay barrier.
+		for (const command of ["syntacticDiagnosticsSync", "semanticDiagnosticsSync"]) {
+			const response = await this.connection.sendRequest<unknown>(
+				"workspace/executeCommand",
+				{
+					command: "typescript.tsserverRequest",
+					arguments: [
+						command,
+						{ file: path, includeLinePosition: false },
+						{ executionTarget: 0, expectsResult: true, isAsync: false },
+					],
+				},
+				signal,
+			);
+			if (!record(response) || !Array.isArray(response["body"]) || response["success"] === false)
+				throw new Error("unsupported: synchronous tsserver diagnostics unavailable");
+			for (const item of response["body"]) {
+				if (!record(item) || !record(item["start"]) || !record(item["end"]) || typeof item["text"] !== "string")
+					throw new Error("Invalid tsserver diagnostic");
+				const at = (value: Record<string, unknown>) => {
+					const line = value["line"],
+						offset = value["offset"];
+					if (typeof line !== "number" || typeof offset !== "number" || line < 1 || offset < 1)
+						throw new Error("Invalid tsserver diagnostic position");
+					return { line: line - 1, character: offset - 1 };
+				};
+				items.push({
+					range: { start: at(item["start"]), end: at(item["end"]) },
+					severity: item["category"] === "error" ? 1 : 2,
+					message: item["text"],
+					source: "typescript",
+					...(typeof item["code"] === "number" ? { code: item["code"] } : {}),
+				});
+			}
+		}
+		return items;
 	}
 	async refresh(changes: { path: string; type: number }[]): Promise<void> {
 		changes = changes.filter(
@@ -530,15 +633,334 @@ export class Languages {
 			},
 		);
 	}
-	private async withLspClient<T>(
-		path: string,
-		fn: (client: LspClient) => Promise<T>,
-		_tool: string,
-		options: { manager: LspManager; signal: AbortSignal },
-	): Promise<T> {
-		const resolved = await resolveServer(this.root, path, this.config);
+	async warmup(paths: string[], signal: AbortSignal): Promise<Record<string, unknown>> {
+		const items: { path: string; status: string; reason?: string; elapsedMs: number }[] = [];
+		const seen = new Set<string>();
+		for (const path of paths) {
+			const start = Date.now();
+			try {
+				signal.throwIfAborted();
+				const target = await this.serverTarget(await workspacePath(this.root, path), signal, false);
+				const key = JSON.stringify([target.root, target.resolved.server, target.resolved.tool.identity]);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				const reused = this.manager
+					.getSnapshot()
+					.some(
+						(entry) =>
+							entry.root === target.root &&
+							entry.alive &&
+							entry.serverId ===
+								`${target.resolved.server.id}:${hash(JSON.stringify([target.resolved.server, target.resolved.tool.identity])).slice(0, 16)}`,
+					);
+				await withExecution(executionEnvironment(), true, () =>
+					this.withLspClient(path, async () => undefined, "warmup", { manager: this.manager, signal, target }),
+				);
+				items.push({ path, status: reused ? "reused" : "initialized", elapsedMs: Date.now() - start });
+			} catch (error) {
+				const reason = message(error);
+				items.push({
+					path,
+					status: signal.aborted
+						? "pending"
+						: /missing|disabled|unsupported|launcher disabled/i.test(reason)
+							? "unsupported"
+							: "failed",
+					reason,
+					elapsedMs: Date.now() - start,
+				});
+			}
+		}
+		const ready = items.filter((entry) => ["initialized", "reused"].includes(entry.status)).length;
+		return {
+			status:
+				ready === items.length && ready
+					? "complete"
+					: ready
+						? "partial"
+						: items.some((entry) => entry.status === "pending")
+							? "pending"
+							: items.some((entry) => entry.status === "failed")
+								? "failed"
+								: "unsupported",
+			items,
+			note: "Initialization only; no diagnostics baseline collected. Local tools only.",
+		};
+	}
+	async validatePlan(
+		files: PlannedFile[],
+		signal: AbortSignal,
+		validationPaths: string[] = [],
+	): Promise<PlanValidation> {
+		signal.throwIfAborted();
+		const paths = [...new Set([...files.map((file) => file.path), ...validationPaths])];
+		if (!files.length) return validationResult("skipped", paths, "No changed files", [], [], "combined");
+		if (files.length > BUDGET.validationFiles || validationPaths.length > BUDGET.validationExtraFiles)
+			return validationResult(
+				"unsupported",
+				paths,
+				"Validation limit: 20 changed and 20 additional files",
+				[],
+				[],
+				"combined",
+			);
+		const bounded = AbortSignal.any([signal, AbortSignal.timeout(BUDGET.validation)]);
+		const scope = [...files];
+		let bytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0);
+		for (const path of validationPaths) {
+			bounded.throwIfAborted();
+			const absolute = await workspacePath(this.root, path);
+			if (scope.some((file) => file.absolute === absolute)) continue;
+			bytes += 2 * (await stat(absolute)).size;
+			if (bytes > BUDGET.validationBytes)
+				return validationResult(
+					"unsupported",
+					paths,
+					"Validation limit: 2 MiB including additional files",
+					[],
+					[],
+					"combined",
+				);
+			const content = await readFile(absolute, "utf8");
+			scope.push({ path, absolute, before: content, after: content, fileIdentity: "validation-only" });
+		}
+		if (scope.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0) > BUDGET.validationBytes)
+			return validationResult(
+				"unsupported",
+				paths,
+				"Validation limit: 2 MiB of before/after content including additional files",
+				[],
+				[],
+				"combined",
+			);
+		const reports: ValidationCheck[] = [];
+		const jobs: (() => Promise<ValidationCheck>)[] = [];
+		const groups = new Map<
+			string,
+			{ target: Awaited<ReturnType<Languages["serverTarget"]>>; provider: string; files: PlannedFile[] }
+		>();
+		const lintGroups = new Map<string, { runner: Runner; files: PlannedFile[] }>();
+		const failure = (provider: string, paths: string[], error: unknown, aborted = bounded.aborted) => {
+			signal.throwIfAborted();
+			const reason = message(error);
+			return validationResult(
+				aborted || /pending|cancel|modified|timeout/i.test(reason)
+					? "pending"
+					: /missing|not installed|unavailable|unsupported|disabled/i.test(reason)
+						? "unsupported"
+						: "failed",
+				paths,
+				reason,
+				[],
+				[],
+				provider,
+			);
+		};
+		for (const file of scope) {
+			const language = codeLanguage(this.config, file.path);
+			const supported = language && ["python", "typescript", "go", "cpp"].includes(language);
+			if (!supported) {
+				reports.push(
+					validationResult(
+						"unsupported",
+						[file.path],
+						"No plan diagnostic provider for this language",
+						[],
+						[],
+						"lsp",
+					),
+				);
+			} else if (this.config.servers[language] !== false) {
+				try {
+					const target = await this.serverTarget(file.absolute, bounded, false);
+					const provider =
+						language === "python"
+							? "ty"
+							: language === "typescript"
+								? "typescript"
+								: language === "go"
+									? "gopls"
+									: "clangd";
+					const commands = target.resolved.server.command.join(" ");
+					const known =
+						provider === "typescript"
+							? /typescript-language-server|(?:^|[\\/ ])(?:tsc|tsgo)(?:\.exe|\.cmd)?(?: |$)/i.test(commands)
+							: target.resolved.server.id === provider ||
+								new RegExp(provider, "i").test(basename(target.resolved.tool.command[0] ?? ""));
+					if (!known) throw new Error("unsupported: configured server has no validated overlay adapter");
+					if (provider === "gopls")
+						target.resolved.server.initialization = {
+							...target.resolved.server.initialization,
+							pullDiagnostics: true,
+							diagnosticsTrigger: "Edit",
+						};
+					if (provider === "clangd") target.resolved.server.command.push("--background-index=false");
+					const key = JSON.stringify([target.root, target.resolved.server, target.resolved.tool.identity]);
+					const group = groups.get(key) ?? { target, provider, files: [] };
+					group.files.push(file);
+					groups.set(key, group);
+				} catch (error) {
+					reports.push(failure(language, [file.path], error));
+				}
+			}
+			try {
+				const runner = await select(this.root, file.absolute, false, this.config, false, bounded);
+				if (runner) {
+					const key = JSON.stringify(runner);
+					const group = lintGroups.get(key) ?? { runner, files: [] };
+					group.files.push(file);
+					lintGroups.set(key, group);
+				}
+			} catch (error) {
+				reports.push(failure("lint", [file.path], error));
+			}
+		}
+		for (const { target, provider, files } of groups.values())
+			jobs.push(async () => {
+				if (
+					[...groups.values()].filter((group) => group.target.resolved.language === target.resolved.language)
+						.length > 1
+				)
+					return validationResult(
+						"unsupported",
+						files.map((file) => file.path),
+						"Cross-project overlays for one language are unsupported; narrow the plan and validationPaths to one project",
+						[],
+						[],
+						provider,
+					);
+				const checkSignal = AbortSignal.any([bounded, AbortSignal.timeout(BUDGET.validationServer)]);
+				const paths = files.map((file) => file.path);
+				const run = async (
+					root: string,
+					files: PlannedFile[],
+					target: Awaited<ReturnType<Languages["serverTarget"]>>,
+					phase?: (after: boolean) => Promise<void>,
+				) => {
+					const isolated = new Languages(root, this.config);
+					try {
+						return await withExecution(executionEnvironment(), true, () =>
+							isolated.withLspClient(
+								target.root,
+								async (client) => {
+									if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+									const collect = async (after: boolean) => {
+										await phase?.(after);
+										if (phase && after)
+											await client.refresh(files.map((file) => ({ path: file.absolute, type: 2 })));
+										for (const file of files) {
+											checkSignal.throwIfAborted();
+											await client.openContent(file.absolute, after ? file.after : file.before, true);
+										}
+										for (const file of files) {
+											checkSignal.throwIfAborted();
+											await client.reassertOverlay(file.absolute, after ? file.after : file.before);
+										}
+										const findings: import("./results.js").Finding[] = [];
+										for (const file of files)
+											findings.push(
+												...diagnosticFindings(
+													file.path,
+													await client.overlayDiagnostics(file.absolute, checkSignal),
+												),
+											);
+										return findings;
+									};
+									const before = await collect(false),
+										after = await collect(true);
+									if (
+										provider === "clangd" &&
+										before.some((finding) =>
+											/file not found|cannot open (?:source|include) file|unknown argument/i.test(
+												finding.message,
+											),
+										)
+									)
+										return validationResult(
+											"unsupported",
+											paths,
+											"C/C++ baseline compilation context is incomplete",
+											[],
+											[],
+											provider,
+										);
+									return validationResult("complete", paths, undefined, before, after, provider);
+								},
+								"plan validation",
+								{ manager: isolated.manager, signal: checkSignal, target },
+							),
+						);
+					} finally {
+						await isolated.close();
+					}
+				};
+				try {
+					if (provider !== "clangd") return await run(this.root, files, target);
+					return await withPreviewWorkspace(this.root, scope, this.config, checkSignal, async (workspace) => {
+						const mapped = files.map((file) => ({ ...file, absolute: workspace.map(file.path) }));
+						const shadowTarget = {
+							...target,
+							root: workspace.map(target.root),
+							resolved: {
+								...target.resolved,
+								server: {
+									...target.resolved.server,
+									command: target.resolved.server.command.map(workspace.translate),
+								},
+							},
+						};
+						const result = await run(workspace.root, mapped, shadowTarget, workspace.writePhase);
+						result.limitations.push(
+							"Bounded temporary project snapshot with private header contents and remapped local compilation paths.",
+						);
+						return result;
+					});
+				} catch (error) {
+					return failure(provider, paths, error, checkSignal.aborted);
+				}
+			});
+		for (const { runner, files } of lintGroups.values())
+			jobs.push(async () => {
+				const paths = files.map((file) => file.path);
+				try {
+					return await withExecution(executionEnvironment(), true, async () => {
+						if (runner.name === "biome")
+							return validateBiome(runner, this.root, scope, files, this.config, bounded);
+						const before: import("./results.js").Finding[] = [],
+							after: import("./results.js").Finding[] = [];
+						for (const file of files) {
+							before.push(...(await lintContent(runner, this.root, file.path, file.before, bounded)));
+							after.push(...(await lintContent(runner, this.root, file.path, file.after, bounded)));
+						}
+						const result = validationResult("complete", paths, undefined, before, after, runner.name);
+						result.limitations.push(
+							"Stdin lint is file-level; custom rules reading other files still see original disk contents.",
+						);
+						return result;
+					});
+				} catch (error) {
+					return failure(runner.name, paths, error);
+				}
+			});
+		let next = 0;
+		const completed: ValidationCheck[] = new Array(jobs.length);
+		const settled = await Promise.allSettled(
+			Array.from({ length: Math.min(4, jobs.length) }, async () => {
+				while (next < jobs.length) {
+					const index = next++,
+						job = jobs[index];
+					if (job) completed[index] = await job();
+				}
+			}),
+		);
+		signal.throwIfAborted();
+		for (const result of settled) if (result.status === "rejected") throw result.reason;
+		return combineValidation(paths, [...reports, ...completed]);
+	}
+	private async serverTarget(path: string, signal: AbortSignal, allowTemporary = true) {
+		const resolved = await resolveServer(this.root, path, this.config, allowTemporary);
 		if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
-		let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
+		let root = await findWorkspaceRoot(path, resolved.server, { signal });
 		if (!inside(this.root, root)) root = this.root;
 		if (
 			resolved.language === "python" &&
@@ -546,6 +968,15 @@ export class Languages {
 			resolved.tool.command[0]?.includes(".venv")
 		)
 			root = dirname(dirname(dirname(resolved.tool.command[0])));
+		return { root, resolved };
+	}
+	private async withLspClient<T>(
+		path: string,
+		fn: (client: LspClient) => Promise<T>,
+		_tool: string,
+		options: { manager: LspManager; signal: AbortSignal; target?: Awaited<ReturnType<Languages["serverTarget"]>> },
+	): Promise<T> {
+		const { root, resolved } = options.target ?? (await this.serverTarget(path, options.signal));
 		const failureKey = hash(JSON.stringify([root, resolved.server, resolved.tool.identity]));
 		const failed = this.failures.get(failureKey);
 		if (failed && Date.now() < failed.retryAt) throw new Error(failed.reason);

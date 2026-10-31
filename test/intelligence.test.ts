@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { EditPlans, plannedFile, workspaceEdits } from "../src/edit-plans.js";
+import { BUDGET } from "../src/budgets.js";
+import { EditPlans, PlanFailure, plannedFile, workspaceEdits } from "../src/edit-plans.js";
 import { Engine } from "../src/engine.js";
 import { withExecution } from "../src/environment.js";
 import { parseLint } from "../src/lint-output.js";
@@ -36,11 +37,12 @@ async function fixture() {
 	await writeFile(join(root, "a.fake"), `broken\n${"x\n".repeat(100)}`);
 	return { root, home };
 }
-it("advertises nine single-word tools with one write entry point", () => {
+it("advertises ten single-word tools with one write entry point", () => {
 	expect(TOOLS.map((tool) => tool.name)).toEqual([
 		"check",
 		"diagnostics",
 		"status",
+		"warmup",
 		"navigate",
 		"rename",
 		"format",
@@ -139,6 +141,83 @@ it("preflights every file before any application", async () => {
 	await writeFile(join(root, "b.fake"), "conflict");
 	await expect(plans.apply(plan.id, "identity", root, signal())).rejects.toThrow("conflict");
 	expect(await readFile(join(root, "a.fake"), "utf8")).toContain("broken");
+});
+it("keeps nonempty plans past service idle without renewing their fixed expiry", async () => {
+	const { root } = await fixture();
+	let now = Date.now();
+	const plans = new EditPlans(() => now);
+	const plan = plans.create("identity", [await plannedFile(root, "a.fake", "new")]);
+	const expires = plan.expiresAt;
+	now += BUDGET.idle + 1;
+	expect(plans.hasLivePlans()).toBe(true);
+	expect(plans.get(plan.id).expiresAt).toBe(expires);
+	now = Date.parse(expires);
+	expect(plans.hasLivePlans()).toBe(false);
+	expect(() => plans.get(plan.id)).toThrowError(expect.objectContaining({ planFailure: "expired" }));
+	expect(await readFile(join(root, "a.fake"), "utf8")).toContain("broken");
+	expect(() => new EditPlans().get(plan.id)).toThrowError(expect.objectContaining({ planFailure: "unavailable" }));
+});
+it("reports capacity eviction and single consumption; empty plans do not keep the service alive", async () => {
+	const { root } = await fixture();
+	const file = await plannedFile(root, "a.fake", "new");
+	const plans = new EditPlans();
+	const first = plans.create("identity", [file]);
+	for (let index = 0; index < 16; index++) plans.create("identity", [file]);
+	expect(() => plans.get(first.id)).toThrowError(expect.objectContaining({ planFailure: "evicted" }));
+	const active = plans.create("identity", [file]);
+	await plans.apply(active.id, "identity", root, signal());
+	expect(() => plans.get(active.id)).toThrow(PlanFailure);
+	expect(() => plans.get(active.id)).toThrowError(expect.objectContaining({ planFailure: "consumed" }));
+	const empty = new EditPlans();
+	empty.create("identity", []);
+	expect(empty.hasLivePlans()).toBe(false);
+});
+it("explicit warmup initializes once with automatic feedback off and never collects diagnostics", async () => {
+	const { root, home } = await fixture();
+	const log = join(home, "requests");
+	await writeFile(
+		join(home, "lsp-client.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			lsp: {
+				fake: {
+					command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")],
+					extensions: [".fake"],
+					env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_REQUESTS: log },
+				},
+			},
+		}),
+	);
+	const engine = new Engine(root);
+	try {
+		const before = await engine.dispatch("status", { path: "a.fake" }, signal());
+		expect((before["clients"] as { processStarts: number }).processStarts).toBe(0);
+		const first = await engine.dispatch("warmup", { path: "a.fake" }, signal());
+		expect(first["status"]).toBe("complete");
+		expect(first["items"]).toMatchObject([{ status: "initialized" }]);
+		const second = await engine.dispatch("warmup", { paths: ["a.fake", "a.fake"] }, signal());
+		expect(second["items"]).toMatchObject([{ status: "reused" }]);
+		const requests = await readFile(log, "utf8");
+		expect(requests.split("\n").filter((method) => method === "initialize")).toHaveLength(1);
+		expect(requests).not.toContain("textDocument/diagnostic");
+	} finally {
+		await engine.dispose();
+	}
+});
+it("binds additional validation files to plan identity without formatting or applying them", async () => {
+	const { root } = await fixture();
+	await writeFile(join(root, "watch.fake"), "unchanged\n");
+	const engine = new Engine(root);
+	try {
+		const preview = await engine.dispatch("format", { path: "a.fake", validationPaths: ["watch.fake"] }, signal());
+		expect(preview["files"]).toEqual(["a.fake"]);
+		expect((preview["validation"] as { paths: string[] }).paths).toContain("watch.fake");
+		await writeFile(join(root, "watch.fake"), "changed after preview\n");
+		await expect(engine.dispatch("apply", { plan: preview["plan"] }, signal())).rejects.toThrow("stale");
+		expect(await readFile(join(root, "a.fake"), "utf8")).toContain("broken");
+	} finally {
+		await engine.dispose();
+	}
 });
 it("reports the completed files on cancellation and consumes the partial plan", async () => {
 	const { root } = await fixture();

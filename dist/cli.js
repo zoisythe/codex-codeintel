@@ -28,6 +28,13 @@ var init_budgets = __esm({
       merge: 200,
       mergeMax: 1e3,
       warmupDelay: 2e3,
+      warmup: 2e4,
+      planTtl: 30 * 60 * 1e3,
+      validation: 3e4,
+      validationServer: 1e4,
+      validationExtraFiles: 20,
+      validationFiles: 20,
+      validationBytes: 2 * 1024 * 1024,
       idle: 3e5,
       cleanup: 1e3,
       postWait: 3500,
@@ -535,9 +542,10 @@ var init_results = __esm({
   "src/results.ts"() {
     "use strict";
     WriteFailure = class extends Error {
-      constructor(reason, modifiedPaths) {
+      constructor(reason, modifiedPaths, planFailure) {
         super(reason);
         this.modifiedPaths = modifiedPaths;
+        this.planFailure = planFailure;
       }
     };
   }
@@ -1284,9 +1292,9 @@ function validateCwd(cwd) {
   }
 }
 function wrap(proc) {
-  const exitedPromise = new Promise((resolve13) => {
-    proc.once("close", (code) => resolve13(code ?? 0));
-    proc.once("error", () => resolve13(1));
+  const exitedPromise = new Promise((resolve16) => {
+    proc.once("close", (code) => resolve16(code ?? 0));
+    proc.once("error", () => resolve16(1));
   });
   if (!proc.stdin || !proc.stdout || !proc.stderr) {
     throw new LspProcessSpawnError("Spawned process is missing one of stdin/stdout/stderr pipes");
@@ -1573,11 +1581,11 @@ async function findTool(root, path, command, explicit = false, allowTemporary = 
   const name = command[0];
   if (!name) throw new Error("Empty command");
   const executableName = basename3(name).replace(/\.(?:exe|cmd|bat)$/i, "");
-  if (automaticExecution() && (["uvx", "npx", "pipx"].includes(executableName) || executableName === "uv" && command[1] === "tool" && command[2] === "run"))
+  if ((automaticExecution() || !allowTemporary) && (["uvx", "npx", "pipx"].includes(executableName) || executableName === "uv" && command[1] === "tool" && command[2] === "run"))
     return resolution(
       [...command],
       "missing",
-      `Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`
+      `${automaticExecution() ? "Automatic" : "Local-only"} temporary launcher disabled: ${name}; install a local server`
     );
   if (explicit) {
     const entry = isAbsolute4(name) || name.includes("/") || name.includes("\\") ? resolve2(root, name) : await pathExecutable(name);
@@ -1638,10 +1646,10 @@ function languageFor(config, path) {
     if (server2 !== false && server2.extensions.includes(extname(path))) return { language, server: server2 };
   return void 0;
 }
-async function resolveServer(root, path, config) {
+async function resolveServer(root, path, config, allowTemporary = true) {
   const entry = languageFor(config, path);
   if (!entry) throw new Error(`Language disabled or unsupported: ${extname(path) || path}`);
-  const tool2 = await resolveTool(root, path, entry.server.command, entry.server.explicit);
+  const tool2 = await resolveTool(root, path, entry.server.command, entry.server.explicit, allowTemporary);
   return {
     language: entry.language,
     tool: tool2,
@@ -1690,7 +1698,7 @@ import { basename as basename4, dirname as dirname4, extname as extname2, join a
 async function run(command, args, cwd, signal, input, options = {}) {
   signal.throwIfAborted();
   const environment = subprocessEnvironment(options.environment ?? executionEnvironment());
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve16, reject) => {
     const prepared = createSpawnCommand([command, ...args], process.platform, environment["ComSpec"], environment);
     const child = spawn2(prepared.command, prepared.args, {
       ...HIDDEN_PROCESS,
@@ -1733,12 +1741,48 @@ async function run(command, args, cwd, signal, input, options = {}) {
       if (code !== 0 && code !== 1 && !signal.aborted) void logEvent("abnormal-exit");
       if (signal.aborted) reject(new Error("Runner cancelled"));
       else if (exceeded) reject(new Error("Runner exceeded time/output budget"));
-      else resolve13({ stdout, stderr, code: code ?? -1 });
+      else resolve16({ stdout, stderr, code: code ?? -1 });
     });
     child.stdin.on("error", () => {
     });
     child.stdin.end(input);
   });
+}
+async function lintContent(runner, root, path, content, signal) {
+  if (runner.name === "biome") throw new Error("unsupported: Biome diagnostics require a private project snapshot");
+  const absolute = await workspacePath(root, path);
+  const cwd = await lintDirectory(root, absolute);
+  if (runner.name === "eslint") {
+    const printed = await run(runner.command, [...runner.prefix, "--print-config", absolute], cwd, signal);
+    if (printed.code !== 0) throw new Error(printed.stderr || "ESLint configuration unavailable");
+    const config = JSON.parse(printed.stdout);
+    if (!record(config)) throw new Error("unsupported: ESLint file has no matching configuration");
+    const options = record(config["languageOptions"]) ? config["languageOptions"]["parserOptions"] : config["parserOptions"];
+    if (record(options) && (options["project"] || options["projectService"]))
+      throw new Error(
+        "unsupported: type-aware ESLint project services cannot consume all plan overlays; use TypeScript diagnostics for types"
+      );
+  }
+  const args = runner.name === "ruff" ? [
+    "check",
+    "--no-fix",
+    "--no-fix-only",
+    "--no-cache",
+    "--output-format",
+    "json",
+    "--stdin-filename",
+    absolute,
+    "-"
+  ] : ["--stdin", "--stdin-filename", absolute, "--format", "json", "--no-warn-ignored"];
+  const output = await run(runner.command, [...runner.prefix, ...args], cwd, signal, content);
+  if (![0, 1].includes(output.code)) throw new Error(output.stderr || `Runner exit ${output.code}`);
+  const data = JSON.parse(output.stdout);
+  if (runner.name === "eslint" && (!Array.isArray(data) || data.length !== 1))
+    throw new Error("unsupported: ESLint ignored the file or produced no report");
+  const findings = parseLint(runner.name, data, path, content);
+  if (findings.some((finding) => /ignored|not processed|configuration.*not found/i.test(finding.message)))
+    throw new Error("unsupported: lint file ignored or configuration unavailable");
+  return findings.map(({ lint: _lint, ...finding }) => finding);
 }
 async function exists(path) {
   try {
@@ -2981,6 +3025,9 @@ import { randomUUID as randomUUID5 } from "node:crypto";
 import { lstat as lstat4, readFile as readFile11, writeFile as writeFile4 } from "node:fs/promises";
 import { relative as relative4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+function isPlanFailureCode(value) {
+  return typeof value === "string" && ["consumed", "expired", "evicted", "unavailable", "stale", "conflict"].includes(value);
+}
 async function fileIdentity(path) {
   const info = await lstat4(path);
   if (!info.isFile() || info.size > BUDGET.fileBytes) throw new Error("Unsupported or oversized edit target");
@@ -3038,22 +3085,49 @@ function diffLines(file) {
     ...after.slice(start, endAfter).map((line) => `+${line}`)
   ];
 }
-var EditPlans;
+var PlanFailure, EditPlans;
 var init_edit_plans = __esm({
   "src/edit-plans.ts"() {
     "use strict";
     init_budgets();
     init_files();
     init_results();
+    PlanFailure = class extends Error {
+      constructor(planFailure, reason) {
+        super(reason);
+        this.planFailure = planFailure;
+      }
+    };
     EditPlans = class {
-      constructor() {
+      constructor(now = Date.now) {
+        this.now = now;
         this.plans = /* @__PURE__ */ new Map();
+        this.ended = /* @__PURE__ */ new Map();
+      }
+      remove(id, reason) {
+        this.plans.delete(id);
+        this.ended.set(id, { reason, until: this.now() + BUDGET.planTtl });
+        while (this.ended.size > 64) this.ended.delete(this.ended.keys().next().value ?? "");
+      }
+      prune() {
+        const now = this.now();
+        for (const [id, entry] of this.ended) if (entry.until <= now) this.ended.delete(id);
+        for (const [id, plan] of this.plans) if (Date.parse(plan.expiresAt) <= now) this.remove(id, "expired");
+      }
+      hasLivePlans() {
+        this.prune();
+        return [...this.plans.values()].some((plan) => plan.files.length > 0);
       }
       create(identity, files, paths = files.map((file) => file.path)) {
+        this.prune();
+        const now = this.now();
         const plan = {
           id: randomUUID5(),
           identity,
           paths,
+          createdAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + BUDGET.planTtl).toISOString(),
+          storage: "memory",
           files: files.filter((file) => file.before !== file.after).sort((a, b) => a.path.localeCompare(b.path))
         };
         if (files.length > 200 || files.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0) > 8 * BUDGET.outputBytes)
@@ -3061,29 +3135,37 @@ var init_edit_plans = __esm({
         this.plans.set(plan.id, plan);
         const memory = () => [...this.plans.values()].flatMap((plan2) => plan2.files).reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0);
         while (this.plans.size > 16 || memory() > 8 * BUDGET.outputBytes)
-          this.plans.delete(this.plans.keys().next().value ?? "");
+          this.remove(this.plans.keys().next().value ?? "", "evicted");
         return plan;
       }
       get(id) {
+        this.prune();
         const plan = this.plans.get(id);
-        if (!plan) throw new Error("Plan missing, consumed or expired; generate a new preview");
+        if (!plan) {
+          const reason = this.ended.get(id)?.reason ?? "unavailable";
+          throw new PlanFailure(reason, `Plan missing: ${reason}; generate a new preview`);
+        }
         return plan;
       }
       clear() {
         this.plans.clear();
+        this.ended.clear();
       }
-      discard(id) {
-        this.plans.delete(id);
+      discard(id, reason = "stale") {
+        if (this.plans.has(id)) this.remove(id, reason);
       }
       async apply(id, identity, root, signal) {
         const plan = this.get(id);
-        this.plans.delete(id);
+        this.remove(id, "consumed");
         if (plan.identity !== identity)
-          throw new Error("Plan stale: workspace, configuration, tools or environment changed; preview again");
+          throw new PlanFailure(
+            "stale",
+            "Plan stale: workspace, configuration, tools or environment changed; preview again"
+          );
         const validate = async (file) => {
           const actual = await workspacePath(root, file.path);
           if (actual !== file.absolute || await fileIdentity(actual) !== file.fileIdentity || await readFile11(actual, "utf8") !== file.before)
-            throw new Error(`Plan conflict: ${file.path}`);
+            throw new PlanFailure("conflict", `Plan conflict: ${file.path}`);
         };
         for (const file of plan.files) {
           signal.throwIfAborted();
@@ -3104,7 +3186,7 @@ var init_edit_plans = __esm({
         } catch (error) {
           if (writing && !modified.includes(writing.path) && await readFile11(writing.absolute, "utf8").catch(() => null) !== writing.before)
             modified.push(writing.path);
-          throw new WriteFailure(message(error), modified);
+          throw new WriteFailure(message(error), modified, error instanceof PlanFailure ? error.planFailure : void 0);
         }
         return modified;
       }
@@ -3179,6 +3261,10 @@ var init_output_pages = __esm({
             "state",
             "job",
             "plan",
+            "createdAt",
+            "expiresAt",
+            "storage",
+            "planFailure",
             "partial",
             "errors",
             "warnings",
@@ -3230,6 +3316,66 @@ var init_output_pages = __esm({
         return { ...page.header, paged: true, items: items2, total: page.items.length, ...next ? { next } : {} };
       }
     };
+  }
+});
+
+// src/plan-validation.ts
+function diagnosticFindings(path, items2) {
+  return items2.filter((item) => item.severity === 1 || item.severity === 2).map((item) => ({
+    path,
+    line: item.range.start.line + 1,
+    column: item.range.start.character + 1,
+    severity: item.severity === 1 ? "error" : "warning",
+    source: `${item.source ?? "lsp"}${item.code === void 0 ? "" : `/${item.code}`}`,
+    ...item.code !== void 0 ? { rule: String(item.code) } : {},
+    endLine: item.range.end.line + 1,
+    endColumn: item.range.end.character + 1,
+    message: item.message
+  }));
+}
+function validationResult(state, paths, reason, before = [], after = [], provider = "ty") {
+  const introduced = addedFindings(before, after);
+  const resolved = addedFindings(after, before);
+  const errorsIntroduced = state === "complete" ? introduced.filter((item) => item.severity === "error").length : null;
+  const errorsResolved = state === "complete" ? resolved.filter((item) => item.severity === "error").length : null;
+  return {
+    state,
+    provider,
+    paths,
+    introduced,
+    resolved,
+    errorsIntroduced,
+    errorsResolved,
+    netDelta: errorsIntroduced === null || errorsResolved === null ? null : errorsIntroduced - errorsResolved,
+    limitations: [
+      "Only listed files and this provider were checked; builds and runtime behavior were not validated. Zero delta is not a safety guarantee."
+    ],
+    ...reason ? { reason } : {}
+  };
+}
+function combineValidation(paths, checks) {
+  const active = checks.filter((check) => check.state !== "skipped");
+  const complete = active.filter((check) => check.state === "complete");
+  const state = complete.length === active.length && complete.length ? "complete" : complete.length ? "partial" : active.some((check) => check.state === "pending") ? "pending" : active.some((check) => check.state === "failed") ? "failed" : active.length ? "unsupported" : "skipped";
+  const result = validationResult(state, paths, void 0, [], [], "combined");
+  result.checks = checks;
+  result.introduced = complete.flatMap((check) => check.introduced);
+  result.resolved = complete.flatMap((check) => check.resolved);
+  if (state === "complete") {
+    result.errorsIntroduced = complete.reduce((sum, check) => sum + (check.errorsIntroduced ?? 0), 0);
+    result.errorsResolved = complete.reduce((sum, check) => sum + (check.errorsResolved ?? 0), 0);
+    result.netDelta = result.errorsIntroduced - result.errorsResolved;
+  }
+  result.limitations = [
+    "Only changed files and explicit validationPaths were checked; other dependents, builds and runtime behavior were not validated.",
+    "Counts are provider observations; different providers can report the same problem. Consult checks for per-provider coverage and completeness."
+  ];
+  return result;
+}
+var init_plan_validation = __esm({
+  "src/plan-validation.ts"() {
+    "use strict";
+    init_diagnostic_delta();
   }
 });
 
@@ -3397,6 +3543,7 @@ var init_intelligence = __esm({
     init_edit_plans();
     init_files();
     init_output_pages();
+    init_plan_validation();
     init_results();
     init_runners();
     init_symbols();
@@ -3429,14 +3576,33 @@ var init_intelligence = __esm({
         while (this.actions.size > 512) this.actions.delete(this.actions.keys().next().value ?? "");
         return value;
       }
-      preview(identity, files) {
+      async preview(identity, files, args, signal) {
         const plan = this.plans.create(identity, files, this.scope);
+        let validation2;
+        try {
+          validation2 = args["validate"] === false ? validationResult(
+            "skipped",
+            plan.files.map((file) => file.path),
+            "Validation explicitly disabled"
+          ) : await this.language.validatePlan(
+            plan.files,
+            signal,
+            Array.isArray(args["validationPaths"]) ? args["validationPaths"].filter((path) => typeof path === "string") : []
+          );
+        } catch (error) {
+          this.plans.discard(plan.id);
+          throw error;
+        }
         return {
           status: plan.files.length ? "planned" : "unchanged",
           plan: plan.id,
+          createdAt: plan.createdAt,
+          expiresAt: plan.expiresAt,
+          storage: plan.storage,
           files: plan.files.map((file) => file.path),
           diff: plan.files.flatMap(diffLines),
-          note: "Text edit plan only; apply writes it. Type/build effects have not been simulated."
+          validation: validation2,
+          note: "Only apply writes this single-use plan. Validation is scoped evidence, not a build or behavior guarantee; restart or eviction may invalidate it before expiry."
         };
       }
       async execute(operation, args, paths, config, identity, signal, bindings = paths) {
@@ -3446,7 +3612,7 @@ var init_intelligence = __esm({
         if (operation === "navigate") output = await this.language.navigate(args, signal);
         else if (operation === "rename") {
           const edit = await this.language.renameEdit(args, signal);
-          output = this.preview(identity, await workspaceEdits(this.root, edit));
+          output = await this.preview(identity, await workspaceEdits(this.root, edit), args, signal);
         } else if (operation === "format") {
           if (!config.formattingEnabled) throw new Error("Configuration error: formatting disabled");
           const files = [];
@@ -3458,7 +3624,7 @@ var init_intelligence = __esm({
             const after = formatted?.after ?? applyTextChanges(before, await this.language.formatEdits(path, signal));
             files.push(await plannedFile(this.root, path, after, before));
           }
-          output = this.preview(identity, files);
+          output = await this.preview(identity, files, args, signal);
         } else if (operation === "inspect")
           output = args["operation"] === "impact" ? await this.impact(args, paths, signal) : await this.inspect(args, signal);
         else if (operation === "actions") output = await this.actionRequest(args, paths, config, identity, signal);
@@ -3755,7 +3921,10 @@ ${String(docs["url"])}` : "") + "\nConfiguration source origin is unknown.";
                 group.before
               )
             );
-          return { ...this.preview(identity, files), ...issues.length ? { partial: true, issues } : {} };
+          return {
+            ...await this.preview(identity, files, args, signal),
+            ...issues.length ? { partial: true, issues } : {}
+          };
         }
         return this.listActions(args, paths, config, identity, signal);
       }
@@ -3904,6 +4073,198 @@ ${String(docs["url"])}` : "") + "\nConfiguration source origin is unknown.";
   }
 });
 
+// src/preview-workspace.ts
+import { access as access4, mkdir as mkdir5, mkdtemp, readdir as readdir4, readFile as readFile14, rm as rm4, stat as stat5, symlink, writeFile as writeFile5 } from "node:fs/promises";
+import { tmpdir as tmpdir3 } from "node:os";
+import { dirname as dirname6, join as join11, relative as relative7, resolve as resolve8, sep as sep2 } from "node:path";
+async function withPreviewWorkspace(root, files, config, signal, use) {
+  const snapshot = await inventory(root, 2e3, signal, config.exclude);
+  if (!snapshot.complete) throw new Error("unsupported: preview snapshot exceeds 2000 files or is incomplete");
+  const temporary2 = await mkdtemp(join11(tmpdir3(), "codeintel-preview-"));
+  const shadow = join11(temporary2, "workspace");
+  const map = (path) => {
+    const absolute = resolve8(root, path);
+    if (!inside(root, absolute)) throw new Error("Preview path outside workspace");
+    return join11(shadow, relative7(root, absolute));
+  };
+  const translate = (text2) => {
+    for (const [from, to] of [
+      [root.replaceAll("\\", "/"), shadow.replaceAll("\\", "/")],
+      [root.replaceAll("\\", "\\\\"), shadow.replaceAll("\\", "\\\\")],
+      [root, shadow]
+    ]) {
+      text2 = text2 === from ? to : text2;
+      text2 = text2.replaceAll(`${from}/`, `${to}/`).replaceAll(`${from}\\`, `${to}\\`).replaceAll(`"${from}"`, `"${to}"`).replaceAll(`=${from}`, `=${to}`);
+    }
+    return text2;
+  };
+  try {
+    await mkdir5(shadow);
+    let bytes2 = 0;
+    const selected = /* @__PURE__ */ new Set([...snapshot.files.keys(), ...files.map((file) => file.path)]);
+    for (const file of files)
+      for (let dir = dirname6(file.absolute); inside(root, dir); dir = dirname6(dir)) {
+        for (const name of [
+          "biome.json",
+          "biome.jsonc",
+          ".clangd",
+          "compile_commands.json",
+          "compile_flags.txt",
+          "package.json"
+        ])
+          if (await access4(join11(dir, name)).then(
+            () => true,
+            () => false
+          ))
+            selected.add(relative7(root, join11(dir, name)));
+        if (dir === root || dirname6(dir) === dir) break;
+      }
+    if (selected.size > 2e3) throw new Error("unsupported: preview snapshot exceeds 2000 files");
+    const names = [...selected];
+    let copied = names.length;
+    for (const path of names) {
+      signal.throwIfAborted();
+      const absolute = await workspacePath(root, path);
+      bytes2 += (await stat5(absolute)).size;
+      if (bytes2 > 32 * 1024 * 1024) throw new Error("unsupported: preview snapshot exceeds 32 MiB");
+      const destination = map(path);
+      await mkdir5(dirname6(destination), { recursive: true });
+      const content = await readFile14(absolute);
+      const configuration2 = /(?:^|[\\/])(?:biome\.jsonc?|\.clangd|compile_commands\.json|compile_flags\.txt)$/.test(
+        path
+      );
+      await writeFile5(destination, configuration2 ? translate(content.toString("utf8")) : content);
+    }
+    for (const name of ["build", "dist", "target", "vendor"]) {
+      const directory2 = join11(root, name);
+      if (!(await stat5(directory2).catch(() => void 0))?.isDirectory()) continue;
+      await mkdir5(map(name), { recursive: true });
+      for (const entry of await readdir4(directory2, { withFileTypes: true })) {
+        signal.throwIfAborted();
+        const path = join11(name, entry.name), destination = map(path);
+        if (await access4(destination).then(
+          () => true,
+          () => false
+        ))
+          continue;
+        if (entry.name === "compile_commands.json" || /\.(?:h|hh|hpp|hxx|inc|def|modulemap|json|txt|cmake)$/.test(entry.name)) {
+          if (++copied > 2e3) throw new Error("unsupported: preview snapshot exceeds 2000 copied files");
+          bytes2 += (await stat5(join11(root, path))).size;
+          if (bytes2 > 32 * 1024 * 1024) throw new Error("unsupported: preview snapshot exceeds 32 MiB");
+          const content = await readFile14(join11(root, path), "utf8");
+          await writeFile5(destination, entry.name === "compile_commands.json" ? translate(content) : content);
+        } else if (entry.isDirectory())
+          await symlink(join11(root, path), destination, process.platform === "win32" ? "junction" : "dir");
+      }
+    }
+    const linked = /* @__PURE__ */ new Set();
+    for (const file of files)
+      for (let dir = dirname6(file.absolute); inside(root, dir); dir = dirname6(dir)) {
+        const dependencies = join11(dir, "node_modules");
+        if (!linked.has(dependencies) && await access4(dependencies).then(
+          () => true,
+          () => false
+        )) {
+          const destination = map(dependencies);
+          await mkdir5(dirname6(destination), { recursive: true });
+          await symlink(dependencies, destination, process.platform === "win32" ? "junction" : "dir");
+          linked.add(dependencies);
+        }
+        if (dir === root || dirname6(dir) === dir || relative7(root, dir).split(sep2).includes("node_modules")) break;
+      }
+    return await use({
+      root: shadow,
+      map,
+      translate,
+      writePhase: async (after) => {
+        for (const file of files) {
+          signal.throwIfAborted();
+          await writeFile5(map(file.path), after ? file.after : file.before);
+        }
+      }
+    });
+  } finally {
+    await rm4(temporary2, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+var init_preview_workspace = __esm({
+  "src/preview-workspace.ts"() {
+    "use strict";
+    init_files();
+  }
+});
+
+// src/lint-preview.ts
+import { resolve as resolve9 } from "node:path";
+async function validateBiome(runner, root, scope2, files, config, signal) {
+  return withPreviewWorkspace(root, scope2, config, signal, async (workspace) => {
+    const collect = async (after2) => {
+      await workspace.writePhase(after2);
+      const environment = executionEnvironment();
+      if (environment["BIOME_CONFIG_PATH"])
+        environment["BIOME_CONFIG_PATH"] = workspace.translate(environment["BIOME_CONFIG_PATH"]);
+      const output = await run(
+        runner.command,
+        [
+          ...runner.prefix,
+          "lint",
+          "--reporter=json",
+          "--max-diagnostics=none",
+          "--vcs-enabled=false",
+          ...files.map((file) => workspace.map(file.path))
+        ],
+        workspace.root,
+        signal,
+        void 0,
+        { environment }
+      );
+      if (![0, 1].includes(output.code)) throw new Error(output.stderr || `Biome exit ${output.code}`);
+      const data = JSON.parse(output.stdout);
+      if (!record(data) || !record(data["summary"]) || Number(data["summary"]["skipped"]) > 0 || Number(data["summary"]["changed"]) + Number(data["summary"]["unchanged"]) !== files.length)
+        throw new Error("unsupported: Biome did not process every requested file");
+      const split = splitLint("biome", data, workspace.root, workspace.root);
+      const findings = [];
+      for (const file of files) {
+        const path = workspace.map(file.path);
+        const relative12 = path.slice(resolve9(workspace.root).length + 1);
+        findings.push(
+          ...parseLint(
+            "biome",
+            split.get(relative12) ?? { diagnostics: [] },
+            file.path,
+            after2 ? file.after : file.before
+          ).map(({ lint: _lint, ...finding }) => finding)
+        );
+      }
+      return findings;
+    };
+    const before = await collect(false), after = await collect(true);
+    const result = validationResult(
+      "complete",
+      files.map((file) => file.path),
+      void 0,
+      before,
+      after,
+      "biome"
+    );
+    result.limitations.push(
+      "Bounded temporary project snapshot; VCS discovery disabled after workspace file selection. Project file includes and rule configuration still apply."
+    );
+    return result;
+  });
+}
+var init_lint_preview = __esm({
+  "src/lint-preview.ts"() {
+    "use strict";
+    init_environment();
+    init_lint_output();
+    init_plan_validation();
+    init_preview_workspace();
+    init_results();
+    init_runners();
+  }
+});
+
 // src/lsp/constants.ts
 var REQUEST_TIMEOUT_MS, INIT_TIMEOUT_MS, IDLE_TIMEOUT_MS, REAPER_INTERVAL_MS, STOP_HARD_KILL_TIMEOUT_MS, STOP_SIGKILL_GRACE_MS;
 var init_constants = __esm({
@@ -4016,10 +4377,10 @@ var init_json_rpc_connection = __esm({
         const id = this.nextRequestId;
         this.nextRequestId += 1;
         const message2 = params === void 0 ? { jsonrpc: "2.0", id, method } : { jsonrpc: "2.0", id, method, params };
-        const responsePromise = new Promise((resolve13, reject) => {
+        const responsePromise = new Promise((resolve16, reject) => {
           this.pendingRequests.set(String(id), {
             resolve(result) {
-              resolve13(result);
+              resolve16(result);
             },
             reject
           });
@@ -4164,13 +4525,13 @@ var init_json_rpc_connection = __esm({
         const payload = `Content-Length: ${Buffer.byteLength(body, "utf8")}\r
 \r
 ${body}`;
-        return new Promise((resolve13, reject) => {
+        return new Promise((resolve16, reject) => {
           this.writer.write(payload, (error) => {
             if (error) {
               reject(error);
               return;
             }
-            resolve13();
+            resolve16();
           });
         });
       }
@@ -4254,7 +4615,7 @@ var init_transport = __esm({
           env
         });
         this.startStderrReading();
-        await new Promise((resolve13) => setTimeout(resolve13, 100));
+        await new Promise((resolve16) => setTimeout(resolve16, 100));
         if (this.proc.exitCode !== null) {
           const stderr = this.stderrBuffer.join("\n");
           throw new LspProcessExitedError(this.server.id, this.root, this.proc.exitCode, stderr.slice(-2e3));
@@ -4358,8 +4719,8 @@ var init_transport = __esm({
           try {
             proc.kill();
             let timeoutId;
-            const timeoutPromise = new Promise((resolve13) => {
-              timeoutId = setTimeout(resolve13, STOP_HARD_KILL_TIMEOUT_MS);
+            const timeoutPromise = new Promise((resolve16) => {
+              timeoutId = setTimeout(resolve16, STOP_HARD_KILL_TIMEOUT_MS);
             });
             await Promise.race([
               proc.exited.then(() => {
@@ -4374,7 +4735,7 @@ var init_transport = __esm({
                 proc.kill("SIGKILL");
                 await Promise.race([
                   proc.exited,
-                  new Promise((resolve13) => setTimeout(resolve13, STOP_SIGKILL_GRACE_MS))
+                  new Promise((resolve16) => setTimeout(resolve16, STOP_SIGKILL_GRACE_MS))
                 ]);
               } catch (error) {
                 reportBestEffortCleanupError("hard process kill", error);
@@ -4619,7 +4980,7 @@ var init_language_mappings = __esm({
 
 // src/lsp/client.ts
 import { readFileSync as readFileSync2 } from "node:fs";
-import { extname as extname4, resolve as resolve8 } from "node:path";
+import { extname as extname4, resolve as resolve10 } from "node:path";
 import { pathToFileURL as pathToFileURL3 } from "node:url";
 var POST_OPEN_DELAY_MS, POST_DIAGNOSTICS_WAIT_MS, LspClient;
 var init_client = __esm({
@@ -4641,7 +5002,7 @@ var init_client = __esm({
         return this.diagnosticPullErrors;
       }
       async openFile(filePath) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         const uri = pathToFileURL3(absPath).href;
         const text2 = readFileSync2(absPath, "utf-8");
         if (!this.openedFiles.has(absPath)) {
@@ -4679,7 +5040,7 @@ var init_client = __esm({
         });
       }
       async definition(filePath, line, character) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest(
           "textDocument/definition",
@@ -4690,7 +5051,7 @@ var init_client = __esm({
         );
       }
       async references(filePath, line, character, includeDeclaration = true) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/references", {
           textDocument: { uri: pathToFileURL3(absPath).href },
@@ -4699,7 +5060,7 @@ var init_client = __esm({
         });
       }
       async documentSymbols(filePath) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/documentSymbol", {
           textDocument: { uri: pathToFileURL3(absPath).href }
@@ -4715,7 +5076,7 @@ var init_client = __esm({
         return /unsupported|not supported|method not found|unknown request/i.test(error.message);
       }
       async diagnostics(filePath) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         const uri = pathToFileURL3(absPath).href;
         await this.openFile(absPath);
         await new Promise((r) => setTimeout(r, POST_DIAGNOSTICS_WAIT_MS));
@@ -4734,7 +5095,7 @@ var init_client = __esm({
         return { items: this.getStoredDiagnostics(uri) };
       }
       async prepareRename(filePath, line, character) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest(
           "textDocument/prepareRename",
@@ -4745,7 +5106,7 @@ var init_client = __esm({
         );
       }
       async rename(filePath, line, character, newName) {
-        const absPath = resolve8(filePath);
+        const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/rename", {
           textDocument: { uri: pathToFileURL3(absPath).href },
@@ -4845,7 +5206,7 @@ async function stopClientBestEffort(client) {
 }
 function awaitWithSignal(promise, signal) {
   if (!signal) return promise;
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve16, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled) return;
@@ -4862,7 +5223,7 @@ function awaitWithSignal(promise, signal) {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        resolve13(value);
+        resolve16(value);
       },
       (err) => {
         if (settled) return;
@@ -5139,7 +5500,7 @@ function createSharedAbortableOperation(run2, onSettled, onAbandoned) {
 function awaitSharedAbortableOperation(operation, signal) {
   signal?.throwIfAborted();
   operation.waiterCount += 1;
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve16, reject) => {
     let settled = false;
     const onAbort = () => {
       if (settled) return;
@@ -5155,7 +5516,7 @@ function awaitSharedAbortableOperation(operation, signal) {
         settled = true;
         signal?.removeEventListener("abort", onAbort);
         releaseSharedOperationWaiter(operation);
-        resolve13(value);
+        resolve16(value);
       },
       (error) => {
         if (settled) return;
@@ -5175,7 +5536,7 @@ var init_abortable_shared_operation = __esm({
 
 // src/lsp/cargo-manifest-snapshot.ts
 import { readFileSync as readFileSync3 } from "node:fs";
-import { dirname as dirname6, join as join11 } from "node:path";
+import { dirname as dirname7, join as join12 } from "node:path";
 function isMissingManifestError(error) {
   if (!(error instanceof Error)) return false;
   const code = "code" in error ? error.code : void 0;
@@ -5207,13 +5568,13 @@ function ancestorManifestPaths(manifestDir) {
   let dir = manifestDir;
   let prev = "";
   while (dir !== prev) {
-    const manifestPath = join11(dir, "Cargo.toml");
+    const manifestPath = join12(dir, "Cargo.toml");
     if (!seen.has(manifestPath)) {
       seen.add(manifestPath);
       paths.push(manifestPath);
     }
     prev = dir;
-    dir = dirname6(dir);
+    dir = dirname7(dir);
   }
   return paths;
 }
@@ -5657,7 +6018,7 @@ function skipVoid(str, ptr, banNewLines, banComments) {
   }
   return ptr;
 }
-function skipUntil(str, ptr, sep4, end, banNewLines = false) {
+function skipUntil(str, ptr, sep5, end, banNewLines = false) {
   if (!end) {
     ptr = indexOfNewline(str, ptr);
     return ptr < 0 ? str.length : ptr;
@@ -5666,7 +6027,7 @@ function skipUntil(str, ptr, sep4, end, banNewLines = false) {
     let c = str[i];
     if (c === "#") {
       i = indexOfNewline(str, i);
-    } else if (c === sep4) {
+    } else if (c === sep5) {
       return i + 1;
     } else if (c === end || banNewLines && (c === "\n" || c === "\r" && str[i + 1] === "\n")) {
       return i;
@@ -6222,7 +6583,7 @@ var init_dist = __esm({
 
 // src/lsp/cargo-metadata-parser.ts
 import { readFileSync as readFileSync4, realpathSync, statSync as statSync2 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join12, relative as relative7, sep as sep2 } from "node:path";
+import { isAbsolute as isAbsolute6, join as join13, relative as relative8, sep as sep3 } from "node:path";
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -6242,7 +6603,7 @@ function canonicalManifest(path) {
     return void 0;
   }
 }
-function readFile14(path) {
+function readFile15(path) {
   try {
     return readFileSync4(path, "utf8");
   } catch {
@@ -6250,7 +6611,7 @@ function readFile14(path) {
   }
 }
 function readCargoManifestKind(path) {
-  const content = readFile14(path);
+  const content = readFile15(path);
   if (content === void 0) return void 0;
   try {
     return Object.hasOwn(parse(content), "workspace") ? "workspace" : "ordinary";
@@ -6259,8 +6620,8 @@ function readCargoManifestKind(path) {
   }
 }
 function isContainedPath(root, path) {
-  const relativePath = relative7(root, path);
-  return relativePath === "" || !isAbsolute6(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep2}`);
+  const relativePath = relative8(root, path);
+  return relativePath === "" || !isAbsolute6(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep3}`);
 }
 function parseCargoMetadata(output) {
   let parsed;
@@ -6294,7 +6655,7 @@ function parseCargoMetadata(output) {
 function validateCargoMetadata(requestedManifestPath, metadata) {
   const workspaceRoot = canonicalDirectory(metadata.workspaceRoot);
   if (workspaceRoot === void 0) return void 0;
-  const rootManifestPath = canonicalManifest(join12(workspaceRoot, "Cargo.toml"));
+  const rootManifestPath = canonicalManifest(join13(workspaceRoot, "Cargo.toml"));
   const requestedManifest = canonicalManifest(requestedManifestPath);
   if (rootManifestPath === void 0 || requestedManifest === void 0) return void 0;
   if (!isContainedPath(workspaceRoot, requestedManifest)) return void 0;
@@ -6386,8 +6747,8 @@ async function defaultCargoMetadataLoader(manifestPath, signal, environment = ex
       let terminationError;
       let settled = false;
       let resolveTermination;
-      const terminationComplete = new Promise((resolve13) => {
-        resolveTermination = resolve13;
+      const terminationComplete = new Promise((resolve16) => {
+        resolveTermination = resolve16;
       });
       const finishTermination = () => {
         resolveTermination?.();
@@ -6520,7 +6881,7 @@ var init_cargo_metadata_process = __esm({
 
 // src/lsp/cargo-workspace-root.ts
 import { existsSync as existsSync2, realpathSync as realpathSync2 } from "node:fs";
-import { dirname as dirname7, join as join13 } from "node:path";
+import { dirname as dirname8, join as join14 } from "node:path";
 function realpathSafe(path) {
   try {
     return realpathSync2.native(path);
@@ -6532,9 +6893,9 @@ function nearestCargoManifestDir(startDir) {
   let dir = startDir;
   let prev = "";
   while (dir !== prev) {
-    if (existsSync2(join13(dir, "Cargo.toml"))) return dir;
+    if (existsSync2(join14(dir, "Cargo.toml"))) return dir;
     prev = dir;
-    dir = dirname7(dir);
+    dir = dirname8(dir);
   }
   return void 0;
 }
@@ -6545,14 +6906,14 @@ function cacheEntryFor(root, memberManifestDir) {
 function prepareCargoWorkspaceCache(manifestDir, metadata) {
   const entries = /* @__PURE__ */ new Map();
   for (const manifestPath of metadata.memberManifestPaths) {
-    const manifestDir2 = dirname7(manifestPath);
+    const manifestDir2 = dirname8(manifestPath);
     const entry = cacheEntryFor(metadata.workspaceRoot, manifestDir2);
     if (entry === void 0) return void 0;
     entries.set(manifestDir2, entry);
   }
-  const requestedManifestPath = canonicalManifest(join13(manifestDir, "Cargo.toml"));
+  const requestedManifestPath = canonicalManifest(join14(manifestDir, "Cargo.toml"));
   if (requestedManifestPath === void 0) return void 0;
-  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname7(requestedManifestPath));
+  const requestedEntry = cacheEntryFor(metadata.workspaceRoot, dirname8(requestedManifestPath));
   if (requestedEntry === void 0) return void 0;
   entries.set(manifestDir, requestedEntry);
   return { root: metadata.workspaceRoot, entries };
@@ -6620,7 +6981,7 @@ function createInFlightCargoWorkspaceRoot(request) {
 async function loadCargoWorkspaceRoot(request) {
   try {
     request.signal?.throwIfAborted();
-    const manifestPath = join13(request.manifestDir, "Cargo.toml");
+    const manifestPath = join14(request.manifestDir, "Cargo.toml");
     const output = await request.loader(manifestPath, request.signal);
     request.signal?.throwIfAborted();
     if (!snapshotsAreFresh(request.generation.snapshots)) {
@@ -6699,7 +7060,7 @@ var init_cargo_workspace_root = __esm({
 
 // src/lsp/workspace-root.ts
 import { existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname8, join as join14, resolve as resolve9 } from "node:path";
+import { dirname as dirname9, join as join15, resolve as resolve11 } from "node:path";
 function isDirectoryPath(filePath) {
   try {
     return statSync3(filePath).isDirectory();
@@ -6708,10 +7069,10 @@ function isDirectoryPath(filePath) {
   }
 }
 async function findWorkspaceRoot(filePath, server2, options = {}) {
-  const abs = resolve9(filePath);
+  const abs = resolve11(filePath);
   let dir = abs;
   if (!isDirectoryPath(dir)) {
-    dir = dirname8(dir);
+    dir = dirname9(dir);
   }
   if (server2?.id === "rust") {
     const cargoRoot = await resolveCargoWorkspaceRoot(dir, options);
@@ -6721,14 +7082,14 @@ async function findWorkspaceRoot(filePath, server2, options = {}) {
   while (dir !== prevDir) {
     const markers = server2?.extensions.some((extension) => [".c", ".cpp", ".cc", ".h"].includes(extension)) ? [".clangd", "compile_commands.json", "compile_flags.txt", ...WORKSPACE_MARKERS] : WORKSPACE_MARKERS;
     for (const marker of markers) {
-      if (existsSync3(join14(dir, marker))) {
+      if (existsSync3(join15(dir, marker))) {
         return dir;
       }
     }
     prevDir = dir;
-    dir = dirname8(dir);
+    dir = dirname9(dir);
   }
-  return dirname8(abs);
+  return dirname9(abs);
 }
 var WORKSPACE_MARKERS;
 var init_workspace_root = __esm({
@@ -6741,8 +7102,8 @@ var init_workspace_root = __esm({
 
 // src/language.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
-import { readFile as readFile15 } from "node:fs/promises";
-import { dirname as dirname9, extname as extname5, resolve as resolve10 } from "node:path";
+import { readFile as readFile16, stat as stat6 } from "node:fs/promises";
+import { basename as basename5, dirname as dirname10, extname as extname5, resolve as resolve12 } from "node:path";
 import { fileURLToPath as fileURLToPath5, pathToFileURL as pathToFileURL4 } from "node:url";
 function diagnosticUriKey(uri) {
   try {
@@ -6762,12 +7123,15 @@ var init_language = __esm({
     init_config_files();
     init_environment();
     init_files();
+    init_lint_preview();
     init_log();
     init_client();
     init_language_mappings();
     init_manager();
     init_workspace_root();
     init_metrics();
+    init_plan_validation();
+    init_preview_workspace();
     init_results();
     init_runners();
     init_symbols();
@@ -6813,7 +7177,7 @@ var init_language = __esm({
         const busy = () => this.serverBusy || this.progress.size > 0 || Date.now() - this.progressAt < BUDGET.lspQuiet;
         while (busy() && Date.now() < deadline) {
           signal?.throwIfAborted();
-          await new Promise((resolve13) => setTimeout(resolve13, 25));
+          await new Promise((resolve16) => setTimeout(resolve16, 25));
         }
         signal?.throwIfAborted();
         return !busy();
@@ -6956,10 +7320,12 @@ var init_language = __esm({
         });
       }
       async openFile(path) {
+        await this.openContent(path, await readFile16(path, "utf8"));
+      }
+      async openContent(path, content, force = false) {
         const uri = pathToFileURL4(path).href;
-        const content = await readFile15(path, "utf8");
         const previous = this.versions.get(uri);
-        if (previous?.content === content && !this.dirty.has(uri)) return;
+        if (!force && previous?.content === content && !this.dirty.has(uri)) return;
         this.dirty.delete(uri);
         this.published.delete(diagnosticUriKey(uri));
         const version = (previous?.version ?? 0) + 1;
@@ -6975,6 +7341,83 @@ var init_language = __esm({
           });
         }
         if (this.isRustAnalyzer()) this.progressAt = Date.now();
+      }
+      async overlayDiagnostics(path, signal) {
+        if (!this.connection) throw new Error("LSP connection unavailable");
+        const uri = pathToFileURL4(path).href;
+        const version = this.versions.get(uri)?.version;
+        if (!this.capabilities["diagnosticProvider"]) {
+          if (this.server.command.some((part) => /typescript-language-server/.test(part)))
+            return this.typescriptOverlayDiagnostics(path, signal);
+          return this.versionedOverlayDiagnostics(uri, version, signal);
+        }
+        const result = await this.connection.sendRequest(
+          "textDocument/diagnostic",
+          { textDocument: { uri } },
+          signal
+        );
+        signal.throwIfAborted();
+        if (result.kind !== "full" && this.server.command.some((part) => /gopls(?:\.exe)?$/.test(part)))
+          return this.versionedOverlayDiagnostics(uri, version, signal);
+        if (version !== this.versions.get(uri)?.version || result.kind !== "full" || !Array.isArray(result.items))
+          throw new Error("pending: no full diagnostics for the expected overlay version");
+        return result.items;
+      }
+      async versionedOverlayDiagnostics(uri, version, signal) {
+        while (!signal.aborted) {
+          const published = this.published.get(diagnosticUriKey(uri));
+          if (published && version !== void 0 && published.version === version && Date.now() - published.time >= BUDGET.lspQuiet && !this.progress.size)
+            return published.items;
+          await new Promise((resolve16) => setTimeout(resolve16, 25));
+        }
+        signal.throwIfAborted();
+        throw new Error("pending: no versioned overlay diagnostics");
+      }
+      async reassertOverlay(path, content) {
+        if (this.server.command.some((part) => /clangd(?:\.exe)?$/.test(part))) {
+          await this.openContent(path, `${content}
+`, true);
+          await this.query("textDocument/documentSymbol", { textDocument: { uri: pathToFileURL4(path).href } });
+        }
+        await this.openContent(path, content, true);
+      }
+      async typescriptOverlayDiagnostics(path, signal) {
+        if (!this.connection) throw new Error("LSP connection unavailable");
+        const items2 = [];
+        for (const command of ["syntacticDiagnosticsSync", "semanticDiagnosticsSync"]) {
+          const response = await this.connection.sendRequest(
+            "workspace/executeCommand",
+            {
+              command: "typescript.tsserverRequest",
+              arguments: [
+                command,
+                { file: path, includeLinePosition: false },
+                { executionTarget: 0, expectsResult: true, isAsync: false }
+              ]
+            },
+            signal
+          );
+          if (!record(response) || !Array.isArray(response["body"]) || response["success"] === false)
+            throw new Error("unsupported: synchronous tsserver diagnostics unavailable");
+          for (const item of response["body"]) {
+            if (!record(item) || !record(item["start"]) || !record(item["end"]) || typeof item["text"] !== "string")
+              throw new Error("Invalid tsserver diagnostic");
+            const at = (value) => {
+              const line = value["line"], offset = value["offset"];
+              if (typeof line !== "number" || typeof offset !== "number" || line < 1 || offset < 1)
+                throw new Error("Invalid tsserver diagnostic position");
+              return { line: line - 1, character: offset - 1 };
+            };
+            items2.push({
+              range: { start: at(item["start"]), end: at(item["end"]) },
+              severity: item["category"] === "error" ? 1 : 2,
+              message: item["text"],
+              source: "typescript",
+              ...typeof item["code"] === "number" ? { code: item["code"] } : {}
+            });
+          }
+        }
+        return items2;
       }
       async refresh(changes) {
         changes = changes.filter(
@@ -7052,7 +7495,7 @@ var init_language = __esm({
               };
             }
           }
-          await new Promise((resolve13) => setTimeout(resolve13, 25));
+          await new Promise((resolve16) => setTimeout(resolve16, 25));
         }
         return { items: [], ready: false };
       }
@@ -7065,7 +7508,7 @@ var init_language = __esm({
         }) ?? [];
       }
     };
-    Languages = class {
+    Languages = class _Languages {
       constructor(root, config) {
         this.root = root;
         this.config = config;
@@ -7096,7 +7539,7 @@ var init_language = __esm({
           (path) => files.get(path) !== this.snapshot.get(path)
         );
         const events = changed.map((path) => ({
-          path: resolve10(this.root, path),
+          path: resolve12(this.root, path),
           type: !files.has(path) ? 3 : !this.snapshot.has(path) ? 1 : 2
         }));
         this.snapshot = new Map(files);
@@ -7119,7 +7562,7 @@ var init_language = __esm({
         this.config = config;
       }
       async invalidate(path) {
-        const directory2 = dirname9(resolve10(this.root, path));
+        const directory2 = dirname10(resolve12(this.root, path));
         const language = configurationImpact(path).length ? void 0 : (await resolveServer(this.root, path, this.config).catch(() => void 0))?.language;
         const languages = language ? [language] : configurationLanguages(path);
         for (const managed of this.manager.getSnapshot()) {
@@ -7139,22 +7582,22 @@ var init_language = __esm({
           reason = message(error);
         }
         const failure = resolved ? [...this.failures.values()].filter(
-          (entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve10(this.root, path))
+          (entry) => entry.identity === resolved?.tool.identity && inside(entry.root, resolve12(this.root, path))
         ).sort((a, b) => b.root.length - a.root.length)[0] : void 0;
         const identity = resolved ? `${resolved.server.id}:${hash(JSON.stringify([resolved.server, resolved.tool.identity])).slice(0, 16)}` : "";
         const client = [...this.clients].find(
-          (client2) => client2.isAlive() && client2.serverIdentity() === identity && inside(client2.workspaceRoot(), resolve10(this.root, path))
+          (client2) => client2.isAlive() && client2.serverIdentity() === identity && inside(client2.workspaceRoot(), resolve12(this.root, path))
         );
         let lint;
         try {
-          lint = await select(this.root, resolve10(this.root, path), false, this.config) ?? {
+          lint = await select(this.root, resolve12(this.root, path), false, this.config) ?? {
             unavailable: "Lint disabled or no matching runner"
           };
         } catch (error) {
           lint = { unavailable: message(error) };
         }
         const lintHealth = await lintAvailability(this.root, path, this.config);
-        const formatter = await select(this.root, resolve10(this.root, path), true, this.config).catch(() => void 0);
+        const formatter = await select(this.root, resolve12(this.root, path), true, this.config).catch(() => void 0);
         const unavailable = !this.config.valid || !resolved || resolved.tool.source === "missing" || !!failure;
         const status = (operation) => unavailable ? "unavailable" : !client ? "unverified" : client.supports(operation) ? "available" : "unsupported";
         return {
@@ -7196,13 +7639,290 @@ var init_language = __esm({
           }
         );
       }
-      async withLspClient(path, fn, _tool, options) {
-        const resolved = await resolveServer(this.root, path, this.config);
+      async warmup(paths, signal) {
+        const items2 = [];
+        const seen = /* @__PURE__ */ new Set();
+        for (const path of paths) {
+          const start = Date.now();
+          try {
+            signal.throwIfAborted();
+            const target = await this.serverTarget(await workspacePath(this.root, path), signal, false);
+            const key = JSON.stringify([target.root, target.resolved.server, target.resolved.tool.identity]);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const reused = this.manager.getSnapshot().some(
+              (entry) => entry.root === target.root && entry.alive && entry.serverId === `${target.resolved.server.id}:${hash(JSON.stringify([target.resolved.server, target.resolved.tool.identity])).slice(0, 16)}`
+            );
+            await withExecution(
+              executionEnvironment(),
+              true,
+              () => this.withLspClient(path, async () => void 0, "warmup", { manager: this.manager, signal, target })
+            );
+            items2.push({ path, status: reused ? "reused" : "initialized", elapsedMs: Date.now() - start });
+          } catch (error) {
+            const reason = message(error);
+            items2.push({
+              path,
+              status: signal.aborted ? "pending" : /missing|disabled|unsupported|launcher disabled/i.test(reason) ? "unsupported" : "failed",
+              reason,
+              elapsedMs: Date.now() - start
+            });
+          }
+        }
+        const ready = items2.filter((entry) => ["initialized", "reused"].includes(entry.status)).length;
+        return {
+          status: ready === items2.length && ready ? "complete" : ready ? "partial" : items2.some((entry) => entry.status === "pending") ? "pending" : items2.some((entry) => entry.status === "failed") ? "failed" : "unsupported",
+          items: items2,
+          note: "Initialization only; no diagnostics baseline collected. Local tools only."
+        };
+      }
+      async validatePlan(files, signal, validationPaths = []) {
+        signal.throwIfAborted();
+        const paths = [.../* @__PURE__ */ new Set([...files.map((file) => file.path), ...validationPaths])];
+        if (!files.length) return validationResult("skipped", paths, "No changed files", [], [], "combined");
+        if (files.length > BUDGET.validationFiles || validationPaths.length > BUDGET.validationExtraFiles)
+          return validationResult(
+            "unsupported",
+            paths,
+            "Validation limit: 20 changed and 20 additional files",
+            [],
+            [],
+            "combined"
+          );
+        const bounded2 = AbortSignal.any([signal, AbortSignal.timeout(BUDGET.validation)]);
+        const scope2 = [...files];
+        let bytes2 = files.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0);
+        for (const path of validationPaths) {
+          bounded2.throwIfAborted();
+          const absolute = await workspacePath(this.root, path);
+          if (scope2.some((file) => file.absolute === absolute)) continue;
+          bytes2 += 2 * (await stat6(absolute)).size;
+          if (bytes2 > BUDGET.validationBytes)
+            return validationResult(
+              "unsupported",
+              paths,
+              "Validation limit: 2 MiB including additional files",
+              [],
+              [],
+              "combined"
+            );
+          const content = await readFile16(absolute, "utf8");
+          scope2.push({ path, absolute, before: content, after: content, fileIdentity: "validation-only" });
+        }
+        if (scope2.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0) > BUDGET.validationBytes)
+          return validationResult(
+            "unsupported",
+            paths,
+            "Validation limit: 2 MiB of before/after content including additional files",
+            [],
+            [],
+            "combined"
+          );
+        const reports = [];
+        const jobs = [];
+        const groups = /* @__PURE__ */ new Map();
+        const lintGroups = /* @__PURE__ */ new Map();
+        const failure = (provider, paths2, error, aborted = bounded2.aborted) => {
+          signal.throwIfAborted();
+          const reason = message(error);
+          return validationResult(
+            aborted || /pending|cancel|modified|timeout/i.test(reason) ? "pending" : /missing|not installed|unavailable|unsupported|disabled/i.test(reason) ? "unsupported" : "failed",
+            paths2,
+            reason,
+            [],
+            [],
+            provider
+          );
+        };
+        for (const file of scope2) {
+          const language = codeLanguage(this.config, file.path);
+          const supported = language && ["python", "typescript", "go", "cpp"].includes(language);
+          if (!supported) {
+            reports.push(
+              validationResult(
+                "unsupported",
+                [file.path],
+                "No plan diagnostic provider for this language",
+                [],
+                [],
+                "lsp"
+              )
+            );
+          } else if (this.config.servers[language] !== false) {
+            try {
+              const target = await this.serverTarget(file.absolute, bounded2, false);
+              const provider = language === "python" ? "ty" : language === "typescript" ? "typescript" : language === "go" ? "gopls" : "clangd";
+              const commands = target.resolved.server.command.join(" ");
+              const known = provider === "typescript" ? /typescript-language-server|(?:^|[\\/ ])(?:tsc|tsgo)(?:\.exe|\.cmd)?(?: |$)/i.test(commands) : target.resolved.server.id === provider || new RegExp(provider, "i").test(basename5(target.resolved.tool.command[0] ?? ""));
+              if (!known) throw new Error("unsupported: configured server has no validated overlay adapter");
+              if (provider === "gopls")
+                target.resolved.server.initialization = {
+                  ...target.resolved.server.initialization,
+                  pullDiagnostics: true,
+                  diagnosticsTrigger: "Edit"
+                };
+              if (provider === "clangd") target.resolved.server.command.push("--background-index=false");
+              const key = JSON.stringify([target.root, target.resolved.server, target.resolved.tool.identity]);
+              const group = groups.get(key) ?? { target, provider, files: [] };
+              group.files.push(file);
+              groups.set(key, group);
+            } catch (error) {
+              reports.push(failure(language, [file.path], error));
+            }
+          }
+          try {
+            const runner = await select(this.root, file.absolute, false, this.config, false, bounded2);
+            if (runner) {
+              const key = JSON.stringify(runner);
+              const group = lintGroups.get(key) ?? { runner, files: [] };
+              group.files.push(file);
+              lintGroups.set(key, group);
+            }
+          } catch (error) {
+            reports.push(failure("lint", [file.path], error));
+          }
+        }
+        for (const { target, provider, files: files2 } of groups.values())
+          jobs.push(async () => {
+            if ([...groups.values()].filter((group) => group.target.resolved.language === target.resolved.language).length > 1)
+              return validationResult(
+                "unsupported",
+                files2.map((file) => file.path),
+                "Cross-project overlays for one language are unsupported; narrow the plan and validationPaths to one project",
+                [],
+                [],
+                provider
+              );
+            const checkSignal = AbortSignal.any([bounded2, AbortSignal.timeout(BUDGET.validationServer)]);
+            const paths2 = files2.map((file) => file.path);
+            const run2 = async (root, files3, target2, phase) => {
+              const isolated = new _Languages(root, this.config);
+              try {
+                return await withExecution(
+                  executionEnvironment(),
+                  true,
+                  () => isolated.withLspClient(
+                    target2.root,
+                    async (client) => {
+                      if (!(client instanceof Client)) throw new Error("Unexpected LSP client");
+                      const collect = async (after2) => {
+                        await phase?.(after2);
+                        if (phase && after2)
+                          await client.refresh(files3.map((file) => ({ path: file.absolute, type: 2 })));
+                        for (const file of files3) {
+                          checkSignal.throwIfAborted();
+                          await client.openContent(file.absolute, after2 ? file.after : file.before, true);
+                        }
+                        for (const file of files3) {
+                          checkSignal.throwIfAborted();
+                          await client.reassertOverlay(file.absolute, after2 ? file.after : file.before);
+                        }
+                        const findings = [];
+                        for (const file of files3)
+                          findings.push(
+                            ...diagnosticFindings(
+                              file.path,
+                              await client.overlayDiagnostics(file.absolute, checkSignal)
+                            )
+                          );
+                        return findings;
+                      };
+                      const before = await collect(false), after = await collect(true);
+                      if (provider === "clangd" && before.some(
+                        (finding) => /file not found|cannot open (?:source|include) file|unknown argument/i.test(
+                          finding.message
+                        )
+                      ))
+                        return validationResult(
+                          "unsupported",
+                          paths2,
+                          "C/C++ baseline compilation context is incomplete",
+                          [],
+                          [],
+                          provider
+                        );
+                      return validationResult("complete", paths2, void 0, before, after, provider);
+                    },
+                    "plan validation",
+                    { manager: isolated.manager, signal: checkSignal, target: target2 }
+                  )
+                );
+              } finally {
+                await isolated.close();
+              }
+            };
+            try {
+              if (provider !== "clangd") return await run2(this.root, files2, target);
+              return await withPreviewWorkspace(this.root, scope2, this.config, checkSignal, async (workspace) => {
+                const mapped = files2.map((file) => ({ ...file, absolute: workspace.map(file.path) }));
+                const shadowTarget = {
+                  ...target,
+                  root: workspace.map(target.root),
+                  resolved: {
+                    ...target.resolved,
+                    server: {
+                      ...target.resolved.server,
+                      command: target.resolved.server.command.map(workspace.translate)
+                    }
+                  }
+                };
+                const result = await run2(workspace.root, mapped, shadowTarget, workspace.writePhase);
+                result.limitations.push(
+                  "Bounded temporary project snapshot with private header contents and remapped local compilation paths."
+                );
+                return result;
+              });
+            } catch (error) {
+              return failure(provider, paths2, error, checkSignal.aborted);
+            }
+          });
+        for (const { runner, files: files2 } of lintGroups.values())
+          jobs.push(async () => {
+            const paths2 = files2.map((file) => file.path);
+            try {
+              return await withExecution(executionEnvironment(), true, async () => {
+                if (runner.name === "biome")
+                  return validateBiome(runner, this.root, scope2, files2, this.config, bounded2);
+                const before = [], after = [];
+                for (const file of files2) {
+                  before.push(...await lintContent(runner, this.root, file.path, file.before, bounded2));
+                  after.push(...await lintContent(runner, this.root, file.path, file.after, bounded2));
+                }
+                const result = validationResult("complete", paths2, void 0, before, after, runner.name);
+                result.limitations.push(
+                  "Stdin lint is file-level; custom rules reading other files still see original disk contents."
+                );
+                return result;
+              });
+            } catch (error) {
+              return failure(runner.name, paths2, error);
+            }
+          });
+        let next = 0;
+        const completed = new Array(jobs.length);
+        const settled = await Promise.allSettled(
+          Array.from({ length: Math.min(4, jobs.length) }, async () => {
+            while (next < jobs.length) {
+              const index = next++, job = jobs[index];
+              if (job) completed[index] = await job();
+            }
+          })
+        );
+        signal.throwIfAborted();
+        for (const result of settled) if (result.status === "rejected") throw result.reason;
+        return combineValidation(paths, [...reports, ...completed]);
+      }
+      async serverTarget(path, signal, allowTemporary = true) {
+        const resolved = await resolveServer(this.root, path, this.config, allowTemporary);
         if (resolved.tool.source === "missing") throw new Error(resolved.tool.note);
-        let root = await findWorkspaceRoot(path, resolved.server, { signal: options.signal });
+        let root = await findWorkspaceRoot(path, resolved.server, { signal });
         if (!inside(this.root, root)) root = this.root;
         if (resolved.language === "python" && resolved.tool.source === "project" && resolved.tool.command[0]?.includes(".venv"))
-          root = dirname9(dirname9(dirname9(resolved.tool.command[0])));
+          root = dirname10(dirname10(dirname10(resolved.tool.command[0])));
+        return { root, resolved };
+      }
+      async withLspClient(path, fn, _tool, options) {
+        const { root, resolved } = options.target ?? await this.serverTarget(path, options.signal);
         const failureKey = hash(JSON.stringify([root, resolved.server, resolved.tool.identity]));
         const failed = this.failures.get(failureKey);
         if (failed && Date.now() < failed.retryAt) throw new Error(failed.reason);
@@ -7405,8 +8125,8 @@ var init_language = __esm({
 
 // src/engine.ts
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { readFile as readFile16, stat as stat5 } from "node:fs/promises";
-import { dirname as dirname10, relative as relative8, sep as sep3 } from "node:path";
+import { readFile as readFile17, stat as stat7 } from "node:fs/promises";
+import { dirname as dirname11, relative as relative9, sep as sep4 } from "node:path";
 var Engine;
 var init_engine = __esm({
   "src/engine.ts"() {
@@ -7414,6 +8134,7 @@ var init_engine = __esm({
     init_budgets();
     init_config();
     init_config_files();
+    init_edit_plans();
     init_environment();
     init_files();
     init_hook_events();
@@ -7464,26 +8185,40 @@ var init_engine = __esm({
         this.generation = 0;
         this.pages = /* @__PURE__ */ new Map();
       }
+      hasLivePlans() {
+        return this.intelligence?.plans.hasLivePlans() ?? false;
+      }
       async warmup(signal) {
         const config = await configuration(this.root);
         if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off") return;
-        const snapshot = latestInventory(this.root);
-        if (!snapshot?.complete) return;
-        const representatives = /* @__PURE__ */ new Map();
-        for (const path of snapshot.files.keys()) {
-          const language = codeLanguage(config, path);
-          if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
-            continue;
-          const entry = representatives.get(language);
-          if (entry) entry.count++;
-          else representatives.set(language, { path, count: 1 });
+        await this.dispatch("warmup", {}, signal);
+      }
+      async prepareServers(args, config, signal) {
+        if (args["cursor"]) throw new Error("Cursor invalid; repeat warmup without cursor");
+        const bounded2 = AbortSignal.any([signal, AbortSignal.timeout(BUDGET.warmup)]);
+        let paths;
+        if (args["path"] || args["paths"]) paths = (await this.paths(args, bounded2)).paths;
+        else {
+          const snapshot = await inventory(this.root, BUDGET.files, bounded2, config.exclude);
+          if (!snapshot.complete)
+            return { operation: "warmup", status: "partial", items: [], reason: "Workspace inventory incomplete" };
+          const representatives = /* @__PURE__ */ new Map();
+          for (const path of [...snapshot.files.keys()].sort()) {
+            const language = codeLanguage(config, path);
+            if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
+              continue;
+            const entry = representatives.get(language);
+            if (entry) entry.count++;
+            else representatives.set(language, { path, count: 1 });
+          }
+          paths = [...representatives.entries()].sort(([a, x], [b, y]) => y.count - x.count || a.localeCompare(b)).slice(0, 2).map(([, entry]) => entry.path);
         }
+        if (paths.length > 200) throw new Error("At most 200 explicit warmup files; narrow scope");
         this.language ??= new Languages(this.root, config);
         await this.language.update(config);
-        for (const entry of [...representatives.values()].sort((a, b) => b.count - a.count).slice(0, 2)) {
-          signal.throwIfAborted();
-          await this.language.preflight(entry.path, signal).catch(() => void 0);
-        }
+        const result = await this.language.warmup(paths, bounded2);
+        signal.throwIfAborted();
+        return { operation: "warmup", ...result };
       }
       session(id, turn) {
         let session = this.sessions.get(id);
@@ -7538,16 +8273,16 @@ var init_engine = __esm({
           signal.throwIfAborted();
           try {
             const absolute = await workspacePath(this.root, requested);
-            const path = relative8(this.root, absolute);
+            const path = relative9(this.root, absolute);
             session.touched.add(path);
             session.current.add(path);
-            if ((await stat5(absolute)).size > BUDGET.fileBytes) {
+            if ((await stat7(absolute)).size > BUDGET.fileBytes) {
               results.set(path, { path, state: "skipped", findings: [], note: "File exceeds 1 MiB" });
               continue;
             }
             const identity = await analysisIdentity(this.root, [path], config, signal);
             this.identities.set(path, identity);
-            const content = hash(await readFile16(absolute, { encoding: "utf8", signal }));
+            const content = hash(await readFile17(absolute, { encoding: "utf8", signal }));
             const key = `${source === "both" ? "" : `${source}:`}${path}`;
             const cached = this.cache.get(key);
             if (snapshot.complete && cached?.version === this.projectVersion(snapshot, path, config) && cached.identity === identity && cached.content === content && cached.result.state === "complete")
@@ -7574,7 +8309,7 @@ var init_engine = __esm({
             note: "Checker returned no result"
           };
           try {
-            if (hash(await readFile16(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
+            if (hash(await readFile17(await workspacePath(this.root, entry.path), { encoding: "utf8", signal })) !== entry.content || await analysisIdentity(this.root, [entry.path], await configuration(this.root), signal) !== entry.identity || this.projectVersion(latestInventory(this.root) ?? snapshot, entry.path, config) !== this.projectVersion(snapshot, entry.path, config)) {
               result.state = "stale";
               result.note = "File/tool/configuration changed during diagnostics; retry";
             }
@@ -7613,13 +8348,13 @@ var init_engine = __esm({
           return withToolResolution(() => this.execute(operation, args, signal));
         });
         this.queue = task.catch(() => void 0);
-        return new Promise((resolve13, reject) => {
+        return new Promise((resolve16, reject) => {
           const abort = () => {
             if (!started || !writes) reject(new Error("Request cancelled while queued or executing"));
           };
           signal.addEventListener("abort", abort, { once: true });
           if (signal.aborted) abort();
-          void task.then(resolve13, reject).finally(() => signal.removeEventListener("abort", abort));
+          void task.then(resolve16, reject).finally(() => signal.removeEventListener("abort", abort));
         });
       }
       async paths(args, signal) {
@@ -7633,7 +8368,7 @@ var init_engine = __esm({
           if (typeof value !== "string") continue;
           signal.throwIfAborted();
           const absolute = await workspacePath(this.root, value);
-          if ((await stat5(absolute)).isFile()) paths.add(relative8(this.root, absolute));
+          if ((await stat7(absolute)).isFile()) paths.add(relative9(this.root, absolute));
           else {
             const scoped = await inventory(this.root, BUDGET.files, signal, config.exclude, absolute);
             complete &&= scoped.complete;
@@ -7713,6 +8448,7 @@ var init_engine = __esm({
           };
         }
         if (!(operation === "diagnostics" && args["run"] === "cached")) assertConfiguration(config);
+        if (operation === "warmup") return this.prepareServers(args, config, signal);
         if (operation === "automatic_batch") {
           const paths = Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [];
           return {
@@ -7767,14 +8503,18 @@ var init_engine = __esm({
             .../* @__PURE__ */ new Set([
               ...paths,
               ...typeof args["path"] === "string" ? [args["path"]] : [],
-              ...Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : []
+              ...Array.isArray(args["paths"]) ? args["paths"].filter((path) => typeof path === "string") : [],
+              ...Array.isArray(args["validationPaths"]) ? args["validationPaths"].filter((path) => typeof path === "string") : []
             ])
           ];
           let identity;
           try {
             identity = await this.intelligenceIdentity(bindings, config, signal);
           } catch (error) {
-            if (operation === "apply") this.intelligence.plans.discard(text(args["plan"]));
+            if (operation === "apply") {
+              this.intelligence.plans.discard(text(args["plan"]));
+              throw new PlanFailure("stale", `Plan stale: ${message(error)}; preview again`);
+            }
             throw error;
           }
           if (operation === "apply") {
@@ -7798,8 +8538,10 @@ var init_engine = __esm({
             }
           }
           const output = await this.intelligence.execute(operation, args, paths, config, identity, signal, bindings);
-          if (identity !== await this.intelligenceIdentity(bindings, config, signal))
+          if (identity !== await this.intelligenceIdentity(bindings, config, signal)) {
+            if (typeof output["plan"] === "string") this.intelligence.plans.discard(output["plan"]);
             throw new Error("Workspace or tools changed during query; repeat without cursor");
+          }
           return { ...output, operation };
         }
         throw new Error("Unknown tool");
@@ -7907,13 +8649,13 @@ var init_engine = __esm({
             for (const value of values) {
               if (typeof value !== "string") throw new Error("paths requires strings");
               const absolute = await workspacePath(this.root, value);
-              const path = relative8(this.root, absolute);
-              if ((await stat5(absolute)).isFile()) {
+              const path = relative9(this.root, absolute);
+              if ((await stat7(absolute)).isFile()) {
                 if (!codeLanguage(config, path)) throw new Error(`Language disabled or unsupported: ${path}`);
                 selected2.add(path);
               } else
                 for (const candidate of (snapshot.complete ? snapshot : await inventory(this.root, BUDGET.files, signal, config.exclude, absolute)).files.keys())
-                  if ((!path || candidate.startsWith(`${path}${sep3}`)) && codeLanguage(config, candidate))
+                  if ((!path || candidate.startsWith(`${path}${sep4}`)) && codeLanguage(config, candidate))
                     selected2.add(candidate);
             }
             paths = [...selected2].sort();
@@ -8024,11 +8766,11 @@ var init_engine = __esm({
       }
       projectVersion(snapshot, path, config) {
         const language = codeLanguage(config, path);
-        let owner = dirname10(path);
+        let owner = dirname11(path);
         while (owner !== "." && ![...snapshot.files.keys()].some(
-          (candidate) => dirname10(candidate) === owner && configurationLanguages(candidate).includes(language ?? "")
+          (candidate) => dirname11(candidate) === owner && configurationLanguages(candidate).includes(language ?? "")
         ))
-          owner = dirname10(owner);
+          owner = dirname11(owner);
         const prefix = owner === "." ? "" : `${owner}/`;
         return hash(
           JSON.stringify(
@@ -8043,9 +8785,9 @@ var init_engine = __esm({
         if (existing) return existing;
         try {
           const absolute = await workspacePath(this.root, path);
-          const info = await stat5(absolute);
+          const info = await stat7(absolute);
           if (info.size > BUDGET.fileBytes) return "oversized";
-          return hash(await readFile16(absolute, { encoding: "utf8", signal }));
+          return hash(await readFile17(absolute, { encoding: "utf8", signal }));
         } catch {
           signal.throwIfAborted();
           return "unavailable";
@@ -8075,29 +8817,29 @@ var init_engine = __esm({
 // src/ipc.ts
 import { spawn as spawn4 } from "node:child_process";
 import { randomUUID as randomUUID9 } from "node:crypto";
-import { chmod, lstat as lstat5, mkdir as mkdir5, readFile as readFile17, writeFile as writeFile5 } from "node:fs/promises";
+import { chmod, lstat as lstat5, mkdir as mkdir6, readFile as readFile18, writeFile as writeFile6 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { homedir as homedir6, tmpdir as tmpdir3 } from "node:os";
-import { join as join15 } from "node:path";
+import { homedir as homedir6, tmpdir as tmpdir4 } from "node:os";
+import { join as join16 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 async function serviceLocation(root) {
   const user = process.getuid?.() ?? hash(homedir6()).slice(0, 10);
-  const directory2 = join15(tmpdir3(), `clsp6-${user}`);
-  await mkdir5(directory2, { recursive: true, mode: 448 });
+  const directory2 = join16(tmpdir4(), `clsp6-${user}`);
+  await mkdir6(directory2, { recursive: true, mode: 448 });
   const info = await lstat5(directory2);
   if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
     throw new Error("Unsafe service directory permissions");
   const identity = await workspaceIdentity(root);
-  const address = process.platform === "win32" ? `\\\\.\\pipe\\codex-lsp-${user}-${identity}` : join15(directory2, `${identity.slice(0, 32)}.sock`);
-  return { directory: directory2, identity, address, endpoint: join15(directory2, `${identity}.endpoint`) };
+  const address = process.platform === "win32" ? `\\\\.\\pipe\\codex-lsp-${user}-${identity}` : join16(directory2, `${identity.slice(0, 32)}.sock`);
+  return { directory: directory2, identity, address, endpoint: join16(directory2, `${identity}.endpoint`) };
 }
 async function readEndpoint(location) {
   try {
     const info = await lstat5(location.endpoint);
     if (info.isSymbolicLink() || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
       throw new Error("Unsafe service endpoint permissions");
-    const value = JSON.parse(await readFile17(location.endpoint, "utf8"));
+    const value = JSON.parse(await readFile18(location.endpoint, "utf8"));
     if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["pid"] !== "number" || typeof value["token"] !== "string" || value["address"] !== location.address)
       throw new Error("Invalid service endpoint");
     return value;
@@ -8108,7 +8850,7 @@ async function readEndpoint(location) {
 }
 async function exchange(endpoint, operation, args, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve16, reject) => {
     const socket = createConnection(endpoint.address);
     let received = "";
     let settled = false;
@@ -8119,7 +8861,7 @@ async function exchange(endpoint, operation, args, signal) {
       signal.removeEventListener("abort", cancel);
       socket.destroy();
       if (error) reject(error);
-      else if (output) resolve13(output);
+      else if (output) resolve16(output);
       else reject(new Error("Missing service output"));
     };
     const cancel = () => {
@@ -8159,8 +8901,9 @@ async function exchange(endpoint, operation, args, signal) {
           finish(
             Array.isArray(paths) ? new WriteFailure(
               response["error"],
-              paths.filter((path) => typeof path === "string")
-            ) : new Error(response["error"])
+              paths.filter((path) => typeof path === "string"),
+              typeof response["planFailure"] === "string" ? response["planFailure"] : void 0
+            ) : isPlanFailureCode(response["planFailure"]) ? new PlanFailure(response["planFailure"], response["error"]) : new Error(response["error"])
           );
         } else if (record(response["output"]) && typeof response["output"]["operation"] === "string")
           finish(void 0, response["output"]);
@@ -8233,7 +8976,7 @@ async function ensureService(root, signal) {
 async function publishEndpoint(location, token) {
   if (process.platform !== "win32") await chmod(location.address, 384);
   const temporary2 = `${location.endpoint}.${randomUUID9()}`;
-  await writeFile5(
+  await writeFile6(
     temporary2,
     JSON.stringify({
       pid: process.pid,
@@ -8251,6 +8994,7 @@ var init_ipc = __esm({
     "use strict";
     init_directory_lock();
     init_directory_lock();
+    init_edit_plans();
     init_environment();
     init_files();
     init_process_options();
@@ -8261,8 +9005,8 @@ var init_ipc = __esm({
 
 // src/hook-inbox.ts
 import { randomUUID as randomUUID10 } from "node:crypto";
-import { lstat as lstat6, readdir as readdir4, readFile as readFile18, rm as rm4, writeFile as writeFile6 } from "node:fs/promises";
-import { join as join16 } from "node:path";
+import { lstat as lstat6, readdir as readdir5, readFile as readFile19, rm as rm5, writeFile as writeFile7 } from "node:fs/promises";
+import { join as join17 } from "node:path";
 async function registerHook(root, input, signal) {
   const location = await serviceLocation(root);
   const parent = text(input["session_id"]);
@@ -8328,8 +9072,8 @@ async function registerHook(root, input, signal) {
     return true;
   });
   if (terminal) return { id, session };
-  const path = join16(location.directory, `${location.identity}.${id}.hook`);
-  await writeFile6(
+  const path = join17(location.directory, `${location.identity}.${id}.hook`);
+  await writeFile7(
     path,
     JSON.stringify({
       protocol: SERVICE_PROTOCOL,
@@ -8350,14 +9094,14 @@ async function registerHook(root, input, signal) {
 async function registeredHooks(root) {
   const location = await serviceLocation(root);
   const result = [];
-  for (const name of (await readdir4(location.directory)).sort()) {
+  for (const name of (await readdir5(location.directory)).sort()) {
     if (!name.startsWith(`${location.identity}.`) || !name.endsWith(".hook")) continue;
-    const path = join16(location.directory, name);
+    const path = join17(location.directory, name);
     try {
       const info = await lstat6(path);
       if (info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== "win32" && (info.uid !== process.getuid?.() || info.mode & 63))
         throw new Error("Unsafe hook registration");
-      const value = JSON.parse(await readFile18(path, "utf8"));
+      const value = JSON.parse(await readFile19(path, "utf8"));
       if (!record(value) || value["identity"] !== location.identity || value["protocol"] !== SERVICE_PROTOCOL || typeof value["epoch"] !== "string" || typeof value["id"] !== "string" || typeof value["created"] !== "number" || typeof value["session"] !== "string" || !record(value["input"]) || !record(value["environment"]) || !Object.values(value["environment"]).every((entry) => typeof entry === "string"))
         throw new Error("Invalid hook registration");
       result.push({
@@ -8370,7 +9114,7 @@ async function registeredHooks(root) {
         environment: value["environment"]
       });
     } catch {
-      await rm4(path, { force: true });
+      await rm5(path, { force: true });
     }
   }
   return result;
@@ -8399,6 +9143,7 @@ var init_runtime = __esm({
     "use strict";
     init_budgets();
     init_config();
+    init_edit_plans();
     init_engine();
     init_environment();
     init_files();
@@ -8571,9 +9316,18 @@ var init_runtime = __esm({
           const endpoint = existing ?? await ensureService(root, signal);
           return await this.output(root, operation, args, await exchange(endpoint, operation, args, signal), signal);
         } catch (error) {
-          if (["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
-            operation
-          ))
+          if ([
+            "check",
+            "diagnostics",
+            "status",
+            "warmup",
+            "navigate",
+            "rename",
+            "format",
+            "inspect",
+            "actions",
+            "apply"
+          ].includes(operation))
             return this.output(
               root,
               operation,
@@ -8583,6 +9337,7 @@ var init_runtime = __esm({
                 isError: true,
                 status: failureKind(message(error)),
                 reason: message(error),
+                ...error instanceof PlanFailure || error instanceof WriteFailure && error.planFailure ? { planFailure: error.planFailure } : {},
                 ...operation === "apply" ? { modifiedPaths: error instanceof WriteFailure ? error.modifiedPaths : [] } : {}
               },
               new AbortController().signal
@@ -8660,8 +9415,8 @@ async function runHookCli() {
       const output = renderHook(result["output"]);
       if (output) {
         await new Promise(
-          (resolve13, reject) => process.stdout.write(`${JSON.stringify(output)}
-`, (error) => error ? reject(error) : resolve13())
+          (resolve16, reject) => process.stdout.write(`${JSON.stringify(output)}
+`, (error) => error ? reject(error) : resolve16())
         );
         if (typeof result["deliveryId"] === "string") {
           await runtime.request(
@@ -8708,6 +9463,10 @@ function tool(name, description, properties, required, readOnly) {
   };
 }
 function validateArguments(name, args) {
+  if (name === "actions" && (args["validate"] !== void 0 || args["validationPaths"] !== void 0) && args["operation"] !== "preview" && !args["cursor"])
+    throw new Error("validate requires actions operation=preview");
+  if (args["validate"] === false && args["validationPaths"] !== void 0)
+    throw new Error("validationPaths requires validation enabled");
   if (args["refresh"] !== void 0 && !(name === "status" || ["diagnostics", "check"].includes(name) && args["run"] !== "cached"))
     throw new Error("refresh requires active diagnostics or status");
   const definition = TOOLS.find((entry) => entry.name === name);
@@ -8726,8 +9485,8 @@ function validateArguments(name, args) {
       if (typeof value !== "number" || !Number.isInteger(value) || typeof schema["minimum"] === "number" && value < schema["minimum"] || typeof schema["maximum"] === "number" && value > schema["maximum"])
         throw new Error(`Invalid integer: ${key}`);
     }
-    if (schema["type"] === "array" && (!Array.isArray(value) || value.length > 200 || !value.every((item) => typeof item === "string")))
-      throw new Error(`${key} must contain at most 200 strings`);
+    if (schema["type"] === "array" && (!Array.isArray(value) || value.length > (typeof schema["maxItems"] === "number" ? schema["maxItems"] : 200) || !value.every((item) => typeof item === "string")))
+      throw new Error(`${key} must contain at most ${schema["maxItems"] ?? 200} strings`);
     if (Array.isArray(schema["enum"]) && !schema["enum"].includes(value)) throw new Error(`Invalid ${key}`);
   }
 }
@@ -8872,7 +9631,7 @@ async function runMcp(input = process.stdin, output = process.stdout) {
     output.removeListener("error", exit);
   }
 }
-var string, scope, paging, selector, cursor, choice, LEGACY_TOOLS, TOOLS;
+var string, scope, paging, selector, cursor, validation, choice, LEGACY_TOOLS, TOOLS;
 var init_protocol = __esm({
   "src/protocol.ts"() {
     "use strict";
@@ -8896,6 +9655,18 @@ var init_protocol = __esm({
       pattern: string
     };
     cursor = { cursor: string };
+    validation = {
+      validate: {
+        type: "boolean",
+        description: "Preview scoped diagnostics with installed local language/lint tools; false skips simulation."
+      },
+      validationPaths: {
+        type: "array",
+        items: string,
+        maxItems: 20,
+        description: "Up to 20 additional existing files (for example unchanged callers) to check against all plan overlays."
+      }
+    };
     choice = (...values) => ({ type: "string", enum: values });
     LEGACY_TOOLS = {
       check_project: "check",
@@ -8937,6 +9708,13 @@ var init_protocol = __esm({
         true
       ),
       tool(
+        "warmup",
+        "Initialize local LSP servers without diagnostics or downloads. Explicit files or two representative languages.",
+        { ...scope, ...cursor },
+        [],
+        true
+      ),
+      tool(
         "navigate",
         "Read-only navigation; 1-based UTF-16 positions, symbol path or @@ anchor. Follow next for large results.",
         {
@@ -8967,14 +9745,14 @@ var init_protocol = __esm({
       tool(
         "rename",
         "Preview a cross-file rename. Returns a plan; only apply writes files.",
-        { ...scope, ...selector, ...cursor, newName: string },
+        { ...scope, ...selector, ...cursor, ...validation, newName: string },
         ["path", "newName"],
         true
       ),
       tool(
         "format",
         "Preview formatting of explicit files. Returns a plan; only apply writes files.",
-        { ...scope, ...cursor },
+        { ...scope, ...cursor, ...validation },
         [],
         true
       ),
@@ -9009,7 +9787,8 @@ var init_protocol = __esm({
           source: choice("lint", "lsp", "both"),
           rule: string,
           ids: { type: "array", items: string, maxItems: 200 },
-          details: { type: "boolean" }
+          details: { type: "boolean" },
+          ...validation
         },
         ["operation"],
         true
@@ -9215,10 +9994,10 @@ var init_automatic = __esm({
 // src/deadline.ts
 function waitWithSignal(task, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve13, reject) => {
+  return new Promise((resolve16, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
-    task.then(resolve13, reject).finally(() => signal.removeEventListener("abort", abort));
+    task.then(resolve16, reject).finally(() => signal.removeEventListener("abort", abort));
   });
 }
 var init_deadline = __esm({
@@ -9228,7 +10007,7 @@ var init_deadline = __esm({
 });
 
 // src/hook-coordinator.ts
-import { rm as rm5 } from "node:fs/promises";
+import { rm as rm6 } from "node:fs/promises";
 import { setTimeout as delay4 } from "node:timers/promises";
 var HookCoordinator;
 var init_hook_coordinator = __esm({
@@ -9287,7 +10066,7 @@ var init_hook_coordinator = __esm({
             const state = await store.read(entry.session);
             const status = state.hookEvents[entry.id]?.state;
             if (parent.epoch !== entry.epoch || state.epoch !== entry.epoch || status && !["queued", "running"].includes(status)) {
-              await rm5(entry.path, { force: true });
+              await rm6(entry.path, { force: true });
               return;
             }
             this.seen.add(entry.path);
@@ -9297,7 +10076,7 @@ var init_hook_coordinator = __esm({
                 const item = current.hookEvents[entry.id];
                 if (item) item.state = "complete";
               });
-              await rm5(entry.path, { force: true });
+              await rm6(entry.path, { force: true });
               this.seen.delete(entry.path);
               this.changed();
               return;
@@ -9388,7 +10167,7 @@ var init_hook_coordinator = __esm({
         } finally {
           if (this.jobs.get(key) === job) this.jobs.delete(key);
           for (const entry of job.entries) {
-            await rm5(entry.path, { force: true }).catch(() => logEvent("cancel-cleanup-failure"));
+            await rm6(entry.path, { force: true }).catch(() => logEvent("cancel-cleanup-failure"));
             this.seen.delete(entry.path);
           }
           this.tasks.delete(job);
@@ -9439,8 +10218,8 @@ var init_hook_coordinator = __esm({
         const first = await inspect();
         if (!["queued", "running"].includes(first.state ?? "") || input["revision"] !== this.revision) return first;
         let wake = () => void 0;
-        const change = new Promise((resolve13) => {
-          wake = resolve13;
+        const change = new Promise((resolve16) => {
+          wake = resolve16;
           this.listeners.add(wake);
         });
         try {
@@ -9584,14 +10363,14 @@ var init_go_output = __esm({
 });
 
 // src/project-output.ts
-import { readFile as readFile19 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve11 } from "node:path";
+import { readFile as readFile20 } from "node:fs/promises";
+import { relative as relative10, resolve as resolve13 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 async function projectOutput(check, output, root, cwd) {
   const pathOf = (file) => {
-    const absolute = resolve11(cwd, file);
+    const absolute = resolve13(cwd, file);
     if (!inside(root, absolute)) throw new Error("Checker diagnostic outside workspace");
-    return relative9(root, absolute);
+    return relative10(root, absolute);
   };
   if (check.parser === "go") {
     const findings2 = [];
@@ -9635,7 +10414,7 @@ async function projectOutput(check, output, root, cwd) {
       findings2.map(async (finding) => {
         let content = contents.get(finding.path);
         if (!content) {
-          content = readFile19(resolve11(root, finding.path), "utf8");
+          content = readFile20(resolve13(root, finding.path), "utf8");
           contents.set(finding.path, content);
         }
         const line = (await content).split("\n")[finding.line - 1] ?? "";
@@ -9678,7 +10457,7 @@ async function projectOutput(check, output, root, cwd) {
     const split = splitLint(check.parser, JSON.parse(output), root, cwd);
     const findings2 = [];
     for (const [path, data] of split)
-      findings2.push(...parseLint(check.parser, data, path, await readFile19(resolve11(root, path), "utf8")));
+      findings2.push(...parseLint(check.parser, data, path, await readFile20(resolve13(root, path), "utf8")));
     return findings2;
   }
   if (check.parser === "json") {
@@ -9749,9 +10528,9 @@ var init_project_output = __esm({
 
 // src/project-checks.ts
 import { randomUUID as randomUUID11 } from "node:crypto";
-import { readdir as readdir5, readFile as readFile20, stat as stat6 } from "node:fs/promises";
+import { readdir as readdir6, readFile as readFile21, stat as stat8 } from "node:fs/promises";
 import * as nodePath2 from "node:path";
-import { basename as basename5, join as join17, relative as relative10, resolve as resolve12 } from "node:path";
+import { basename as basename6, join as join18, relative as relative11, resolve as resolve14 } from "node:path";
 import { setTimeout as delay5 } from "node:timers/promises";
 function normalizedPattern(pattern) {
   return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
@@ -9767,7 +10546,7 @@ function covers(check, path) {
   if (check.parser === "tsc" && !/\.[cm]?[jt]sx?$/.test(path)) return false;
   if (check.parser === "cargo" && !/\.rs$/.test(path)) return false;
   if (check.parser === "go" && !/\.go$/.test(path)) return false;
-  const local = relative10(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
+  const local = relative11(check.cwd === "." ? "" : check.cwd, path).split("\\").join("/");
   return local !== ".." && !local.startsWith("../") && check.coverage.some((pattern) => nodePath2.matchesGlob(local, pattern)) && !check.excluded?.some((pattern) => {
     const normalized = normalizedPattern(pattern);
     return normalized === "." || normalized === "" || nodePath2.matchesGlob(local, normalized) || nodePath2.matchesGlob(local, `${normalized}/**`);
@@ -9841,8 +10620,8 @@ var init_project_checks = __esm({
       async discover(config, signal) {
         if (config.projectChecks !== "auto") return [...config.projectChecks];
         const checks = [];
-        const names = await readdir5(this.root);
-        const has = async (name) => (await stat6(join17(this.root, name)).catch(() => void 0))?.isFile();
+        const names = await readdir6(this.root);
+        const has = async (name) => (await stat8(join18(this.root, name)).catch(() => void 0))?.isFile();
         if (await has("tsconfig.json")) {
           checks.push({
             name: "typescript",
@@ -9882,7 +10661,7 @@ var init_project_checks = __esm({
           );
           if (!enabled) continue;
           const expected = path.endsWith("py") ? "ruff" : config.javascript === "eslint" || !await has("biome.json") && !await has("biome.jsonc") ? "eslint" : "biome";
-          const runner = await select(this.root, join17(this.root, path), false, config, false, signal).catch(() => ({
+          const runner = await select(this.root, join18(this.root, path), false, config, false, signal).catch(() => ({
             name: expected,
             command: expected,
             prefix: []
@@ -9908,7 +10687,7 @@ var init_project_checks = __esm({
             const cwd = await workspacePath(this.root, check.cwd);
             const tool2 = await resolveTool(
               config.projectChecks === "auto" ? this.root : cwd,
-              join17(cwd, "representative"),
+              join18(cwd, "representative"),
               check.command,
               config.projectChecks !== "auto",
               false
@@ -9921,16 +10700,16 @@ var init_project_checks = __esm({
                 // Only interpreter launch scripts belong to the tool identity.
                 tool2.command.slice(1).filter(
                   (arg, index, args) => /^(?:node|python(?:\d+(?:\.\d+)*)?|bash|sh)(?:\.exe)?$/.test(
-                    basename5(tool2.command[0] ?? "")
+                    basename6(tool2.command[0] ?? "")
                   ) && /\.(?:[cm]?js|py|sh)$/.test(arg) && !args.slice(0, index).some((previous) => /\.(?:[cm]?js|py|sh)$/.test(previous))
                 ).map(async (arg) => {
-                  const info = await stat6(resolve12(cwd, arg)).catch(() => void 0);
+                  const info = await stat8(resolve14(cwd, arg)).catch(() => void 0);
                   return [arg, info?.size, info?.mtimeMs, info?.ctimeMs, info?.ino];
                 })
               ),
               await analysisIdentity(
                 this.root,
-                [relative10(this.root, join17(cwd, "representative"))],
+                [relative11(this.root, join18(cwd, "representative"))],
                 config,
                 signal,
                 false
@@ -10039,7 +10818,7 @@ var init_project_checks = __esm({
                 const beforeFiles = before;
                 const tool2 = await resolveTool(
                   config.projectChecks === "auto" ? this.root : cwd,
-                  join17(cwd, "representative"),
+                  join18(cwd, "representative"),
                   check.command,
                   config.projectChecks !== "auto",
                   false
@@ -10055,7 +10834,7 @@ var init_project_checks = __esm({
                     { timeout: BUDGET.project, environment }
                   );
                   if (shown.code !== 0) throw new Error(`Go package discovery failed: ${shown.stderr}`);
-                  result.coverage = goFiles(shown.stdout).map((path) => relative10(cwd, path).replaceAll("\\", "/"));
+                  result.coverage = goFiles(shown.stdout).map((path) => relative11(cwd, path).replaceAll("\\", "/"));
                 }
                 if (config.projectChecks === "auto" && check.parser === "tsc") {
                   const shown = await run(tool2.command[0] ?? "", ["--showConfig"], cwd, signal, void 0, {
@@ -10066,7 +10845,7 @@ var init_project_checks = __esm({
                   if (shown.code !== 0 || !record(data))
                     throw new Error("TypeScript effective configuration unavailable");
                   const pkg = JSON.parse(
-                    await readFile20(join17(cwd, "package.json"), "utf8").catch(() => "{}")
+                    await readFile21(join18(cwd, "package.json"), "utf8").catch(() => "{}")
                   );
                   if (Array.isArray(data["references"]) && data["references"].length || record(pkg) && pkg["workspaces"])
                     throw new Error("TypeScript references/multi-package projects require explicit projectChecks");
@@ -10080,8 +10859,8 @@ var init_project_checks = __esm({
                     result.excluded.push("**/*.{js,jsx,mjs,cjs}");
                 }
                 if (config.projectChecks === "auto" && check.parser === "ty") {
-                  const content = await readFile20(join17(cwd, "ty.toml"), "utf8").catch(() => void 0);
-                  const data = content ? parse(content) : parse(await readFile20(join17(cwd, "pyproject.toml"), "utf8").catch(() => ""));
+                  const content = await readFile21(join18(cwd, "ty.toml"), "utf8").catch(() => void 0);
+                  const data = content ? parse(content) : parse(await readFile21(join18(cwd, "pyproject.toml"), "utf8").catch(() => ""));
                   const toolConfig = content ? data : record(data["tool"]) && record(data["tool"]["ty"]) ? data["tool"]["ty"] : {};
                   const src = record(toolConfig["src"]) ? toolConfig["src"] : {};
                   if (Array.isArray(src["include"]))
@@ -10250,7 +11029,7 @@ var init_project_checks = __esm({
 });
 
 // src/service.ts
-import { rm as rm6 } from "node:fs/promises";
+import { rm as rm7 } from "node:fs/promises";
 import { createServer } from "node:net";
 async function runService(root, identity, token) {
   const location = await serviceLocation(root);
@@ -10261,8 +11040,8 @@ async function runService(root, identity, token) {
     if (await existingService(root, startup)) return;
     const previous = await readEndpoint(location);
     if (previous && alive(previous.pid)) throw new Error("Service alive but unavailable; refusing duplicate startup");
-    await rm6(location.endpoint, { force: true });
-    if (process.platform !== "win32") await rm6(location.address, { force: true });
+    await rm7(location.endpoint, { force: true });
+    if (process.platform !== "win32") await rm7(location.address, { force: true });
     await serve(root, identity, token);
   } finally {
     await release();
@@ -10372,9 +11151,17 @@ async function serve(root, identity, token) {
               }
               return { operation, ...await coordinator.request(args, controller.signal) };
             }
-            if (!["status", "diagnostics", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
-              operation
-            ))
+            if (![
+              "status",
+              "diagnostics",
+              "warmup",
+              "navigate",
+              "rename",
+              "format",
+              "inspect",
+              "actions",
+              "apply"
+            ].includes(operation))
               throw new Error("Unknown service operation");
             const config = await configuration(root);
             if (!config.valid || config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off")
@@ -10405,7 +11192,7 @@ async function serve(root, identity, token) {
       } catch (error) {
         if (!socket.destroyed)
           socket.end(
-            `${JSON.stringify({ error: message(error), ...error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {} })}
+            `${JSON.stringify({ error: message(error), ...error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {}, ...error instanceof PlanFailure || error instanceof WriteFailure && error.planFailure ? { planFailure: error.planFailure } : {} })}
 `
           );
       } finally {
@@ -10446,7 +11233,7 @@ async function serve(root, identity, token) {
     await projects.dispose();
     await engine.dispose();
     if ((await readEndpoint(location).catch(() => void 0))?.token === token)
-      await rm6(location.endpoint, { force: true });
+      await rm7(location.endpoint, { force: true });
   };
   let revalidation;
   const idle = setInterval(() => {
@@ -10457,7 +11244,7 @@ async function serve(root, identity, token) {
       });
     if (requests || coordinator.active || automatic.active || projects.active || warming || warmupTimer && !warmupTask)
       lastActivity = Date.now();
-    else if (Date.now() - lastActivity >= BUDGET.idle) void stop();
+    else if (Date.now() - lastActivity >= BUDGET.idle && !engine.hasLivePlans()) void stop();
   }, 250);
   process.once("SIGTERM", () => {
     void stop();
@@ -10465,9 +11252,9 @@ async function serve(root, identity, token) {
   process.once("SIGINT", () => {
     void stop();
   });
-  await new Promise((resolve13, reject) => {
+  await new Promise((resolve16, reject) => {
     server2.once("error", reject);
-    server2.listen(location.address, resolve13);
+    server2.listen(location.address, resolve16);
   });
   await publishEndpoint(location, token);
   await coordinator.ingest();
@@ -10479,6 +11266,7 @@ var init_service = __esm({
     init_budgets();
     init_config();
     init_directory_lock();
+    init_edit_plans();
     init_engine();
     init_environment();
     init_hook_coordinator();
@@ -10496,37 +11284,48 @@ var main_exports = {};
 __export(main_exports, {
   main: () => main
 });
+import { resolve as resolve15 } from "node:path";
 async function main() {
   restoreInstalledHome();
   const [command = "mcp"] = process.argv.slice(2);
-  if (command === "mcp") await runMcp();
+  if (["--help", "help", "-h"].includes(command)) {
+    process.stdout.write("Usage: codeintel [mcp | hook | check [workspace] | warmup [workspace] [--path path]]\n");
+  } else if (command === "mcp") await runMcp();
   else if (command === "hook") await runHookCli();
   else if (command === "service")
     await runService(process.argv[3] ?? "", process.argv[4] ?? "", process.argv[5] ?? "");
-  else if (command === "check") {
+  else if (command === "check" || command === "warmup") {
     const runtime = new Runtime();
-    const options = { run: "active" };
+    const options = command === "check" ? { run: "active" } : {};
     const tokens = process.argv.slice(3);
     const workspace = tokens[0] && !tokens[0].startsWith("--") ? tokens.shift() ?? process.cwd() : process.cwd();
     while (tokens.length) {
       const flag = tokens.shift();
-      if (flag === "--refresh") options["refresh"] = true;
-      else if (["--run", "--job", "--cursor"].includes(flag ?? "")) {
+      if (command === "check" && flag === "--refresh") options["refresh"] = true;
+      else if (command === "warmup" && flag === "--path") {
+        const value = tokens.shift();
+        if (!value || value.startsWith("--")) throw new Error("Missing value for --path");
+        const paths = options["paths"] ?? [];
+        paths.push(value);
+        if (paths.length > 200) throw new Error("At most 200 paths");
+        options["paths"] = paths;
+      } else if (command === "check" && ["--run", "--job", "--cursor"].includes(flag ?? "") || flag === "--cursor") {
         const value = tokens.shift();
         if (!value || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
         options[flag?.slice(2) ?? ""] = value;
       } else throw new Error(`Unknown option ${flag}`);
     }
-    if (!["active", "cached"].includes(String(options["run"]))) throw new Error("run must be active or cached");
+    if (command === "check" && !["active", "cached"].includes(String(options["run"])))
+      throw new Error("run must be active or cached");
     try {
       process.stdout.write(
-        `${JSON.stringify(await runtime.request(workspace, "check", options, AbortSignal.timeout(BUDGET.request)))}
+        `${JSON.stringify(await runtime.request(resolve15(workspace), command, options, AbortSignal.timeout(BUDGET.request)))}
 `
       );
     } finally {
       await runtime.close();
     }
-  } else throw new Error("Usage: codex-codeintel [mcp | hook | check [workspace]]");
+  } else throw new Error("Usage: codeintel [mcp | hook | check [workspace] | warmup [workspace] [--path path]]");
 }
 var init_main = __esm({
   "src/main.ts"() {
@@ -10540,10 +11339,17 @@ var init_main = __esm({
   }
 });
 
+// src/node-version.ts
+function supportsNode(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]), minor = Number(match[2]);
+  return major === 24 && minor >= 20 || major === 26 && minor >= 13;
+}
+
 // src/cli.ts
-var [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
-if (major < 22 || major === 22 && minor < 12) {
-  const reason = `Codex CodeIntel requires Node >=22.12.0; found ${process.versions.node}.`;
+if (!supportsNode(process.versions.node)) {
+  const reason = `CodeIntel requires Node ^24.20.0 || ^26.13.0; found ${process.versions.node}.`;
   if (process.argv[2] === "hook") {
     let event = "";
     let passthrough = false;

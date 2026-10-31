@@ -79,7 +79,7 @@ describe("plugin package metadata", () => {
 		expect(pluginJson.version).toBe(packageJson.version);
 		expect(packageJson.version).toBe("0.10.0");
 		expect(packageJson.type).toBe("module");
-		expect(packageJson.packageManager).toBe("npm@11.12.1");
+		expect(packageJson.packageManager).toBe("npm@12.2.1");
 		expect(packageJson.dependencies).toBeUndefined();
 		expect(packageJson.optionalDependencies).toBeUndefined();
 		expect(packageJson.files).toEqual([
@@ -97,7 +97,7 @@ describe("plugin package metadata", () => {
 			"docs/examples/*.json",
 		]);
 		expect(packageJson.files).toContain("skills");
-		expect(packageJson.bin["codex-codeintel"]).toBe("./dist/cli.js");
+		expect(packageJson.bin["codeintel"]).toBe("./dist/cli.js");
 		expect(pluginJson.hooks).toBe("./hooks/hooks.json");
 		expect(pluginJson.mcpServers).toBe("./.mcp.json");
 		expect(pluginJson.skills).toBe("./skills/");
@@ -116,7 +116,7 @@ function isPackageJson(value: unknown): value is PackageJson {
 		isRecord(value) &&
 		typeof value["version"] === "string" &&
 		value["type"] === "module" &&
-		value["packageManager"] === "npm@11.12.1" &&
+		value["packageManager"] === "npm@12.2.1" &&
 		isStringRecord(value["bin"]) &&
 		Array.isArray(value["files"]) &&
 		value["files"].every((item) => typeof item === "string") &&

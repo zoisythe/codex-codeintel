@@ -83,14 +83,14 @@ async function findTool(
 	if (!name) throw new Error("Empty command");
 	const executableName = basename(name).replace(/\.(?:exe|cmd|bat)$/i, "");
 	if (
-		automaticExecution() &&
+		(automaticExecution() || !allowTemporary) &&
 		(["uvx", "npx", "pipx"].includes(executableName) ||
 			(executableName === "uv" && command[1] === "tool" && command[2] === "run"))
 	)
 		return resolution(
 			[...command],
 			"missing",
-			`Automatic temporary launcher disabled: ${name}; install a local server or use explicit active MCP`,
+			`${automaticExecution() ? "Automatic" : "Local-only"} temporary launcher disabled: ${name}; install a local server`,
 		);
 	if (explicit) {
 		const entry =
@@ -158,10 +158,11 @@ export async function resolveServer(
 	root: string,
 	path: string,
 	config: Config,
+	allowTemporary = true,
 ): Promise<{ language: string; tool: ToolResolution; server: ResolvedServer }> {
 	const entry = languageFor(config, path);
 	if (!entry) throw new Error(`Language disabled or unsupported: ${extname(path) || path}`);
-	const tool = await resolveTool(root, path, entry.server.command, entry.server.explicit);
+	const tool = await resolveTool(root, path, entry.server.command, entry.server.explicit, allowTemporary);
 	return {
 		language: entry.language,
 		tool,

@@ -36,6 +36,7 @@ export class WriteFailure extends Error {
 	constructor(
 		reason: string,
 		readonly modifiedPaths: string[],
+		readonly planFailure?: string,
 	) {
 		super(reason);
 	}

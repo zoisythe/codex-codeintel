@@ -1,6 +1,6 @@
 # Codex CodeIntel
 
-Standalone Codex plugin for local code intelligence. **Node.js >=22.12.0**, nine MCP tools, optional Hooks, and a self-contained bundle with no runtime dependency installation.
+Standalone Codex plugin for local code intelligence. **Node.js 24.20+ (24.x) or 26.13+ (26.x)**, ten MCP tools, optional Hooks, and a self-contained bundle with no runtime dependency installation.
 
 ## Install
 
@@ -20,6 +20,7 @@ Start a new session and review Hook definitions through `/hooks`. Use **setupLSP
 | `check` | Start/read project CLI checks; follow `next` until finished. |
 | `diagnostics` | LSP/lint for explicit paths or turn/session scope; optional rule/severity filters and cached reads. |
 | `status` | Configuration, local tools, capabilities and failures without starting servers or downloading tools. |
+| `warmup` | Initialize local servers for explicit files or two representative languages; no diagnostics or downloads. |
 | `navigate` | Symbols, definitions, references, hover, signatures, declarations, call/type relationships and completion. |
 | `rename` | Preview a cross-file rename and return a plan. |
 | `format` | Preview explicitly scoped formatting and return a plan. |
@@ -35,7 +36,13 @@ Use the absolute project as `workspace`. Positions use 1-based UTF-16 columns. C
 
 Call `rename` with those arguments, inspect the returned plan/diff, then call `apply` with `{"workspace":"/project","plan":"returned-id"}`. An already-authorized edit needs no additional manual approval.
 
-Plans bind source snapshots, configurations, tools and request environments. Conflicts reject before writes; concurrent changes or cancellation can still interrupt multi-file application. Inspect every `modifiedPaths` result. Plans are consumed when application begins and cannot be replayed. Follow-up diagnostic failure does not undo completed writes.
+Plans have a fixed 30-minute lifetime, retain at most 16 entries / 32 MiB, and bind source snapshots, configurations, tools and request environments. Nonempty pending plans keep the service alive beyond its normal idle timeout; restart and capacity eviction can invalidate them earlier. Preview responses include `createdAt`, `expiresAt` and `storage="memory"`. Conflicts reject before writes; concurrent changes or cancellation can still interrupt multi-file application. Inspect every `modifiedPaths` result. Plans are consumed when application begins and cannot be replayed. Follow-up diagnostic failure does not undo completed writes.
+
+Plans validate by default with the configured local tools: Python ty/Ruff, native or traditional TypeScript (including checked JavaScript), Biome/ESLint, Go gopls and C/C++ clangd. Use `validationPaths` to include up to 20 additional existing files, such as unchanged callers. The scope is bounded to 20 changed files and 2 MiB of before/after content including additional files. Per-provider `checks` preserve coverage, introduced/resolved findings and completeness; incomplete aggregate counts are unknown. Counts describe provider observations and can overlap. Zero net errors is not a safety guarantee. Validation does not block applying the text plan; `validate=false` skips it.
+
+Type services use separate processes. Biome and clangd use temporary local project snapshots so lint rules and header dependencies see all proposed contents; snapshots are bounded to 2,000 discovered files / 32 MiB of copies, reuse installed dependencies and are removed on completion, cancellation or failure. Validation has a 30-second total budget, a 10-second budget per LSP group and at most four concurrent groups. Builds, runtime behavior and unselected dependents remain outside its scope.
+
+The npm CLI is `codeintel`, with no legacy bin alias: `codeintel check /project` and `codeintel warmup /project --path src/main.py`. Development uses Node 26 LTS and npm 12.2.1.
 
 Responses use compact summaries and bounded pages. Follow the returned `next` arguments. Large nested values use field-path fragments and ordered text parts; no GCF or raw LSP payload dump is required.
 
@@ -81,13 +88,13 @@ Default tests include delivered MCP behavior, native TypeScript, traditional Typ
 
 The independent [Rust workflow](.github/workflows/rust.yml) runs on Linux and Windows with Rust 1.99.1 and matching rust-analyzer, rust-src and rustfmt. It tests the committed bundle without npm dependencies, using an offline Cargo workspace with local path dependencies. `npm run test:rust` explicitly runs this suite on a prepared Rust host; missing tools fail rather than skip. It is separate from `npm test` and requires no Rust installation on ordinary development machines. CI saves tool versions, test logs and fixture/MCP traces as `rust-<os>` artifacts for 14 days. Legacy mixed-language tests retain the `CODEX_LSP_TEST_RUST=1` opt-in.
 
-CI retains Linux/macOS/Windows and Node 22.12/24 delivery coverage. Local engineering evidence is kept under ignored `docs/history/`.
+Core CI targets Linux/macOS/Windows with Node 24.20.0 and 26.13.0; dependency-free delivery uses Node 26.13.0. The [real-tools workflow](.github/workflows/real-tools.yml) adds Linux/Windows acceptance with pinned Go/gopls, Ruff 0.17.3, ty 0.0.95 and LLVM/clangd 23.1.4, checks for skipped acceptance cases, and retains versions, reports and fixture/MCP traces for 14 days. Local engineering evidence is kept under ignored `docs/history/`.
 
 <a id="privacy"></a>
 <a id="license"></a>
 ## Privacy and license
 
-No telemetry. Source, diagnostic baselines and unresolved findings stay in private local caches. Plans and action payloads stay in bounded service memory and expire on service restart. Request environments use authenticated local IPC. Logs use fixed categories, not source or credentials.
+No telemetry. Source, diagnostic baselines and unresolved findings stay in private local caches. Plans stay in bounded service memory for at most 30 minutes and can expire earlier on service restart/capacity eviction. Biome/clangd validation temporarily copies scoped source and project context to the system temporary directory and removes its private snapshot in cleanup; an abrupt process/system failure can interrupt cleanup. Action payloads also stay in bounded service memory and are cleared on service restart or configuration invalidation. Request environments use authenticated local IPC. Logs use fixed categories, not source or credentials.
 
 MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 

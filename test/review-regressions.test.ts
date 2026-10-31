@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -50,10 +50,16 @@ it("empty discovery reads zero bodies and same-size replacement is verified", as
 	const before = indexStatistics();
 	expect((await inventory(root)).version).toBe(first.version);
 	expect(indexStatistics().contentReads).toBe(before.contentReads);
+	const stamp = await stat(join(root, "a.ts"));
 	await writeFile(join(root, "a.ts"), "two");
-	expect((await inventory(root)).version).not.toBe(first.version);
+	// Coarse filesystem timestamps can remain identical across fast writes. Make
+	// the metadata change deterministic, then separately test forced content reads.
+	await utimes(join(root, "a.ts"), stamp.atime, new Date(stamp.mtimeMs + 1000));
+	const second = await inventory(root);
+	expect(second.version).not.toBe(first.version);
+	await writeFile(join(root, "a.ts"), "tri");
 	const forced = indexStatistics();
-	await inventory(root, 10000, undefined, [], root, false, ["a.ts"]);
+	expect((await inventory(root, 10000, undefined, [], root, false, ["a.ts"])).version).not.toBe(second.version);
 	expect(indexStatistics().contentReads).toBe(forced.contentReads + 1);
 });
 it("batch lint executes once and splits each output file correctly", async () => {

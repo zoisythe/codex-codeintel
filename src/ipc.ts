@@ -10,6 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { isPlanFailureCode, PlanFailure } from "./edit-plans.js";
 import type { ToolOutput } from "./engine.js";
 import { executionEnvironment } from "./environment.js";
 import { hash } from "./files.js";
@@ -130,8 +131,11 @@ export async function exchange(
 							? new WriteFailure(
 									response["error"],
 									paths.filter((path): path is string => typeof path === "string"),
+									typeof response["planFailure"] === "string" ? response["planFailure"] : undefined,
 								)
-							: new Error(response["error"]),
+							: isPlanFailureCode(response["planFailure"])
+								? new PlanFailure(response["planFailure"], response["error"])
+								: new Error(response["error"]),
 					);
 				} else if (record(response["output"]) && typeof response["output"]["operation"] === "string")
 					finish(undefined, response["output"] as ToolOutput);

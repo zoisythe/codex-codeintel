@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { BUDGET } from "./budgets.js";
 import { configuration } from "./config.js";
+import { PlanFailure } from "./edit-plans.js";
 import { Engine, type ToolOutput } from "./engine.js";
 import { executionEnvironment } from "./environment.js";
 import { hash, inventory } from "./files.js";
@@ -209,9 +210,18 @@ export class Runtime {
 			return await this.output(root, operation, args, await exchange(endpoint, operation, args, signal), signal);
 		} catch (error) {
 			if (
-				["check", "diagnostics", "status", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
-					operation,
-				)
+				[
+					"check",
+					"diagnostics",
+					"status",
+					"warmup",
+					"navigate",
+					"rename",
+					"format",
+					"inspect",
+					"actions",
+					"apply",
+				].includes(operation)
 			)
 				return this.output(
 					root,
@@ -222,6 +232,9 @@ export class Runtime {
 						isError: true,
 						status: failureKind(message(error)),
 						reason: message(error),
+						...(error instanceof PlanFailure || (error instanceof WriteFailure && error.planFailure)
+							? { planFailure: error.planFailure }
+							: {}),
 						...(operation === "apply"
 							? { modifiedPaths: error instanceof WriteFailure ? error.modifiedPaths : [] }
 							: {}),

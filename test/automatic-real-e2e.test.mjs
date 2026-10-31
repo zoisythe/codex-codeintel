@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-const enabled = process.env.CODEX_LSP_REAL_TOOLS === "1";
+const enabled = process.env["CODEX_LSP_REAL_TOOLS"] === "1";
 test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic edit and repair feedback", { skip: !enabled, timeout: 240000 }, async t => {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-auto-real-"))), tools = join(dir, "tools");
 	const setup = spawnSync("npm", ["install", "--prefix", tools, "--no-audit", "--no-fund", "typescript-language-server", "typescript@5.9.3"], { encoding: "utf8", timeout: 90000 });
@@ -16,7 +16,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 	const summaries = [];
 	const bundleSha256 = createHash("sha256").update(await readFile(resolveCli())).digest("hex");
 	t.after(async () => { await rm(dir, { recursive: true, force: true }); });
-	for (const language of ["python", "typescript", "native-typescript", "c", "cpp", ...(process.env.CODEX_LSP_TEST_RUST === "1" ? ["rust"] : [])]) {
+	for (const language of ["python", "typescript", "native-typescript", "c", "cpp", ...(process.env["CODEX_LSP_TEST_RUST"] === "1" ? ["rust"] : [])]) {
 		const root = join(dir, language), home = join(dir, `${language}-home`);
 		await mkdir(root); await mkdir(home);
 		await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
@@ -42,8 +42,8 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 			const cargo = spawnSync("cargo", ["check", "--offline"], { cwd: root, encoding: "utf8", timeout: 30000 }); assert.equal(cargo.status, 0, cargo.stderr);
 		}
 		await writeFile(join(root, path), clean);
-		const feedback = [];
-		const hook = event => new Promise((resolve, reject) => {
+		/** @type {string[]} */ const feedback = [];
+		const hook = (/** @type {string} */ event) => new Promise((resolve, reject) => {
 			const started = performance.now(), child = spawn(process.execPath, [resolveCli(), "hook"], { cwd: root, env: { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") }, stdio: ["pipe", "pipe", "pipe"] });
 			let out = "", err = "";
 			child.stdout.setEncoding("utf8").on("data", chunk => { out += chunk; }); child.stderr.setEncoding("utf8").on("data", chunk => { err += chunk; });
@@ -73,10 +73,10 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 		const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 		try {
 			const status = (await c.call("status", { path })).structuredContent;
-			assert.equal(status.tools[0].running, true, JSON.stringify(status.tools));
-			summaries.push({ language, coldMs: cold.elapsed, hotMs: hot.elapsed, processStarts: status.clients.processStarts, command: status.tools[0].tool.command, serviceIdentity: status.service.identity });
+			assert.equal(status.tools[0]?.running, true, JSON.stringify(status.tools));
+			summaries.push({ language, coldMs: cold.elapsed, hotMs: hot.elapsed, processStarts: status.clients.processStarts, command: status.tools[0]?.tool.command, serviceIdentity: status.service.identity });
 			await hook("SessionEnd");
-			process.kill(status.service.pid, "SIGTERM");
+			process.kill(status.service.pid ?? assert.fail("Service missing"), "SIGTERM");
 		} finally { await c.close(); }
 	}
 	t.diagnostic(JSON.stringify({bundleSha256, summaries}));
@@ -92,7 +92,7 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	const env = {...process.env, CODEX_HOME:home, CODEX_LSP_CACHE:join(dir,"cache"), RUSTUP_TOOLCHAIN:"1.0.0", RUSTUP_AUTO_INSTALL:"1", RUSTUP_DIST_SERVER:"http://127.0.0.1:9"};
 	const c = bundleClient(root,home,env);
 	t.after(async () => {try {const status=(await c.call("status",{path:"src/main.rs"})).structuredContent; if(status.service.pid)process.kill(status.service.pid,"SIGTERM");}finally{await c.close();await delay(100);await rm(dir,{recursive:true,force:true});}});
-	const hook = event => {
+	const hook = (/** @type {string} */ event) => {
 		const result=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:event,session_id:"rustup",tool_name:"Write",tool_input:{path:"src/main.rs"}})});
 		assert.equal(result.status,0,result.stderr); return result.stdout?JSON.parse(result.stdout):{};
 	};
@@ -101,8 +101,8 @@ test("automatic Cargo baseline refuses a missing Rustup toolchain without downlo
 	await delay(700);
 	const result=(await c.call("check",{run:"cached"})).structuredContent;
 	assert.equal(result.state,"failed");
-	assert.match(result.checkers[0].note,/not installed/);
-	assert.doesNotMatch(result.checkers[0].note,/syncing channel updates|downloading component/);
+	assert.match(result.checkers[0]?.note ?? "",/not installed/);
+	assert.doesNotMatch(result.checkers[0]?.note ?? "",/syncing channel updates|downloading component/);
 });
 test("automatic Ruff baseline and MCP lint preserve source with fix/fix-only configured", {skip: !enabled, timeout:20000}, async t => {
 	const dir=await realpath(await mkdtemp(join(tmpdir(), "codeintel-ruff-readonly-"))),root=join(dir,"project"),home=join(dir,"home");
@@ -124,5 +124,5 @@ test("automatic Ruff baseline and MCP lint preserve source with fix/fix-only con
 	await writeFile(join(root,"ty.toml"),'[src]\ninclude=["."]\nexclude=["."]\n');
 	const excluded=spawnSync(process.execPath,[resolveCli(),"hook"],{cwd:root,env,encoding:"utf8",timeout:10000,input:JSON.stringify({cwd:root,hook_event_name:"PreToolUse",session_id:"ruff-readonly",tool_name:"Write",tool_input:{path:"main.py"}})});
 	assert.equal(excluded.status,0,excluded.stderr);assert.equal(excluded.stdout,"",excluded.stdout);
-	const excludedBaseline=(await c.call("check",{refresh:true})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python").state,"complete");
+	const excludedBaseline=(await c.call("check",{refresh:true})).structuredContent;assert.equal(excludedBaseline.checkers.find(check=>check.name==="python")?.state,"complete");
 });

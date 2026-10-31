@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyTextChanges, workspacePath } from "../src/files.js";
+import { supportsNode } from "../src/node-version.js";
 import { TOOLS } from "../src/protocol.js";
 import { Engine } from "./engine-harness.js";
 
@@ -18,11 +19,17 @@ afterEach(async () => {
 });
 
 describe("workspace diagnostics", () => {
+	it("accepts only supported Node LTS lines at their declared floors", () => {
+		for (const version of ["24.20.0", "24.22.2", "26.13.0", "26.14.1"]) expect(supportsNode(version)).toBe(true);
+		for (const version of ["22.12.0", "24.19.9", "25.1.0", "26.12.9", "27.0.0", "26.13.0-rc.1"])
+			expect(supportsNode(version)).toBe(false);
+	});
 	it("keeps the tool schema fixed and small", () => {
 		expect(TOOLS.map((tool) => tool.name)).toEqual([
 			"check",
 			"diagnostics",
 			"status",
+			"warmup",
 			"navigate",
 			"rename",
 			"format",

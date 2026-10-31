@@ -14,7 +14,7 @@ A new project feedback configuration can start with:
 }
 ```
 
-Limit language additions to the project and preserve existing choices. No configuration means automatic feedback is off while all nine MCP tools remain explicitly callable. `automaticDiagnostics.stop="errors"` is feedback only. Ending gates require a separately authorized **global** `stopGate="introduced-errors"`; setup never enables it automatically. An existing global choice is preserved. Project `stopGate` is ignored. No plugin trust field or environment variable is required.
+Limit language additions to the project and preserve existing choices. No configuration means automatic feedback is off while all ten MCP tools remain explicitly callable. `automaticDiagnostics.stop="errors"` is feedback only. Ending gates require a separately authorized **global** `stopGate="introduced-errors"`; setup never enables it automatically. An existing global choice is preserved. Project `stopGate` is ignored. No plugin trust field or environment variable is required.
 
 LSP entries are a built-in name, `false`, or `{command: [program, ...args], extensions: [".ext"], env?: {KEY: "value"}, initialization?: {...}}`. Use `.py/.pyi`, `.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs`, `.c/.h/.cpp/.hpp` and `.rs` as appropriate for custom servers; do not conflict with enabled built-in extensions. Explicit relative commands resolve from the workspace and never fall back. Built-ins resolve the nearest project environment, then PATH; automatic work never downloads missing tools.
 

@@ -7,17 +7,18 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
+/** @template T @param {() => Promise<T>} action */
 async function until(action, timeout = 12000) {
 	const deadline = Date.now() + timeout;
 	while (Date.now() < deadline) { const value = await action(); if (value) return value; await delay(30); }
 	assert.fail("Background analysis did not finish");
 }
-async function fixture(t, extra = {}, environment = {}) {
+async function fixture(/** @type {import("node:test").TestContext} */ t, extra = {}, environment = {}) {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-auto-"))), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "lsp.log");
 	await mkdir(root); await mkdir(home); await writeFile(join(root, "main.fake"), "clean\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache"), ...environment };
 	const config = { schemaVersion: 1, automaticDiagnostics: { postToolUse: "delta", stop: "errors" }, projectChecks: [{ name: "fake", cwd: ".", command: [process.execPath, resolve("test/fixtures/project-checker.mjs")], parser: "json", coverage: ["**/*.fake"] }], lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: "pull", CODEX_LSP_TEST_LOG: log } } }, ...extra };
-	const configure = value => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
+	const configure = (/** @type {Record<string, unknown>} */ value) => writeFile(join(home, "lsp-client.json"), JSON.stringify(value));
 	await configure(config);
 	const c = bundleClient(root, home, env);
 	const status = async () => (await c.call("status", { path: "main.fake" })).structuredContent;
@@ -47,7 +48,7 @@ async function fixture(t, extra = {}, environment = {}) {
 		return { ...result, text: (result.text.includes("deliveryId=") ? result.text : "") + delivered.text };
 	};
 	t.after(async () => { await hook("SessionEnd"); const s = await status(); if (s.service?.pid) try { process.kill(s.service.pid, "SIGTERM"); } catch {} await c.close(); await delay(100); await rm(dir, { recursive: true, force: true }); });
-	return { dir, root, home, env, config, configure, c, status, hook, start, post, read, settle, state, write: value => writeFile(join(root, "main.fake"), value) };
+	return { dir, root, home, env, config, configure, c, status, hook, start, post, read, settle, state, write: (/** @type {string} */ value) => writeFile(join(root, "main.fake"), value) };
 }
 
 test("default feedback reports introduced errors without blocking; PreToolUse never checks", { timeout: 20000 }, async t => {

@@ -1,3 +1,4 @@
+import { navigationArray } from "./protocol.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -14,18 +15,18 @@ const files = ["core/src/lib.rs", "app/src/lib.rs", "app/tests/usage.rs", "Cargo
 const library = "/// Return twice the supplied value.\npub fn twice(value:i32)->i32{value*2}\n";
 const application = "pub fn caller() -> i32 {\n    codeintel_fixture_core::twice(2)\n}\n";
 const usage = "#[test]\nfn uses_twice() {\n    assert_eq!(codeintel_fixture_core::twice(2), 4);\n}\n";
-const local = (value) => value.replaceAll("\\", "/");
+const local = (/** @type {string} */ value) => value.replaceAll("\\", "/");
 
-async function fixture(t, name) {
+async function fixture(/** @type {import("node:test").TestContext} */ t, /** @type {string} */ name) {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-rust-")));
 	const root = join(dir, "project"),
 		home = join(dir, "home");
-	const trace = [];
-	let client;
+	/** @type {Record<string, unknown>[]} */ const trace = [];
+	/** @type {ReturnType<typeof bundleClient> | undefined} */ let client;
 	t.after(async () => {
 		try {
-			if (process.env.CODEX_LSP_RUST_ARTIFACTS) {
-				const output = resolve(process.env.CODEX_LSP_RUST_ARTIFACTS);
+			if (process.env["CODEX_LSP_RUST_ARTIFACTS"]) {
+				const output = resolve(process.env["CODEX_LSP_RUST_ARTIFACTS"]);
 				await mkdir(output, { recursive: true });
 				const sources = Object.fromEntries(
 					await Promise.all(
@@ -104,12 +105,14 @@ async function fixture(t, name) {
 		}),
 	);
 	client = bundleClient(root, home, { ...environment, CODEX_LSP_CACHE: join(dir, "cache") });
-	const raw = async (name, args) => {
+	/** @template {string} N @param {N} name @param {import("./protocol-types.js").Arguments} [args] */
+	const raw = async (name, args = {}) => {
 		const output = await client.full(name, args);
 		trace.push({ name, args, output });
 		return output;
 	};
-	const call = async (name, args) => {
+	/** @template {string} N @param {N} name @param {import("./protocol-types.js").Arguments} [args] */
+	const call = async (name, args = {}) => {
 		const output = await raw(name, args);
 		assert(!output.isError, JSON.stringify(output));
 		return output.structuredContent;
@@ -125,7 +128,7 @@ async function fixture(t, name) {
 				]),
 			),
 		);
-	const diagnostics = async (path) => {
+	const diagnostics = async (/** @type {string} */ path) => {
 		for (let attempt = 0; attempt < 4; attempt++) {
 			const output = await call("diagnostics", { path, source: "lsp" });
 			if (output.results.every((result) => result.state === "complete")) return output;
@@ -160,41 +163,41 @@ test("real Rust: diagnostics, selectors, navigation, context and candidate test 
 	const f = await fixture(t, "navigation");
 	const before = await f.hashes();
 	const initial = await f.call("status", { path: "core/src/lib.rs" });
-	assert.equal(initial.tools[0].running, false, "status must not launch rust-analyzer");
+	assert.equal(initial.tools[0]?.running, false, "status must not launch rust-analyzer");
 	assert.equal((await f.diagnostics("app/src/lib.rs")).errors, 0);
 	const symbols = await f.call("navigate", { operation: "symbols", path: "core/src/lib.rs" });
 	assert.equal(symbols.status, "complete");
-	assert(symbols.result.some((item) => item.symbol === "twice"));
+	assert(navigationArray(symbols.result).some((item) => item.symbol === "twice"));
 	const definition = await f.call("navigate", {
 		operation: "definition",
 		path: "app/src/lib.rs",
 		pattern: "codeintel_fixture_core::@@twice",
 	});
 	assert.equal(definition.status, "complete");
-	assert(definition.result.some((item) => local(item.path) === "core/src/lib.rs"));
+	assert(navigationArray(definition.result).some((item) => local(item.path ?? "") === "core/src/lib.rs"));
 	const refs = await f.call("navigate", { operation: "references", path: "core/src/lib.rs", symbol: "twice" });
 	assert.equal(refs.status, "complete");
-	assert(refs.result.some((item) => local(item.path) === "app/src/lib.rs"));
+	assert(navigationArray(refs.result).some((item) => local(item.path ?? "") === "app/src/lib.rs"));
 	const incoming = await f.call("navigate", { operation: "incoming", path: "core/src/lib.rs", symbol: "twice" });
 	assert.equal(incoming.status, "complete");
-	assert(incoming.result.some((item) => local(item.from.path) === "app/src/lib.rs"));
+	assert(navigationArray(incoming.result).some((item) => local(item.from?.path ?? "") === "app/src/lib.rs"));
 	const completion = await f.call("navigate", {
 		operation: "completion",
 		path: "app/src/lib.rs",
 		pattern: "codeintel_fixture_core::@@twice",
 	});
 	assert.equal(completion.status, "complete");
-	assert(completion.result.some((item) => /^twice\b/.test(item.label)));
+	assert(navigationArray(completion.result).some((item) => /^twice\b/.test(item.label ?? "")));
 	const context = await f.call("inspect", {
 		operation: "symbol",
 		path: "core/src/lib.rs",
 		symbol: "twice",
 		source: true,
 	});
-	assert.equal(context.sections.hover.status, "complete");
-	assert(context.sections.hover.result.contents);
-	assert.equal(context.sections.references.count, refs.result.length);
-	assert.match(context.source, /pub fn twice/);
+	assert.equal(context.sections.hover?.status, "complete");
+	assert(context.sections.hover?.result.contents);
+	assert.equal(context.sections.references?.count, navigationArray(refs.result).length);
+	assert.match(context.source ?? "", /pub fn twice/);
 	const impact = await f.call("inspect", {
 		operation: "impact",
 		path: "core/src/lib.rs",
@@ -202,9 +205,9 @@ test("real Rust: diagnostics, selectors, navigation, context and candidate test 
 		transitive: true,
 	});
 	assert.equal(impact.status, "complete", JSON.stringify(impact));
-	assert.equal(impact.symbols[0].references.count, refs.result.length);
-	assert(impact.symbols[0].callers.items.some((item) => item.symbol.includes("caller")));
-	assert(impact.symbols[0].candidateTests.paths.some((path) => local(path) === "app/tests/usage.rs"));
+	assert.equal(impact.symbols[0]?.references.count, navigationArray(refs.result).length);
+	assert(impact.symbols[0]?.callers.items.some((item) => item.symbol.includes("caller")));
+	assert(impact.symbols[0]?.candidateTests.paths.some((/** @type {string} */ path) => local(path) === "app/tests/usage.rs"));
 	assert(impact.indirect.length);
 	assert.deepEqual(await f.hashes(), before, "Read-only tools must preserve Rust sources and Cargo.lock");
 	await writeFile(join(f.root, "app/src/lib.rs"), 'pub fn caller() -> i32 { "wrong" }\n');
@@ -232,7 +235,7 @@ test("real Rust: rename, rustfmt and Code Action plans write only through apply"
 	const conflict = await f.raw("apply", { plan: stale.plan });
 	assert(conflict.isError);
 	assert.equal(conflict.structuredContent.status, "conflict");
-	assert.match(conflict.structuredContent.reason, /Plan stale/);
+	assert.match(conflict.structuredContent.reason ?? "", /Plan stale/);
 	assert.deepEqual(conflict.structuredContent.modifiedPaths, []);
 	assert.deepEqual(await f.hashes(), before);
 	const format = await f.call("format", { paths: files.filter((path) => path.endsWith(".rs")) });
@@ -273,7 +276,7 @@ test("real Rust: Cargo workspace checks report and clear located compiler failur
 	await writeFile(join(f.root, "app/src/lib.rs"), 'pub fn caller() -> i32 { "wrong" }\n');
 	const broken = await f.check();
 	assert(broken.errors > 0, JSON.stringify(broken));
-	assert(broken.diagnostics.some((item) => local(item.path) === "app/src/lib.rs" && item.severity === "error"));
+	assert(broken.diagnostics.some((item) => local(item.path ?? "") === "app/src/lib.rs" && item.severity === "error"));
 	await writeFile(join(f.root, "app/src/lib.rs"), application);
 	assert.equal((await f.check()).errors, 0);
 });

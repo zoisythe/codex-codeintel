@@ -10,16 +10,16 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-resolution-")));
 	const root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin"), log = join(dir, "launchers");
 	await mkdir(join(root, "pkg", "src"), { recursive: true }); await mkdir(home); await mkdir(bin);
-	const script = async (path, body) => { await mkdir(resolve(path, ".."), { recursive: true }); await writeFile(path, `#!${process.execPath}\n${body}\n`); await chmod(path, 0o755); };
+	const script = async (/** @type {string} */ path, /** @type {string} */ body) => { await mkdir(resolve(path, ".."), { recursive: true }); await writeFile(path, `#!${process.execPath}\n${body}\n`); await chmod(path, 0o755); };
 	const fake = resolve("test/fixtures/fake-lsp.mjs");
 	const fakeLsp = `import(${JSON.stringify(fake)});`;
 	const launcher = `require("node:fs").appendFileSync(${JSON.stringify(log)},process.argv.join(" ")+"\\n");process.exit(7);`;
 	for (const name of ["uvx", "uv", "pipx", "npx"]) await script(join(bin, name), launcher);
 	await script(join(bin, "ty"), fakeLsp); await script(join(bin, "ruff"), 'console.log("[]")');
 	await writeFile(join(root, "pkg", "src", "main.py"), "broken\n");
-	const configure = async value => {
-		const { workspaces = [root], ...settings } = value;
-		await writeFile(join(home, "config.toml"), workspaces.map(path => `[projects.${JSON.stringify(path)}]\ntrust_level = "trusted"\n`).join("\n"));
+	const configure = async (/** @type {Record<string, unknown>} */ value) => {
+		const { workspaces = [root], ...settings } = value; assert(Array.isArray(workspaces) && workspaces.every((path) => typeof path === "string"));
+		await writeFile(join(home, "config.toml"), workspaces.map((/** @type {string} */ path) => `[projects.${JSON.stringify(path)}]\ntrust_level = "trusted"\n`).join("\n"));
 		await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, ...settings }));
 	};
 	await configure({});
@@ -28,7 +28,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 		try { await client.close(); }
 		finally { await rm(dir, { recursive: true, force: true }); }
 	});
-	const status = async path => { const result = await client.call("status", { path }); assert(!result.isError, JSON.stringify(result)); return result.structuredContent.tools[0]; };
+	const status = async (/** @type {string} */ path) => { const result = await client.call("status", { path }); assert(!result.isError, JSON.stringify(result)); const tool = result.structuredContent.tools[0]; assert(tool); return tool; };
 	assert.equal((await status("pkg/src/main.py")).tool.command[0], join(bin, "ty"));
 	assert.equal((await status("pkg/src/main.py")).lint.command, join(bin, "ruff"));
 	assert(!(await client.call("diagnostics", { path: "pkg/src/main.py" })).isError);
@@ -76,7 +76,7 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	await writeFile(join(root, "healthy", "main.py"), "broken\n");
 	await script(join(bin, "ty"), `require("node:fs").appendFileSync(${JSON.stringify(localFailures)}, "started\\n");console.error("broken local toolchain");process.exit(9)`);
 	const broken = await client.call("diagnostics", { path: "pkg/src/main.py", refresh: true });
-	assert.equal(broken.structuredContent.results[0].channels.lsp, "failed"); assert.match(broken.content[0].text, /no fallback/);
+	assert.equal(broken.structuredContent.results[0]?.channels?.lsp, "failed"); assert.match(broken.content[0].text, /no fallback/);
 	assert(!(await client.call("diagnostics", { path: "healthy/main.py", source: "lsp" })).isError);
 	assert((await client.call("diagnostics", { path: "pkg/src/main.py", source: "lsp" })).isError);
 	assert.equal(await readFile(localFailures, "utf8"), "started\n", "a healthy package must not clear another package's failure cache");
@@ -98,15 +98,15 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	await script(join(bin, "ty"), fakeLsp); await rm(join(bin, "ruff"));
 	assert(!(await client.call("diagnostics", { path: "pkg/src/main.py", source: "lsp", refresh: true })).isError);
 	const noRuff = await client.call("diagnostics", { path: "pkg/src/main.py" });
-	assert(!noRuff.isError); assert.equal(noRuff.structuredContent.results[0].channels.lsp, "complete");
-	assert.equal(noRuff.structuredContent.results[0].channels.lint, "failed");
+	assert(!noRuff.isError); assert.equal(noRuff.structuredContent.results[0]?.channels?.lsp, "complete");
+	assert.equal(noRuff.structuredContent.results[0]?.channels?.lint, "failed");
 	assert(!(await client.call("navigate", { path: "pkg/src/main.py", operation: "definition", line: 1, column: 1 })).isError);
 	const second = join(dir, "second"); await mkdir(second);
 	await configure({ workspaces: [root, second], lsp: { python: false, rust: false, fake: { command: [process.execPath, fake], extensions: [".fake"] } } });
 	await writeFile(join(root, "main.fake"), "broken\n"); await writeFile(join(second, "main.fake"), "clean\n");
 	await writeFile(join(root, "unavailable.rs"), "fn main() {}\n"); await writeFile(join(root, "note.txt"), "ordinary text\n");
 	const mixed = await client.call("diagnostics", { paths: ["main.fake", "unavailable.rs"], source: "lsp" });
-	assert(!mixed.isError); assert(mixed.structuredContent.partial); assert(mixed.structuredContent.unavailable.rust);
+	assert(!mixed.isError); assert(mixed.structuredContent.partial); assert(mixed.structuredContent.unavailable["rust"]);
 	assert(!mixed.structuredContent.results.some(entry => entry.path === "note.txt"));
 	assert.equal((await client.call("diagnostics", { workspace: second, path: "main.fake", source: "lsp" })).structuredContent.errors, 0);
 	assert.equal((await client.call("diagnostics", { path: "main.fake", source: "lsp" })).structuredContent.errors, 1);

@@ -4,6 +4,7 @@ import { Automatic } from "./automatic.js";
 import { BUDGET } from "./budgets.js";
 import { configuration } from "./config.js";
 import { directoryLock } from "./directory-lock.js";
+import { PlanFailure } from "./edit-plans.js";
 import { Engine } from "./engine.js";
 import { executionEnvironment, withExecution } from "./environment.js";
 import { HookCoordinator } from "./hook-coordinator.js";
@@ -150,9 +151,17 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 							return { operation, ...(await coordinator.request(args, controller.signal)) };
 						}
 						if (
-							!["status", "diagnostics", "navigate", "rename", "format", "inspect", "actions", "apply"].includes(
-								operation,
-							)
+							![
+								"status",
+								"diagnostics",
+								"warmup",
+								"navigate",
+								"rename",
+								"format",
+								"inspect",
+								"actions",
+								"apply",
+							].includes(operation)
 						)
 							throw new Error("Unknown service operation");
 						const config = await configuration(root);
@@ -188,7 +197,7 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 			} catch (error) {
 				if (!socket.destroyed)
 					socket.end(
-						`${JSON.stringify({ error: message(error), ...(error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {}) })}\n`,
+						`${JSON.stringify({ error: message(error), ...(error instanceof WriteFailure ? { modifiedPaths: error.modifiedPaths } : {}), ...(error instanceof PlanFailure || (error instanceof WriteFailure && error.planFailure) ? { planFailure: error.planFailure } : {}) })}\n`,
 					);
 			} finally {
 				requests--;
@@ -249,7 +258,7 @@ async function serve(root: string, identity: string, token: string): Promise<voi
 			(warmupTimer && !warmupTask)
 		)
 			lastActivity = Date.now();
-		else if (Date.now() - lastActivity >= BUDGET.idle) void stop();
+		else if (Date.now() - lastActivity >= BUDGET.idle && !engine.hasLivePlans()) void stop();
 	}, 250);
 	process.once("SIGTERM", () => {
 		void stop();

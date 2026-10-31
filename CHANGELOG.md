@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Breaking: require Node 24.20+ on 24.x or 26.13+ on 26.x; develop and deliver with Node 26 and npm 12.2.1. Rename the npm CLI to codeintel without a legacy alias.
+- Add warmup as the tenth MCP tool and CLI command. Initialize installed local servers independently of automatic feedback, with no diagnostics baseline or temporary downloads.
+- Give memory plans a fixed 30-minute lifetime and bounded service keepalive, expose expiry metadata and precise planFailure reasons, retaining single-use and conflict checks.
+- Validate plans with local ty/Ruff, native/traditional TypeScript and checked JavaScript, Biome/ESLint, gopls and clangd. Add explicit validationPaths for unchanged callers, per-provider checks and unknown aggregate counts when incomplete. Keep source and Hook baselines isolated without adding an apply gate.
+- Use bounded disposable project snapshots for Biome reports and clangd header dependencies, preserving local compilation paths and generated headers; limit validation to 20 changed + 20 additional files / 2 MiB, 30 seconds total and four concurrent groups.
+- Type-check all JavaScript test harnesses under strict checkJs, retaining both runners and the real ESLint integration dependency.
+- Add pinned Linux/Windows real-tool CI, fail skipped acceptance, and retain versions/reports/fixture traces.
+
 ## 0.10.0
 
 - Breaking: expose exactly check, diagnostics, status, navigate, rename, format, inspect, actions and apply. Old names return migration guidance without executing.

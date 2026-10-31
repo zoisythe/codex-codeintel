@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { supportsNode } from "./node-version.js";
+
 // Load the application only after checking APIs used by the bundle.
-const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
-if (major < 22 || (major === 22 && minor < 12)) {
-	const reason = `Codex CodeIntel requires Node >=22.12.0; found ${process.versions.node}.`;
+if (!supportsNode(process.versions.node)) {
+	const reason = `CodeIntel requires Node ^24.20.0 || ^26.13.0; found ${process.versions.node}.`;
 	if (process.argv[2] === "hook") {
 		let event = "";
 		let passthrough = false;

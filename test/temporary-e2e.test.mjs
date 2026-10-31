@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-test("real temporary ty/Ruff preparation, offline reuse and Hook direct execution", { timeout: 150000, skip: process.env.CODEX_LSP_REAL_TOOLS !== "1" || process.platform !== "linux" }, async t => {
+test("real temporary ty/Ruff preparation, offline reuse and Hook direct execution", { timeout: 150000, skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
 	const uv = spawnSync("which", ["uv"], { encoding: "utf8" }).stdout.trim();
 	const uvx = spawnSync("which", ["uvx"], { encoding: "utf8" }).stdout.trim();
 	const python = spawnSync(uv, ["python", "find"], { encoding: "utf8" }).stdout.trim();
@@ -35,7 +35,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	await rm(join(bin, "uvx"));
 	await writeFile(join(bin, "uvx"), `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(launcherLog)}, "launched");process.exit(99);\n`, { mode: 0o755 });
 	await writeFile(join(home, "lsp-client.json"), JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"delta",stop:"errors"},projectChecks:[],lsp:{python:false}}));
-	const hook = (event, tool = "Write") => spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, ...env, CODEX_HOME: home, UV_OFFLINE: "1" }, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: event, tool_name: tool, tool_input: tool === "Write" ? {path:"main.py"} : {cmd:"git status --short"} }) });
+	const hook = (/** @type {string} */ event, tool = "Write") => spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, ...env, CODEX_HOME: home, UV_OFFLINE: "1" }, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: event, tool_name: tool, tool_input: tool === "Write" ? {path:"main.py"} : {cmd:"git status --short"} }) });
 	assert.equal(hook("SessionStart").status, 0);
 	await delay(350);
 	await writeFile(join(root, "main.py"), "import sys\nvalue: int = 1\n");
@@ -47,11 +47,11 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 	await client.close();
 	await rm(join(bin, "uvx")); await symlink(uvx, join(bin, "uvx"));
 	client = bundleClient(root, home, { ...env, UV_CACHE_DIR: join(dir, "empty-cache"), UV_OFFLINE: "1" });
-	result = await check(); assert.equal(result.structuredContent.results[0].channels.lsp, "failed", JSON.stringify(result)); assert.equal(result.structuredContent.results[0].channels.lint, "complete"); assert.match(result.content[0].text, /launch\/download|initialization failed/);
+	result = await check(); assert.equal(result.structuredContent.results[0]?.channels?.lsp, "failed", JSON.stringify(result)); assert.equal(result.structuredContent.results[0]?.channels?.lint, "complete"); assert.match(result.content[0].text, /launch\/download|initialization failed/);
 });
 
 for (const [server, recipe] of [["typescript", "typescript@5.9.3"], ["tsc", "typescript@7.0.2"]]) {
-test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env.CODEX_LSP_REAL_TOOLS !== "1" || process.platform !== "linux" }, async t => {
+test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
 	const npx = spawnSync("which", ["npx"], { encoding: "utf8" }).stdout.trim(); assert(npx);
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-npx-"))), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);
@@ -65,7 +65,7 @@ test(`real npx ${server} recipe works offline after preparation`, { timeout: 150
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
 	const check = () => client.call("diagnostics", { path: "main.ts", source: "lsp" });
 	const status = (await client.call("status", { path: "main.ts" })).structuredContent.tools[0];
-	assert.equal(status.tool.source, "temporary"); assert(status.tool.command.includes(recipe));
+	assert(status); assert.equal(status.tool.source, "temporary"); assert(status.tool.command.includes(recipe ?? assert.fail("No recipe")));
 	let result = await check(); assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0, JSON.stringify(result));
 	await client.close(); client = bundleClient(root, home, { ...env, npm_config_offline: "true" });
 	result = await check(); assert(!result.isError, JSON.stringify(result)); assert(result.structuredContent.errors > 0, JSON.stringify(result));

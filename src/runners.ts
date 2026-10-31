@@ -12,7 +12,7 @@ import { createSpawnCommand, terminateProcessTree } from "./lsp/process.js";
 import { measured } from "./metrics.js";
 import { preparedRuff, rememberRuff } from "./prepared-tools.js";
 import { HIDDEN_PROCESS } from "./process-options.js";
-import { type FileResult, message, record } from "./results.js";
+import { type FileResult, type Finding, message, record } from "./results.js";
 import { codeLanguage, resolveTool } from "./tool-resolution.js";
 
 export async function run(
@@ -76,11 +76,59 @@ export async function run(
 		child.stdin.end(input);
 	});
 }
-interface Runner {
+export interface Runner {
 	name: "biome" | "eslint" | "ruff";
 	command: string;
 	prefix: string[];
 	source?: string;
+}
+// Read-only stdin checks deliberately avoid lint availability/Hook baseline caches.
+export async function lintContent(
+	runner: Runner,
+	root: string,
+	path: string,
+	content: string,
+	signal: AbortSignal,
+): Promise<Finding[]> {
+	if (runner.name === "biome") throw new Error("unsupported: Biome diagnostics require a private project snapshot");
+	const absolute = await workspacePath(root, path);
+	const cwd = await lintDirectory(root, absolute);
+	if (runner.name === "eslint") {
+		const printed = await run(runner.command, [...runner.prefix, "--print-config", absolute], cwd, signal);
+		if (printed.code !== 0) throw new Error(printed.stderr || "ESLint configuration unavailable");
+		const config: unknown = JSON.parse(printed.stdout);
+		if (!record(config)) throw new Error("unsupported: ESLint file has no matching configuration");
+		const options = record(config["languageOptions"])
+			? config["languageOptions"]["parserOptions"]
+			: config["parserOptions"];
+		if (record(options) && (options["project"] || options["projectService"]))
+			throw new Error(
+				"unsupported: type-aware ESLint project services cannot consume all plan overlays; use TypeScript diagnostics for types",
+			);
+	}
+	const args =
+		runner.name === "ruff"
+			? [
+					"check",
+					"--no-fix",
+					"--no-fix-only",
+					"--no-cache",
+					"--output-format",
+					"json",
+					"--stdin-filename",
+					absolute,
+					"-",
+				]
+			: ["--stdin", "--stdin-filename", absolute, "--format", "json", "--no-warn-ignored"];
+	const output = await run(runner.command, [...runner.prefix, ...args], cwd, signal, content);
+	if (![0, 1].includes(output.code)) throw new Error(output.stderr || `Runner exit ${output.code}`);
+	const data: unknown = JSON.parse(output.stdout);
+	if (runner.name === "eslint" && (!Array.isArray(data) || data.length !== 1))
+		throw new Error("unsupported: ESLint ignored the file or produced no report");
+	const findings = parseLint(runner.name, data, path, content);
+	if (findings.some((finding) => /ignored|not processed|configuration.*not found/i.test(finding.message)))
+		throw new Error("unsupported: lint file ignored or configuration unavailable");
+	return findings.map(({ lint: _lint, ...finding }) => finding);
 }
 async function exists(path: string): Promise<boolean> {
 	try {

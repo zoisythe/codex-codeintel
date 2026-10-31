@@ -19,6 +19,24 @@ export interface EditPlan {
 	identity: string;
 	files: PlannedFile[];
 	paths: string[];
+	createdAt: string;
+	expiresAt: string;
+	storage: "memory";
+}
+export type PlanFailureCode = "consumed" | "expired" | "evicted" | "unavailable" | "stale" | "conflict";
+export function isPlanFailureCode(value: unknown): value is PlanFailureCode {
+	return (
+		typeof value === "string" &&
+		["consumed", "expired", "evicted", "unavailable", "stale", "conflict"].includes(value)
+	);
+}
+export class PlanFailure extends Error {
+	constructor(
+		readonly planFailure: PlanFailureCode,
+		reason: string,
+	) {
+		super(reason);
+	}
 }
 export async function fileIdentity(path: string): Promise<string> {
 	const info = await lstat(path);
@@ -79,11 +97,32 @@ export function diffLines(file: PlannedFile): string[] {
 }
 export class EditPlans {
 	private readonly plans = new Map<string, EditPlan>();
+	private readonly ended = new Map<string, { reason: PlanFailureCode; until: number }>();
+	constructor(private readonly now: () => number = Date.now) {}
+	private remove(id: string, reason: PlanFailureCode): void {
+		this.plans.delete(id);
+		this.ended.set(id, { reason, until: this.now() + BUDGET.planTtl });
+		while (this.ended.size > 64) this.ended.delete(this.ended.keys().next().value ?? "");
+	}
+	private prune(): void {
+		const now = this.now();
+		for (const [id, entry] of this.ended) if (entry.until <= now) this.ended.delete(id);
+		for (const [id, plan] of this.plans) if (Date.parse(plan.expiresAt) <= now) this.remove(id, "expired");
+	}
+	hasLivePlans(): boolean {
+		this.prune();
+		return [...this.plans.values()].some((plan) => plan.files.length > 0);
+	}
 	create(identity: string, files: PlannedFile[], paths: string[] = files.map((file) => file.path)): EditPlan {
-		const plan = {
+		this.prune();
+		const now = this.now();
+		const plan: EditPlan = {
 			id: randomUUID(),
 			identity,
 			paths,
+			createdAt: new Date(now).toISOString(),
+			expiresAt: new Date(now + BUDGET.planTtl).toISOString(),
+			storage: "memory",
 			files: files.filter((file) => file.before !== file.after).sort((a, b) => a.path.localeCompare(b.path)),
 		};
 		if (
@@ -97,25 +136,33 @@ export class EditPlans {
 				.flatMap((plan) => plan.files)
 				.reduce((sum, file) => sum + Buffer.byteLength(file.before + file.after), 0);
 		while (this.plans.size > 16 || memory() > 8 * BUDGET.outputBytes)
-			this.plans.delete(this.plans.keys().next().value ?? "");
+			this.remove(this.plans.keys().next().value ?? "", "evicted");
 		return plan;
 	}
 	get(id: string): EditPlan {
+		this.prune();
 		const plan = this.plans.get(id);
-		if (!plan) throw new Error("Plan missing, consumed or expired; generate a new preview");
+		if (!plan) {
+			const reason = this.ended.get(id)?.reason ?? "unavailable";
+			throw new PlanFailure(reason, `Plan missing: ${reason}; generate a new preview`);
+		}
 		return plan;
 	}
 	clear(): void {
 		this.plans.clear();
+		this.ended.clear();
 	}
-	discard(id: string): void {
-		this.plans.delete(id);
+	discard(id: string, reason: PlanFailureCode = "stale"): void {
+		if (this.plans.has(id)) this.remove(id, reason);
 	}
 	async apply(id: string, identity: string, root: string, signal: AbortSignal): Promise<string[]> {
 		const plan = this.get(id);
-		this.plans.delete(id);
+		this.remove(id, "consumed");
 		if (plan.identity !== identity)
-			throw new Error("Plan stale: workspace, configuration, tools or environment changed; preview again");
+			throw new PlanFailure(
+				"stale",
+				"Plan stale: workspace, configuration, tools or environment changed; preview again",
+			);
 		const validate = async (file: PlannedFile) => {
 			const actual = await workspacePath(root, file.path);
 			if (
@@ -123,7 +170,7 @@ export class EditPlans {
 				(await fileIdentity(actual)) !== file.fileIdentity ||
 				(await readFile(actual, "utf8")) !== file.before
 			)
-				throw new Error(`Plan conflict: ${file.path}`);
+				throw new PlanFailure("conflict", `Plan conflict: ${file.path}`);
 		};
 		for (const file of plan.files) {
 			signal.throwIfAborted();
@@ -150,7 +197,7 @@ export class EditPlans {
 				(await readFile(writing.absolute, "utf8").catch(() => null)) !== writing.before
 			)
 				modified.push(writing.path);
-			throw new WriteFailure(message(error), modified);
+			throw new WriteFailure(message(error), modified, error instanceof PlanFailure ? error.planFailure : undefined);
 		}
 		return modified;
 	}

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
+import { waitWithSignal } from "../src/deadline.js";
 import { withExecution } from "../src/environment.js";
 import { HookCoordinator } from "../src/hook-coordinator.js";
 import { acknowledgeDelivery, consumeDelivery, queueDelivery } from "../src/hook-delivery.js";
@@ -22,7 +23,7 @@ async function until(action: () => Promise<boolean>): Promise<void> {
 }
 async function fixture(
 	action: (root: string, store: Metadata, coordinator: HookCoordinator, calls: string[][]) => Promise<void>,
-	slow = 0,
+	slow: number | (() => Promise<void>) = 0,
 ): Promise<void> {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-hook-flow-"))),
 		root = join(dir, "project"),
@@ -57,7 +58,8 @@ async function fixture(
 				},
 				check: async (paths, _session, _turn, generation, _wait, requestSignal) => {
 					calls.push(paths);
-					if (slow) await delay(slow, undefined, { signal: requestSignal });
+					if (typeof slow === "function") await waitWithSignal(slow(), requestSignal);
+					else if (slow) await delay(slow, undefined, { signal: requestSignal });
 					return {
 						generation,
 						note: "",
@@ -219,40 +221,53 @@ describe("native Hook routing and transport", () => {
 				JSON.stringify((await consumeDelivery(root, hookSession(b), "SubagentStop", signal())).output),
 			).toContain("broken b.ts");
 		}, 700));
-	it(
-		"unknown Interrupt detaches only shared waits, retains pending, and persists cancellation",
-		async () =>
-			fixture(async (root, store, coordinator, calls) => {
-				await writeFile(join(root, "a.ts"), "broken a");
-				await writeFile(join(root, "b.ts"), "broken b");
-				const main = post("", "a.ts", "unknown-main", "main"),
-					child = post("b", "b.ts", "unknown-child");
-				const registered = await registerHook(root, main, signal()),
-					other = await registerHook(root, child, signal());
-				await coordinator.ingest();
-				await until(async () => calls.length === 2);
-				const rootWait = await coordinator.request({ ...main, registration: registered?.id }, signal()),
-					childWait = await coordinator.request({ ...child, registration: other?.id }, signal());
-				const before = await store.read("s");
-				await coordinator.request({ session_id: "s", hook_event_name: "Interrupt" }, signal());
-				expect(
-					(
-						await coordinator.wait(
-							{ ...main, registration: registered?.id, waitToken: rootWait.waitToken },
-							signal(),
-						)
-					).state,
-				).toBe("cancelled");
-				expect(
-					(await coordinator.wait({ ...child, registration: other?.id, waitToken: childWait.waitToken }, signal()))
-						.state,
-				).not.toBe("cancelled");
-				expect((await store.read("s")).pending).toEqual(before.pending);
-				expect((await store.read("s")).waitEpoch).toBe(before.waitEpoch + 1);
-				await until(async () => !coordinator.active);
-			}, 700),
-		15000,
-	);
+	it("unknown Interrupt detaches only shared waits, retains pending, and persists cancellation", async () => {
+		let release: () => void = () => undefined;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await fixture(
+			async (root, store, coordinator, calls) => {
+				try {
+					await writeFile(join(root, "a.ts"), "broken a");
+					await writeFile(join(root, "b.ts"), "broken b");
+					const main = post("", "a.ts", "unknown-main", "main"),
+						child = post("b", "b.ts", "unknown-child");
+					const registered = await registerHook(root, main, signal()),
+						other = await registerHook(root, child, signal());
+					await coordinator.ingest();
+					await until(async () => calls.length === 2);
+					const rootWait = await coordinator.request({ ...main, registration: registered?.id }, signal()),
+						childWait = await coordinator.request({ ...child, registration: other?.id }, signal());
+					const before = await store.read("s");
+					await coordinator.request({ session_id: "s", hook_event_name: "Interrupt" }, signal());
+					expect((await store.read("s")).pending).toEqual(before.pending);
+					expect((await store.read("s")).waitEpoch).toBe(before.waitEpoch + 1);
+					expect(
+						(
+							await coordinator.wait(
+								{ ...main, registration: registered?.id, waitToken: rootWait.waitToken },
+								signal(),
+							)
+						).state,
+					).toBe("cancelled");
+					release();
+					expect(
+						(
+							await coordinator.wait(
+								{ ...child, registration: other?.id, waitToken: childWait.waitToken },
+								signal(),
+							)
+						).state,
+					).not.toBe("cancelled");
+					await until(async () => !coordinator.active);
+				} finally {
+					release();
+				}
+			},
+			() => blocked,
+		);
+	}, 15000);
 	it("retains pending when a different writer changes the analyzed snapshot", async () =>
 		fixture(async (root, store, coordinator, calls) => {
 			await writeFile(join(root, "a.ts"), "broken old");

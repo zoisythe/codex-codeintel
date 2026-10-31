@@ -1,19 +1,21 @@
 import { appendFileSync } from "node:fs";
-const log = process.env.CODEX_LSP_TEST_LOG;
+import assert from "node:assert/strict";
+import { record } from "../protocol.mjs";
+const log = process.env["CODEX_LSP_TEST_LOG"];
 if (log) appendFileSync(log, `${process.pid}\n`);
-if (process.env.CODEX_LSP_TEST_MODE === "startup-fail") { console.error("fixture initialization failure"); process.exit(8); }
+if (process.env["CODEX_LSP_TEST_MODE"] === "startup-fail") { console.error("fixture initialization failure"); process.exit(8); }
 let buffer = Buffer.alloc(0);
-const docs = new Map();
+/** @type {Map<string, string>} */ const docs = new Map();
 let initialized = false;
-function send(value) {
+function send(/** @type {Record<string, unknown>} */ value) {
 	const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", ...value }));
 	process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
 	process.stdout.write(body);
 }
-function handle(value) {
-	const { method, params = {}, id } = value;
-	if (process.env.CODEX_LSP_TEST_REQUESTS) appendFileSync(process.env.CODEX_LSP_TEST_REQUESTS, `${method}\n`);
-	const mode = process.env.CODEX_LSP_TEST_MODE;
+function handle(/** @type {import("../protocol-types.js").FixtureRequest} */ value) {
+	const { method, params, id } = value;
+	if (process.env["CODEX_LSP_TEST_REQUESTS"]) appendFileSync(process.env["CODEX_LSP_TEST_REQUESTS"], `${method}\n`);
+	const mode = process.env["CODEX_LSP_TEST_MODE"];
 	const pull = mode === "pull" || mode === "strict-initialize";
 	if (method === "initialized") { initialized = typeof value.params === "object" && value.params !== null; return; }
 	if (mode === "strict-initialize" && method !== "initialize" && method !== "exit" && !initialized) {
@@ -26,9 +28,9 @@ function handle(value) {
 	if (method === "textDocument/didOpen" || method === "textDocument/didChange") {
 		if (mode === "slow") return;
 		const doc = params.textDocument;
-		const text = doc.text ?? params.contentChanges[0].text;
+		const text = doc.text ?? params.contentChanges[0]?.text ?? "";
 		docs.set(doc.uri, text);
-		const uri = process.platform === "win32" ? doc.uri.replace(/^file:\/\/\/([A-Z]):/i, (_, drive) => `file:///${drive.toLowerCase()}%3A`) : doc.uri;
+		const uri = process.platform === "win32" ? doc.uri.replace(/^file:\/\/\/([A-Z]):/i, (/** @type {string} */ _, /** @type {string} */ drive) => `file:///${drive.toLowerCase()}%3A`) : doc.uri;
 		if (mode === "empty-unversioned") { send({method: "textDocument/publishDiagnostics", params: {uri, diagnostics: []}}); return; }
 		if (mode === "stale-version") { send({method: "textDocument/publishDiagnostics", params: {uri, version: doc.version - 1, diagnostics: []}}); return; }
 		if (pull) return;
@@ -41,7 +43,7 @@ function handle(value) {
 	if (method === "initialize") { send({ id, result: { capabilities: { ...(pull ? { diagnosticProvider: { interFileDependencies: true, workspaceDiagnostics: false } } : {}), ...(mode === "intelligence" ? {hoverProvider:true, declarationProvider:true,callHierarchyProvider:true,typeHierarchyProvider:true,completionProvider:{},codeActionProvider:{resolveProvider:true}} : {}), textDocumentSync: 1, definitionProvider: true, referencesProvider: true, documentSymbolProvider: true, documentFormattingProvider: true, renameProvider: mode === "rename-only" ? true : { prepareProvider: true } } } }); return; }
 	if (method === "textDocument/diagnostic" && pull) {
 		const text = docs.get(params.textDocument.uri) ?? "";
-		const items = text.split("\n").flatMap((line,index) => line.includes("broken") ? [{range:{start:{line:index,character:0},end:{line:index,character:6}},severity:1,source:"fake",message:"pull broken"}] : []);
+		const items = text.split("\n").flatMap((/** @type {string} */ line,/** @type {number} */ index) => line.includes("broken") ? [{range:{start:{line:index,character:0},end:{line:index,character:6}},severity:1,source:"fake",message:"pull broken"}] : []);
 		const reply = () => send({id,result: params.previousResultId === text ? {kind: "unchanged", resultId: text} : {kind: "full", resultId: text, items}});
 		if (text.includes("delayed-reply")) setTimeout(reply,8000); else reply();
 		return;
@@ -79,7 +81,9 @@ process.stdin.on("data", (chunk) => {
 		if (buffer.length < end + 4 + size) return;
 		const body = buffer.subarray(end + 4, end + 4 + size).toString();
 		buffer = buffer.subarray(end + 4 + size);
-		handle(JSON.parse(body));
+		/** @type {unknown} */ const value = JSON.parse(body);
+		assert(record(value) && typeof value["method"] === "string");
+		handle(/** @type {import("../protocol-types.js").FixtureRequest} */ (/** @type {unknown} */ ({ ...value, params: value["params"] ?? {} })));
 	}
 });
 

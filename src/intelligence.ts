@@ -8,6 +8,7 @@ import { applyTextChanges, workspacePath } from "./files.js";
 import type { Languages } from "./language.js";
 import type { TextEdit, WorkspaceEdit } from "./lsp/types.js";
 import { OutputPages } from "./output-pages.js";
+import { type PlanValidation, validationResult } from "./plan-validation.js";
 import { type Finding, type LintFix, message, record, text } from "./results.js";
 import { formatWithRunner, lintBatch, lintDirectory, run, select } from "./runners.js";
 import { contains, locations, outline, position, publicNavigation, publicOutline, sourceRange } from "./symbols.js";
@@ -85,14 +86,43 @@ export class Intelligence {
 		while (this.actions.size > 512) this.actions.delete(this.actions.keys().next().value ?? "");
 		return value;
 	}
-	private preview(identity: string, files: PlannedFile[]): Record<string, unknown> {
+	private async preview(
+		identity: string,
+		files: PlannedFile[],
+		args: Record<string, unknown>,
+		signal: AbortSignal,
+	): Promise<Record<string, unknown>> {
 		const plan = this.plans.create(identity, files, this.scope);
+		let validation: PlanValidation;
+		try {
+			validation =
+				args["validate"] === false
+					? validationResult(
+							"skipped",
+							plan.files.map((file) => file.path),
+							"Validation explicitly disabled",
+						)
+					: await this.language.validatePlan(
+							plan.files,
+							signal,
+							Array.isArray(args["validationPaths"])
+								? args["validationPaths"].filter((path): path is string => typeof path === "string")
+								: [],
+						);
+		} catch (error) {
+			this.plans.discard(plan.id);
+			throw error;
+		}
 		return {
 			status: plan.files.length ? "planned" : "unchanged",
 			plan: plan.id,
+			createdAt: plan.createdAt,
+			expiresAt: plan.expiresAt,
+			storage: plan.storage,
 			files: plan.files.map((file) => file.path),
 			diff: plan.files.flatMap(diffLines),
-			note: "Text edit plan only; apply writes it. Type/build effects have not been simulated.",
+			validation,
+			note: "Only apply writes this single-use plan. Validation is scoped evidence, not a build or behavior guarantee; restart or eviction may invalidate it before expiry.",
 		};
 	}
 	async execute(
@@ -110,7 +140,7 @@ export class Intelligence {
 		if (operation === "navigate") output = await this.language.navigate(args, signal);
 		else if (operation === "rename") {
 			const edit = await this.language.renameEdit(args, signal);
-			output = this.preview(identity, await workspaceEdits(this.root, edit));
+			output = await this.preview(identity, await workspaceEdits(this.root, edit), args, signal);
 		} else if (operation === "format") {
 			if (!config.formattingEnabled) throw new Error("Configuration error: formatting disabled");
 			const files: PlannedFile[] = [];
@@ -122,7 +152,7 @@ export class Intelligence {
 				const after = formatted?.after ?? applyTextChanges(before, await this.language.formatEdits(path, signal));
 				files.push(await plannedFile(this.root, path, after, before));
 			}
-			output = this.preview(identity, files);
+			output = await this.preview(identity, files, args, signal);
 		} else if (operation === "inspect")
 			output =
 				args["operation"] === "impact" ? await this.impact(args, paths, signal) : await this.inspect(args, signal);
@@ -479,7 +509,10 @@ export class Intelligence {
 						group.before,
 					),
 				);
-			return { ...this.preview(identity, files), ...(issues.length ? { partial: true, issues } : {}) };
+			return {
+				...(await this.preview(identity, files, args, signal)),
+				...(issues.length ? { partial: true, issues } : {}),
+			};
 		}
 		return this.listActions(args, paths, config, identity, signal);
 	}

@@ -24,8 +24,8 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 	await writeFile(config, JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const env = { ...process.env, CODEX_HOME: home, CODEX_LSP_CACHE: join(dir, "cache") };
-	const children = [];
-	let servicePid;
+	/** @type {import("node:child_process").ChildProcess[]} */ const children = [];
+	/** @type {number | undefined} */ let servicePid;
 	t.after(async () => {
 		for (const child of children) if (child.exitCode === null) child.kill();
 		if (servicePid) {
@@ -42,7 +42,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		const responses = new Map();
 		createInterface({input: child.stdout}).on("line", (line) => { const value = JSON.parse(line); responses.set(value.id, value); });
 		let id = 0;
-		const request = async (method, params) => {
+		const request = async (/** @type {string} */ method, /** @type {Record<string, unknown>} */ params) => {
 			const key = ++id;
 			child.stdin.write(`${JSON.stringify({jsonrpc: "2.0", id: key, method, params})}\n`);
 			const deadline = performance.now() + 50000;
@@ -52,14 +52,14 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 				assert.equal(child.exitCode, null, "MCP exited before responding");
 				await delay(5, undefined, {signal: t.signal});
 			}
-			assert.fail(`MCP request timed out: ${method} ${params?.name ?? ""}`);
+			assert.fail(`MCP request timed out: ${method} ${params?.["name"] ?? ""}`);
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
 		assert.equal(init.serverInfo.version, "0.10.0");
-		return {request, async call(name, args = {}) { let result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); if (["rename","format"].includes(name)) { result = await request("tools/call", {name:"apply",arguments:{workspace:root,session:"test",plan:result.structuredContent.plan}}); assert(!result.isError,JSON.stringify(result)); } return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
+		return {request, async call(/** @type {string} */ name, args = {}) { let result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); if (["rename","format"].includes(name)) { result = await request("tools/call", {name:"apply",arguments:{workspace:root,session:"test",plan:result.structuredContent.plan}}); assert(!result.isError,JSON.stringify(result)); } return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
-	const hook = (event) => {
+	const hook = (/** @type {string} */ event) => {
 		const child = spawnSync(process.execPath, [cli, "hook"], { cwd: root, env, encoding: "utf8", timeout: 10000, input: JSON.stringify({ cwd: root, session_id: "test", turn_id: "t1", hook_event_name: event }) });
 		assert.equal(child.status, 0, child.stderr);
 		return child.stdout;
@@ -106,7 +106,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const log = join(dir, "spawns");
 	await writeFile(join(dir, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 	const config = join(dir, "lsp-client.json");
-	const configure = (mode) => writeFile(config, JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"off",stop:"off"},lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
+	const configure = (/** @type {string} */ mode) => writeFile(config, JSON.stringify({schemaVersion:1,automaticDiagnostics:{postToolUse:"off",stop:"off"},lsp: {fake: {command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: {CODEX_LSP_TEST_LOG: log, CODEX_LSP_TEST_MODE: mode}}}}));
 	await configure("slow");
 	await writeFile(join(root, "a.fake"), "broken\n");
 	await writeFile(join(root, "b.fake"), "broken\n");
@@ -118,14 +118,14 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const results = new Map();
 	let stderr = ""; child.stderr.setEncoding("utf8").on("data", chunk => {stderr += chunk;});
 	createInterface({input: child.stdout}).on("line", (line) => {const value = JSON.parse(line); results.set(value.id, value.result);});
-	const until = async (condition) => {for(let i=0;i<2000;i++){if(await condition())return;await delay(5);}assert.fail(`Timed out; exit=${child.exitCode}; responses=${JSON.stringify([...results])}; stderr=${stderr}`);};
+	const until = async (/** @type {() => boolean | Promise<boolean>} */ condition) => {for(let i=0;i<2000;i++){if(await condition())return;await delay(5);}assert.fail(`Timed out; exit=${child.exitCode}; responses=${JSON.stringify([...results])}; stderr=${stderr}`);};
 	let sequence = 0;
-	const send = (method, params, id) => child.stdin.write(`${JSON.stringify({jsonrpc:"2.0", ...(id === undefined ? {} : {id}), method, params})}\n`);
-	const begin = (name, args) => {const id=++sequence;send("tools/call", {name,arguments:{workspace:root,session:"s",...args}},id);return id;};
-	const result = async (id) => {await until(()=>results.has(id));return results.get(id);};
-	const cancel = (id) => send("notifications/cancelled", {requestId:id});
+	const send = (/** @type {string} */ method, /** @type {Record<string, unknown>} */ params, /** @type {number | undefined} */ id = undefined) => child.stdin.write(`${JSON.stringify({jsonrpc:"2.0", ...(id === undefined ? {} : {id}), method, params})}\n`);
+	const begin = (/** @type {string} */ name, /** @type {import("./protocol-types.js").Arguments} */ args) => {const id=++sequence;send("tools/call", {name,arguments:{workspace:root,session:"s",...args}},id);return id;};
+	const result = async (/** @type {number} */ id) => {await until(()=>results.has(id));return results.get(id);};
+	const cancel = (/** @type {number} */ id) => send("notifications/cancelled", {requestId:id});
 	const pids = async () => (await readFile(log,"utf8").catch(()=>"")).trim().split("\n").filter(Boolean).map(Number);
-	const alive = (pid) => {try{process.kill(pid,0);return true;}catch{return false;}};
+	const alive = (/** @type {number} */ pid) => {try{process.kill(pid,0);return true;}catch{return false;}};
 	for (const args of [{mode:"all",refresh:true},{mode:"status",refresh:false},{mode:"full",refresh:"yes"}]) {
 		assert.equal((await result(begin("diagnostics", args))).isError,true);
 	}
@@ -134,7 +134,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	const queued = begin("diagnostics", {path:"b.fake"});
 	cancel(queued);
 	assert.match((await result(queued)).content[0].text,/cancelled|aborted/i);
-	assert(alive((await pids())[0]),"queued cancellation cannot kill the active LSP");
+	assert(alive(((await pids())[0] ?? assert.fail("No LSP process"))),"queued cancellation cannot kill the active LSP");
 	cancel(first);
 	assert.equal((await result(first)).isError,true);
 	assert((await pids()).every(alive), "executing request cancellation preserves the service clients");
@@ -170,7 +170,7 @@ test("MCP cancellation, partial writes, schema errors and recovery through the d
 	assert.match(checked.content[0].text,/fake\/E1/);
 	child.stdin.end();
 	assert.deepEqual(await exited,[0,null]);
-	assert(alive((await pids()).at(-1)),"EOF preserves shared analysis process");
+	assert(alive(((await pids()).at(-1) ?? assert.fail("No LSP process"))),"EOF preserves shared analysis process");
 });
 
 test("disabled automatic diagnostics establish no baseline and full mode requires migration", {timeout: 10000}, async t => {

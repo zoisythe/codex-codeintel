@@ -8,6 +8,7 @@ Conventions for humans and agents working on this repository.
 - ESM modules with `.js` suffix in import paths.
 - Tabs for indentation. Double quotes for strings.
 - Runtime is Node only.
+- Prefer Node 26 LTS for development; use the system installation through fnm when available. Keep the declared Node 24 compatibility checks.
 - Tests use vitest and should exercise Codex hook/MCP behavior before implementation changes.
 
 ## Commands

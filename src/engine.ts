@@ -4,6 +4,7 @@ import { dirname, relative, sep } from "node:path";
 import { BUDGET } from "./budgets.js";
 import { assertConfiguration, type Config, configuration } from "./config.js";
 import { configurationImpact, configurationLanguages } from "./config-files.js";
+import { PlanFailure } from "./edit-plans.js";
 import { automaticExecution, executionEnvironment } from "./environment.js";
 import { hash, type Inventory, indexStatistics, inventory, latestInventory, workspacePath } from "./files.js";
 import { isActorSession, rootSession } from "./hook-events.js";
@@ -48,26 +49,47 @@ export class Engine {
 	private previousSnapshot: Inventory | undefined;
 	private queue: Promise<unknown> = Promise.resolve();
 	private generation = 0;
+	hasLivePlans(): boolean {
+		return this.intelligence?.plans.hasLivePlans() ?? false;
+	}
 	async warmup(signal: AbortSignal): Promise<void> {
 		const config = await configuration(this.root);
 		if (config.automaticDiagnostics.postToolUse === "off" && config.automaticDiagnostics.stop === "off") return;
-		const snapshot = latestInventory(this.root);
-		if (!snapshot?.complete) return;
-		const representatives = new Map<string, { path: string; count: number }>();
-		for (const path of snapshot.files.keys()) {
-			const language = codeLanguage(config, path);
-			if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
-				continue;
-			const entry = representatives.get(language);
-			if (entry) entry.count++;
-			else representatives.set(language, { path, count: 1 });
+		await this.dispatch("warmup", {}, signal);
+	}
+	private async prepareServers(
+		args: Record<string, unknown>,
+		config: Config,
+		signal: AbortSignal,
+	): Promise<ToolOutput> {
+		if (args["cursor"]) throw new Error("Cursor invalid; repeat warmup without cursor");
+		const bounded = AbortSignal.any([signal, AbortSignal.timeout(BUDGET.warmup)]);
+		let paths: string[];
+		if (args["path"] || args["paths"]) paths = (await this.paths(args, bounded)).paths;
+		else {
+			const snapshot = await inventory(this.root, BUDGET.files, bounded, config.exclude);
+			if (!snapshot.complete)
+				return { operation: "warmup", status: "partial", items: [], reason: "Workspace inventory incomplete" };
+			const representatives = new Map<string, { path: string; count: number }>();
+			for (const path of [...snapshot.files.keys()].sort()) {
+				const language = codeLanguage(config, path);
+				if (!language || configurationImpact(path).length || ["json", "yaml", "css", "html"].includes(language))
+					continue;
+				const entry = representatives.get(language);
+				if (entry) entry.count++;
+				else representatives.set(language, { path, count: 1 });
+			}
+			paths = [...representatives.entries()]
+				.sort(([a, x], [b, y]) => y.count - x.count || a.localeCompare(b))
+				.slice(0, 2)
+				.map(([, entry]) => entry.path);
 		}
+		if (paths.length > 200) throw new Error("At most 200 explicit warmup files; narrow scope");
 		this.language ??= new Languages(this.root, config);
 		await this.language.update(config);
-		for (const entry of [...representatives.values()].sort((a, b) => b.count - a.count).slice(0, 2)) {
-			signal.throwIfAborted();
-			await this.language.preflight(entry.path, signal).catch(() => undefined);
-		}
+		const result = await this.language.warmup(paths, bounded);
+		signal.throwIfAborted();
+		return { operation: "warmup", ...result };
 	}
 	private pages = new Map<
 		string,
@@ -391,6 +413,7 @@ export class Engine {
 			};
 		}
 		if (!(operation === "diagnostics" && args["run"] === "cached")) assertConfiguration(config);
+		if (operation === "warmup") return this.prepareServers(args, config, signal);
 		if (operation === "automatic_batch") {
 			const paths = Array.isArray(args["paths"])
 				? args["paths"].filter((path): path is string => typeof path === "string")
@@ -459,13 +482,19 @@ export class Engine {
 					...(Array.isArray(args["paths"])
 						? args["paths"].filter((path): path is string => typeof path === "string")
 						: []),
+					...(Array.isArray(args["validationPaths"])
+						? args["validationPaths"].filter((path): path is string => typeof path === "string")
+						: []),
 				]),
 			];
 			let identity: string;
 			try {
 				identity = await this.intelligenceIdentity(bindings, config, signal);
 			} catch (error) {
-				if (operation === "apply") this.intelligence.plans.discard(text(args["plan"]));
+				if (operation === "apply") {
+					this.intelligence.plans.discard(text(args["plan"]));
+					throw new PlanFailure("stale", `Plan stale: ${message(error)}; preview again`);
+				}
 				throw error;
 			}
 			if (operation === "apply") {
@@ -489,8 +518,10 @@ export class Engine {
 				}
 			}
 			const output = await this.intelligence.execute(operation, args, paths, config, identity, signal, bindings);
-			if (identity !== (await this.intelligenceIdentity(bindings, config, signal)))
+			if (identity !== (await this.intelligenceIdentity(bindings, config, signal))) {
+				if (typeof output["plan"] === "string") this.intelligence.plans.discard(output["plan"]);
 				throw new Error("Workspace or tools changed during query; repeat without cursor");
+			}
 			return { ...output, operation };
 		}
 

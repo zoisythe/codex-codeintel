@@ -18,7 +18,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	await writeFile(preload, `import fs from "node:fs";const path=${JSON.stringify(clockFile)};const now=Date.now;Date.now=()=>now()+Number(fs.readFileSync(path,"utf8"));process.on("message",value=>{fs.writeFileSync(path,String(Number(fs.readFileSync(path,"utf8"))+value));process.send?.("advanced")});`);
 	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") }, resolve("dist/cli.js"), ["--import", pathToFileURL(preload).href]);
 	t.after(async () => { await client.close(); await rm(dir, { recursive: true, force: true }); });
-	const configure = mode => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
+	const configure = (/** @type {string} */ mode) => writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, automaticDiagnostics: { postToolUse: "off", stop: "off" }, lsp: { fake: { command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".fake"], env: { CODEX_LSP_TEST_MODE: mode, CODEX_LSP_TEST_LOG: log } } } }));
 	await writeFile(join(root, "main.fake"), "broken\n");
 	const check = (extra = {}) => client.call("diagnostics", { path: "main.fake", source: "lsp", ...extra });
 	await configure("pull");
@@ -30,11 +30,11 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	await configure("rename-only");
 	assert.equal((await client.call("navigate", { path: "main.fake", operation: "prepare_rename" })).structuredContent.status, "unsupported");
 	assert.equal((await client.call("navigate", { path: "main.fake", operation: "hover" })).structuredContent.status, "unsupported");
-	assert.equal((await check()).structuredContent.results[0].state, "complete", "unsupported capability leaves the language enabled");
+	assert.equal((await check()).structuredContent.results[0]?.state, "complete", "unsupported capability leaves the language enabled");
 	await configure("empty-unversioned");
-	assert.equal((await check()).structuredContent.results[0].state, "pending");
-	assert.equal((await check()).structuredContent.results[0].state, "pending", "same unversioned empty cannot become clean on a hot request");
-	await configure("stale-version"); assert.equal((await check()).structuredContent.results[0].state, "pending");
+	assert.equal((await check()).structuredContent.results[0]?.state, "pending");
+	assert.equal((await check()).structuredContent.results[0]?.state, "pending", "same unversioned empty cannot become clean on a hot request");
+	await configure("stale-version"); assert.equal((await check()).structuredContent.results[0]?.state, "pending");
 	await configure("late"); await writeFile(join(root, "main.fake"), "broken\n");
 	const start = performance.now(); assert.equal((await check()).structuredContent.errors, 1); assert(performance.now() - start >= 300);
 	await configure("startup-fail"); assert((await check()).isError);
@@ -48,7 +48,7 @@ test("bundle pull reports, push freshness, failure expiry and refresh", { timeou
 	assert((await client.call("lsp_diagnostics", { path: "main.fake" })).isError);
 });
 
-test("bundle idle release keeps stdio alive and starts a new client", { timeout: 15000 }, async t => {
+test("bundle idle release keeps stdio alive, honors plan keepalive and drops expired plans on restart", { timeout: 25000 }, async t => {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-idle-"))), root = join(dir, "project"), home = join(dir, "home"), log = join(dir, "launches");
 	await mkdir(root); await mkdir(home);
 	await writeFile(join(root, "a.fake"), "broken\n");
@@ -65,4 +65,21 @@ test("bundle idle release keeps stdio alive and starts a new client", { timeout:
 	assert.throws(() => process.kill(firstPid, 0));
 	assert(!(await client.call("diagnostics", { path: "a.fake", source: "lsp" })).isError);
 	assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
+	const plan = await client.call("format", { path: "a.fake" });
+	assert(!plan.isError); assert.equal(plan.structuredContent.storage, "memory");
+	const servicePid = (await client.call("status")).structuredContent.service.pid;
+	assert(typeof servicePid === "number");
+	await writeFile(clockFile, "602000");
+	await new Promise(resolve => setTimeout(resolve, 1800));
+	assert.doesNotThrow(() => process.kill(servicePid, 0), "A live plan keeps the service alive past ordinary idle");
+	assert(!(await client.call("apply", { plan: plan.structuredContent.plan })).isError);
+	await writeFile(join(root, "a.fake"), "broken\n");
+	const expired = await client.call("format", { path: "a.fake" });
+	assert(!expired.isError);
+	await writeFile(clockFile, "2403000");
+	await new Promise(resolve => setTimeout(resolve, 1800));
+	assert.throws(() => process.kill(servicePid, 0), "An expired plan no longer keeps the service alive");
+	const missing = await client.call("apply", { plan: expired.structuredContent.plan });
+	assert(missing.isError); assert.equal(missing.structuredContent.planFailure, "unavailable");
+	assert.deepEqual(missing.structuredContent.modifiedPaths, []);
 });

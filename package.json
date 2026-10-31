@@ -3,7 +3,7 @@
 	"version": "0.10.0",
 	"description": "Codex code intelligence with LSP/lint diagnostics, symbol navigation, rename, formatting, and automatic Hooks.",
 	"type": "module",
-	"packageManager": "npm@11.12.1",
+	"packageManager": "npm@12.2.1",
 	"license": "MIT",
 	"homepage": "https://github.com/zoisythe/codex-codeintel",
 	"repository": {
@@ -22,7 +22,7 @@
 		"diagnostics"
 	],
 	"bin": {
-		"codex-codeintel": "./dist/cli.js"
+		"codeintel": "./dist/cli.js"
 	},
 	"files": [
 		"dist",
@@ -40,21 +40,22 @@
 	],
 	"scripts": {
 		"build": "node scripts/build.mjs",
-		"test": "node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript && npm run test:features",
+		"test": "node scripts/prepare-features.mjs && node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript && npm run test:features",
 		"test:watch": "node ./node_modules/vitest/vitest.mjs",
-		"typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
+		"typecheck": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --project tsconfig.test-js.json",
 		"lint": "node ./node_modules/@biomejs/biome/bin/biome check src test scripts",
 		"lint:fix": "node ./node_modules/@biomejs/biome/bin/biome check --write src test scripts",
-		"check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
+		"check": "npm run typecheck && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
 		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs test/automatic-e2e.test.mjs test/background-hooks-e2e.test.mjs",
 		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
 		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs test/automatic-real-e2e.test.mjs test/setup-profile-e2e.test.mjs",
 		"test:features": "node scripts/prepare-features.mjs && node --test test/features-e2e.test.mjs",
-		"test:rust": "node --test test/rust-e2e.test.mjs"
+		"test:rust": "node --test test/rust-e2e.test.mjs",
+		"test:features:ci": "node scripts/prepare-features.mjs && node scripts/real-tools-ci.mjs test"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.12",
-		"@types/node": "^22.12.0",
+		"@types/node": "^24.0.0",
 		"esbuild": "0.28.2",
 		"eslint": "9.39.4",
 		"smol-toml": "1.7.0",
@@ -64,7 +65,7 @@
 		"vitest": "^5.0.0"
 	},
 	"engines": {
-		"node": ">=22.12.0"
+		"node": "^24.20.0 || ^26.13.0"
 	},
 	"author": "zoisythe"
 }

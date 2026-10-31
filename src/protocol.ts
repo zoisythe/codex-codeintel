@@ -36,6 +36,19 @@ const selector = {
 	pattern: string,
 };
 const cursor = { cursor: string };
+const validation = {
+	validate: {
+		type: "boolean",
+		description: "Preview scoped diagnostics with installed local language/lint tools; false skips simulation.",
+	},
+	validationPaths: {
+		type: "array",
+		items: string,
+		maxItems: 20,
+		description:
+			"Up to 20 additional existing files (for example unchanged callers) to check against all plan overlays.",
+	},
+};
 const choice = (...values: string[]) => ({ type: "string", enum: values });
 export const LEGACY_TOOLS: Record<string, string> = {
 	check_project: "check",
@@ -77,6 +90,13 @@ export const TOOLS = [
 		true,
 	),
 	tool(
+		"warmup",
+		"Initialize local LSP servers without diagnostics or downloads. Explicit files or two representative languages.",
+		{ ...scope, ...cursor },
+		[],
+		true,
+	),
+	tool(
 		"navigate",
 		"Read-only navigation; 1-based UTF-16 positions, symbol path or @@ anchor. Follow next for large results.",
 		{
@@ -107,14 +127,14 @@ export const TOOLS = [
 	tool(
 		"rename",
 		"Preview a cross-file rename. Returns a plan; only apply writes files.",
-		{ ...scope, ...selector, ...cursor, newName: string },
+		{ ...scope, ...selector, ...cursor, ...validation, newName: string },
 		["path", "newName"],
 		true,
 	),
 	tool(
 		"format",
 		"Preview formatting of explicit files. Returns a plan; only apply writes files.",
-		{ ...scope, ...cursor },
+		{ ...scope, ...cursor, ...validation },
 		[],
 		true,
 	),
@@ -150,6 +170,7 @@ export const TOOLS = [
 			rule: string,
 			ids: { type: "array", items: string, maxItems: 200 },
 			details: { type: "boolean" },
+			...validation,
 		},
 		["operation"],
 		true,
@@ -164,6 +185,15 @@ export const TOOLS = [
 ];
 
 function validateArguments(name: string, args: Record<string, unknown>): void {
+	if (
+		name === "actions" &&
+		(args["validate"] !== undefined || args["validationPaths"] !== undefined) &&
+		args["operation"] !== "preview" &&
+		!args["cursor"]
+	)
+		throw new Error("validate requires actions operation=preview");
+	if (args["validate"] === false && args["validationPaths"] !== undefined)
+		throw new Error("validationPaths requires validation enabled");
 	if (
 		args["refresh"] !== undefined &&
 		!(name === "status" || (["diagnostics", "check"].includes(name) && args["run"] !== "cached"))
@@ -194,9 +224,11 @@ function validateArguments(name: string, args: Record<string, unknown>): void {
 		}
 		if (
 			schema["type"] === "array" &&
-			(!Array.isArray(value) || value.length > 200 || !value.every((item) => typeof item === "string"))
+			(!Array.isArray(value) ||
+				value.length > (typeof schema["maxItems"] === "number" ? schema["maxItems"] : 200) ||
+				!value.every((item) => typeof item === "string"))
 		)
-			throw new Error(`${key} must contain at most 200 strings`);
+			throw new Error(`${key} must contain at most ${schema["maxItems"] ?? 200} strings`);
 		if (Array.isArray(schema["enum"]) && !schema["enum"].includes(value)) throw new Error(`Invalid ${key}`);
 	}
 }
