@@ -129,7 +129,8 @@ export interface FixtureRequest {
 	method: string;
 	id?: number | string;
 	params: {
-		textDocument: { uri: string; version: number; text?: string };
+		textDocument: { uri: string; version: number; text?: string; languageId?: string };
+		settings?: unknown;
 		contentChanges: { text: string }[];
 		previousResultId?: string;
 		newName: string;

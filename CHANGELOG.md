@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Support custom LSP settings, language IDs and workspace-folder requests for MATLAB, preserving the default Objective-C mapping for `.m` files.
+- Add delivered-bundle MATLAB acceptance and portable Rust fixtures, including both suites in `npm test` behind `REAL_TOOLS=1`. Add individual/local suite commands, configurable MATLAB paths and optional MCP traces; locate rustfmt in the selected toolchain and keep Rust references independent of standard-library macro expansion.
+- Rename the real-tool switch to `REAL_TOOLS` across tests, scripts and CI; enable it in Rust CI. Add `npm run ci` for local type checking, lint, build and tests with the same switch.
 - Breaking: require Node 24.20+ on 24.x or 26.13+ on 26.x; develop and deliver with Node 26 and npm 12.2.1. Rename the npm CLI to codeintel without a legacy alias.
 - Add warmup as the tenth MCP tool and CLI command. Initialize installed local servers independently of automatic feedback, with no diagnostics baseline or temporary downloads.
 - Give memory plans a fixed 30-minute lifetime and bounded service keepalive, expose expiry metadata and precise planFailure reasons, retaining single-use and conflict checks.

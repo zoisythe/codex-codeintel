@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 
 // Opt-in actual toolchain acceptance; ordinary bundle tests remain hermetic.
-const enabled = process.env["CODEX_LSP_REAL_TOOLS"] === "1";
+const enabled = process.env["REAL_TOOLS"] === "1";
 test("delivered bundle: Python, C, C++ and Cargo workspace", { skip: !enabled, timeout: 180000 }, async t => {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-three-")));
 	const root = join(dir, "project"), home = join(dir, "home");

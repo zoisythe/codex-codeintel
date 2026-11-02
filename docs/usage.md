@@ -28,7 +28,7 @@ codex plugin add codex-codeintel@codex-codeintel
 
 | 字段 | 含义 |
 | --- | --- |
-| lsp | 语言到内置名称、false 或自定义 command/extensions/env/initialization 对象的映射 |
+| lsp | 语言到内置名称、false 或自定义 command/extensions/env/initialization/settings/languageId 对象的映射 |
 | lint.javascript | auto、biome、eslint、off |
 | lint.python | auto、ruff、off |
 | formatting | tabSize（1–16）、insertSpaces |
@@ -227,9 +227,17 @@ deliveryId、sourceTurn 和内容快照随交付保留，发送前复核新鲜�
 
 `.github/workflows/rust.yml` 独立运行于 Linux 和 Windows，固定 Rust 1.99.1 及配套的 rust-analyzer、rust-src、rustfmt。工具只安装到 CI runner，本机日常开发和默认 `npm test` 不要求 Rust。
 
-`npm run test:rust` 是需要已准备工具链的真实验收入口；缺少工具会失败，不会跳过。用例通过已交付 bundle 验证诊断及修复后的更新、符号/锚点定位、引用和调用、组合探索与候选测试关联、重命名/格式化/Code Action 的预览与 apply，以及 Cargo 工作区检查。fixture 只依赖本地 path crate，预先生成 lockfile，检查期间禁用依赖下载。
+`npm run test:rust` 与 Python 等真实工具测试统一使用 `REAL_TOOLS=1` 开关；默认跳过，显式启用后缺少工具会失败。Rust CI 设置该开关，使用已交付 bundle 验证诊断及修复后的更新、符号/锚点定位、引用和调用、组合探索与候选测试关联、重命名/格式化/Code Action 的预览与 apply，以及 Cargo 工作区检查。fixture 只依赖本地 path crate，预先生成 lockfile，检查期间禁用依赖下载。
 
 CI 保留工具版本、测试日志及 MCP/fixture 记录为 `rust-<os>` artifact，保留 14 天。日志成功上传不代表验收通过，应以对应 job 的结果为准。新入口与历史多语言 `test:real` 的 Rust 开关独立。
+
+### 本机 Rust 与 MATLAB LSP 验收
+
+`npm test` 通过 `test:local` 顺序登记 Rust 和 MATLAB MCP 验收，未设置 `REAL_TOOLS=1` 时跳过。显式启用后，也可单独运行 `npm run test:local`，或分别运行 `npm run test:rust`、`npm run test:matlab`。测试使用 `dist/cli.js`，源码修改后先运行 `npm run build`；启用后缺少工具时失败。
+
+MATLAB 测试自动查找 `~/.vscode/extensions/mathworks.language-matlab-*` 中的官方服务及 PATH 上的 MATLAB；也可用 `CODEX_LSP_MATLAB_SERVER` 指向服务的 `out/index.js`，用 `CODEX_LSP_MATLAB_INSTALL_PATH` 指定 MATLAB 安装根目录。验收会启动独立的本地 MATLAB 分析进程，需要可用许可证。默认 `npm test` 和现有 CI 无需安装 MATLAB。配置、覆盖范围与记录方式见 [本机 LSP 验收](testing/local-lsp.md)。
+
+自定义 LSP 的 `settings` 按节名称传给 `workspace/configuration`，并用于配置变更通知。`languageId` 显式设置 `didOpen` 的语言标识，例如 MATLAB 的 `matlab`；未设置时沿用扩展名映射，`.m` 的默认 Objective-C 标识保持兼容。
 
 <a id="limits"></a>
 ## 范围限制与本地数据

@@ -36,11 +36,13 @@
 		"CHANGELOG.md",
 		"docs/usage.md",
 		"docs/testing/hooks-host.md",
+		"docs/testing/local-lsp.md",
 		"docs/examples/*.json"
 	],
 	"scripts": {
 		"build": "node scripts/build.mjs",
-		"test": "node scripts/prepare-features.mjs && node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript && npm run test:features",
+		"ci": "npm run check && npm test",
+		"test": "node scripts/prepare-features.mjs && node ./node_modules/vitest/vitest.mjs --run && npm run test:install && npm run test:typescript && npm run test:features && npm run test:local",
 		"test:watch": "node ./node_modules/vitest/vitest.mjs",
 		"typecheck": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --project tsconfig.test-js.json",
 		"lint": "node ./node_modules/@biomejs/biome/bin/biome check src test scripts",
@@ -51,6 +53,8 @@
 		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs test/automatic-real-e2e.test.mjs test/setup-profile-e2e.test.mjs",
 		"test:features": "node scripts/prepare-features.mjs && node --test test/features-e2e.test.mjs",
 		"test:rust": "node --test test/rust-e2e.test.mjs",
+		"test:matlab": "node --test test/matlab-e2e.test.mjs",
+		"test:local": "node --test --test-concurrency=1 test/rust-e2e.test.mjs test/matlab-e2e.test.mjs",
 		"test:features:ci": "node scripts/prepare-features.mjs && node scripts/real-tools-ci.mjs test"
 	},
 	"devDependencies": {

@@ -76,17 +76,20 @@ See the [usage guide](docs/usage.md), [configuration examples](docs/examples/), 
 
 ```sh
 npm ci --ignore-scripts
-npm run check
-npm test
-CODEX_LSP_REAL_TOOLS=1 npm run test:features
+npm run ci
+REAL_TOOLS=1 npm run test:features
 git diff --check
 ```
 
 The feature script prepares a separately pinned TypeScript 5 fixture under test/fixtures so its executable cannot replace the native TypeScript 7 compiler. This preparation is test-only.
 
-Default tests include delivered MCP behavior, native TypeScript, traditional TypeScript, Biome and ESLint. Real feature acceptance additionally covers Ruff, ty, clangd and Go/gopls.
+`npm run ci` runs strict type checks, Biome, the build and `npm test` on the current host and Node version. Set `REAL_TOOLS=1` to include the real-tool cases, including Rust and MATLAB; they are skipped by default. Use `npm ci` to install locked dependencies and `npm run ci` to run validation.
 
-The independent [Rust workflow](.github/workflows/rust.yml) runs on Linux and Windows with Rust 1.99.1 and matching rust-analyzer, rust-src and rustfmt. It tests the committed bundle without npm dependencies, using an offline Cargo workspace with local path dependencies. `npm run test:rust` explicitly runs this suite on a prepared Rust host; missing tools fail rather than skip. It is separate from `npm test` and requires no Rust installation on ordinary development machines. CI saves tool versions, test logs and fixture/MCP traces as `rust-<os>` artifacts for 14 days. Legacy mixed-language tests retain the `CODEX_LSP_TEST_RUST=1` opt-in.
+Default tests include delivered MCP behavior, native TypeScript, traditional TypeScript, Biome and ESLint. Real-tool cases require `REAL_TOOLS=1`; Ruff, ty, clangd, Go/gopls, Rust and MATLAB acceptance are skipped by default.
+
+`npm test` includes the gated Rust and MATLAB suites through `test:local`, running them sequentially. Use `REAL_TOOLS=1 npm run test:local` to run only these two suites, or select `test:rust` / `test:matlab` with the same environment variable. MATLAB acceptance discovers the MathWorks VS Code extension and MATLAB on PATH, or accepts explicit server and installation paths. It starts a local MATLAB analysis process and requires a working license. Missing prerequisites fail an enabled suite. See [local LSP acceptance](docs/testing/local-lsp.md) for configuration, coverage and trace capture.
+
+The independent [Rust workflow](.github/workflows/rust.yml) runs on Linux and Windows with Rust 1.99.1 and matching rust-analyzer, rust-src and rustfmt. It sets `REAL_TOOLS=1` and tests the committed bundle without npm dependencies, using an offline Cargo workspace with local path dependencies. Default local runs skip the suite and require no Rust installation. CI saves tool versions, test logs and fixture/MCP traces as `rust-<os>` artifacts for 14 days. Legacy mixed-language tests retain the additional `CODEX_LSP_TEST_RUST=1` opt-in.
 
 Core CI targets Linux/macOS/Windows with Node 24.20.0 and 26.13.0; dependency-free delivery uses Node 26.13.0. The [real-tools workflow](.github/workflows/real-tools.yml) adds Linux/Windows acceptance with pinned Go/gopls, Ruff 0.17.3, ty 0.0.95 and LLVM/clangd 23.1.4, checks for skipped acceptance cases, and retains versions, reports and fixture/MCP traces for 14 days. Local engineering evidence is kept under ignored `docs/history/`.
 

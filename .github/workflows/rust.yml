@@ -34,6 +34,7 @@ jobs:
       CARGO_NET_OFFLINE: "true"
       CARGO_BUILD_JOBS: "2"
       RAYON_NUM_THREADS: "4"
+      REAL_TOOLS: "1"
       CODEX_LSP_RUST_ARTIFACTS: test-results/rust
     steps:
       - name: Checkout

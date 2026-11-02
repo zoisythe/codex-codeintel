@@ -15,6 +15,8 @@ export interface Server {
 	readonly source: string;
 	readonly env?: Readonly<Record<string, string>>;
 	readonly initialization?: Readonly<Record<string, unknown>>;
+	readonly settings?: Readonly<Record<string, unknown>>;
+	readonly languageId?: string;
 }
 export interface Config {
 	readonly schemaVersion: 1;
@@ -149,7 +151,7 @@ function server(value: unknown, language: string, source: string): Server | fals
 	const item = builtin ?? value;
 	if (!record(item)) throw new Error(`lsp.${language} must be a built-in name, custom server or false`);
 	for (const key of Object.keys(item))
-		if (!["command", "extensions", "env", "initialization"].includes(key))
+		if (!["command", "extensions", "env", "initialization", "settings", "languageId"].includes(key))
 			throw new Error(`Invalid lsp.${language}.${key}; priority/disabled were removed; use false to disable`);
 	const command = item["command"];
 	const extensions = item["extensions"];
@@ -163,10 +165,15 @@ function server(value: unknown, language: string, source: string): Server | fals
 		throw new Error(`lsp.${language}.extensions requires dot-prefixed extensions`);
 	const env = item["env"];
 	const initialization = item["initialization"];
+	const settings = item["settings"];
+	const languageId = item["languageId"];
 	if (env !== undefined && (!record(env) || !Object.values(env).every((v) => typeof v === "string")))
 		throw new Error(`Invalid lsp.${language}.env`);
 	if (initialization !== undefined && !record(initialization))
 		throw new Error(`Invalid lsp.${language}.initialization`);
+	if (settings !== undefined && !record(settings)) throw new Error(`Invalid lsp.${language}.settings`);
+	if (languageId !== undefined && (typeof languageId !== "string" || !languageId.trim()))
+		throw new Error(`Invalid lsp.${language}.languageId`);
 	return {
 		id: typeof value === "string" ? value : language,
 		command,
@@ -175,6 +182,8 @@ function server(value: unknown, language: string, source: string): Server | fals
 		source,
 		...(env ? { env: env as Record<string, string> } : {}),
 		...(initialization ? { initialization: initialization as Record<string, unknown> } : {}),
+		...(settings ? { settings } : {}),
+		...(typeof languageId === "string" ? { languageId } : {}),
 	};
 }
 function freeze<T>(value: T): T {

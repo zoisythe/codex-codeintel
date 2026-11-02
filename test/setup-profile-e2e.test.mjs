@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-const enabled = process.env["CODEX_LSP_REAL_TOOLS"] === "1";
+const enabled = process.env["REAL_TOOLS"] === "1";
 test("packed setupLSP: isolated global defaults, mixed project coverage, read-only validation and offline failure", { skip: !enabled, timeout: 120000 }, async t => {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-setup-"))), root = join(dir, "mixed"), home = join(dir, "global"), install = join(dir, "installed");
 	await mkdir(root); await mkdir(home);

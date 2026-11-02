@@ -38,7 +38,7 @@ export class LspClient extends LspClientConnection {
 
 		if (!this.openedFiles.has(absPath)) {
 			const ext = extname(absPath);
-			const languageId = getLanguageId(ext);
+			const languageId = this.server.languageId ?? getLanguageId(ext);
 			const version = 1;
 
 			await this.sendNotification("textDocument/didOpen", {

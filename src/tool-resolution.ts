@@ -173,6 +173,8 @@ export async function resolveServer(
 			priority: 0,
 			...(entry.server.env ? { env: { ...entry.server.env } } : {}),
 			...(entry.server.initialization ? { initialization: { ...entry.server.initialization } } : {}),
+			...(entry.server.settings ? { settings: { ...entry.server.settings } } : {}),
+			...(entry.server.languageId ? { languageId: entry.server.languageId } : {}),
 		},
 	};
 }

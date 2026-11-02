@@ -24,7 +24,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CODEX_LSP_REAL_TOOLS: "1"
+      REAL_TOOLS: "1"
       CODEX_LSP_ARTIFACTS: test-results/real-tools
       GOTOOLCHAIN: local
     steps:

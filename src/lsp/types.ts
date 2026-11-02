@@ -7,6 +7,8 @@ export interface LspServerConfig {
 	disabled?: boolean;
 	env?: Record<string, string>;
 	initialization?: Record<string, unknown>;
+	settings?: Record<string, unknown>;
+	languageId?: string;
 }
 
 export interface ResolvedServer {
@@ -16,6 +18,8 @@ export interface ResolvedServer {
 	priority: number;
 	env?: Record<string, string>;
 	initialization?: Record<string, unknown>;
+	settings?: Record<string, unknown>;
+	languageId?: string;
 }
 
 export interface ServerLookupInfo {

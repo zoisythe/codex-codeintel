@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-const enabled = process.env["CODEX_LSP_REAL_TOOLS"] === "1";
+const enabled = process.env["REAL_TOOLS"] === "1";
 test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic edit and repair feedback", { skip: !enabled, timeout: 240000 }, async t => {
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-auto-real-"))), tools = join(dir, "tools");
 	const setup = spawnSync("npm", ["install", "--prefix", tools, "--no-audit", "--no-fund", "typescript-language-server", "typescript@5.9.3"], { encoding: "utf8", timeout: 90000 });

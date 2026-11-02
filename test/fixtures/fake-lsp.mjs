@@ -7,6 +7,7 @@ if (process.env["CODEX_LSP_TEST_MODE"] === "startup-fail") { console.error("fixt
 let buffer = Buffer.alloc(0);
 /** @type {Map<string, string>} */ const docs = new Map();
 let initialized = false;
+let configured = false;
 function send(/** @type {Record<string, unknown>} */ value) {
 	const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", ...value }));
 	process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
@@ -17,6 +18,19 @@ function handle(/** @type {import("../protocol-types.js").FixtureRequest} */ val
 	if (process.env["CODEX_LSP_TEST_REQUESTS"]) appendFileSync(process.env["CODEX_LSP_TEST_REQUESTS"], `${method}\n`);
 	const mode = process.env["CODEX_LSP_TEST_MODE"];
 	const pull = mode === "pull" || mode === "strict-initialize";
+	if (mode === "custom-config") {
+		if (method === "initialized") {
+			send({ id: "fixture-configuration", method: "workspace/configuration", params: { items: [{ section: "MATLAB" }, { section: "MATLAB.installPath" }, { section: "MATLAB.indexWorkspace" }, { section: "json" }, {}] } });
+			send({ id: "fixture-folders", method: "workspace/workspaceFolders", params: {} });
+		}
+		if (method === "workspace/didChangeConfiguration") {
+			assert.deepEqual(params["settings"], { json: { validate: { enable: true } }, MATLAB: { installPath: "fixture-matlab", indexWorkspace: false } });
+		}
+		if (method === "textDocument/didOpen") {
+			assert(configured, "server configuration must arrive before analysis");
+			assert.equal(params.textDocument["languageId"], process.env["CODEX_LSP_TEST_LANGUAGE_ID"]);
+		}
+	}
 	if (method === "initialized") { initialized = typeof value.params === "object" && value.params !== null; return; }
 	if (mode === "strict-initialize" && method !== "initialize" && method !== "exit" && !initialized) {
 		if (id !== undefined) send({ id, error: { code: -32002, message: "Server not initialized: initialized requires object params" } });
@@ -82,6 +96,17 @@ process.stdin.on("data", (chunk) => {
 		const body = buffer.subarray(end + 4, end + 4 + size).toString();
 		buffer = buffer.subarray(end + 4 + size);
 		/** @type {unknown} */ const value = JSON.parse(body);
+		if (record(value) && value["id"] === "fixture-configuration") {
+			const settings = { installPath: "fixture-matlab", indexWorkspace: false };
+			assert.deepEqual(value["result"], [settings, "fixture-matlab", false, { validate: { enable: true } }, { json: { validate: { enable: true } }, MATLAB: settings }]);
+			configured = true;
+			continue;
+		}
+		if (record(value) && value["id"] === "fixture-folders") {
+			assert(Array.isArray(value["result"]) && value["result"].length === 1);
+			assert.match(value["result"][0].uri, /^file:/);
+			continue;
+		}
 		assert(record(value) && typeof value["method"] === "string");
 		handle(/** @type {import("../protocol-types.js").FixtureRequest} */ (/** @type {unknown} */ ({ ...value, params: value["params"] ?? {} })));
 	}

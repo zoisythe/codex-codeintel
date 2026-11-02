@@ -46,7 +46,7 @@ if (process.argv[2] === "prepare") {
 	await appendFile(process.env.GITHUB_PATH, `${execFileSync("uv", ["tool", "dir", "--bin"], { encoding: "utf8" }).trim()}\n`);
 	await appendFile(process.env.GITHUB_PATH, `${join(execFileSync("go", ["env", "GOPATH"], { encoding: "utf8" }).trim(), "bin")}\n`);
 } else if (process.argv[2] === "test") {
-	assert.equal(process.env.CODEX_LSP_REAL_TOOLS, "1", "Real tools must be explicitly enabled");
+	assert.equal(process.env.REAL_TOOLS, "1", "Set REAL_TOOLS=1 to run real-tool acceptance");
 	const recorded = [];
 	for (const [command, args, expected] of versions) {
 		const text = execFileSync(command, args, { encoding: "utf8", windowsHide: true }).trim();

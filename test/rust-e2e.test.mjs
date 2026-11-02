@@ -2,19 +2,21 @@ import { navigationArray } from "./protocol.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-// This file is an explicit real-tool suite, separate from npm test. Missing tools
-// fail acceptance instead of silently turning the dedicated CI job into a skip.
+// Real-tool acceptance is opt-in. Once enabled, missing tools fail the suite.
+const enabled = process.env["REAL_TOOLS"] === "1";
 const files = ["core/src/lib.rs", "app/src/lib.rs", "app/tests/usage.rs", "Cargo.lock"];
 const library = "/// Return twice the supplied value.\npub fn twice(value:i32)->i32{value*2}\n";
 const application = "pub fn caller() -> i32 {\n    codeintel_fixture_core::twice(2)\n}\n";
-const usage = "#[test]\nfn uses_twice() {\n    assert_eq!(codeintel_fixture_core::twice(2), 4);\n}\n";
+// Keep the reference outside a standard-library macro so navigation coverage
+// does not depend on rust-src being installed on a standalone Rust host.
+const usage = "#[test]\nfn uses_twice() {\n    let actual = codeintel_fixture_core::twice(2);\n    assert_eq!(actual, 4);\n}\n";
 const local = (/** @type {string} */ value) => value.replaceAll("\\", "/");
 
 async function fixture(/** @type {import("node:test").TestContext} */ t, /** @type {string} */ name) {
@@ -82,6 +84,12 @@ async function fixture(/** @type {import("node:test").TestContext} */ t, /** @ty
 		error: lock.error?.message,
 	});
 	assert.equal(lock.status, 0, lock.error?.message ?? lock.stderr);
+	const sysroot = spawnSync("rustc", ["--print", "sysroot"], {
+		env: environment, encoding: "utf8", windowsHide: true, timeout: 10000,
+	});
+	assert.equal(sysroot.status, 0, sysroot.error?.message ?? sysroot.stderr);
+	const rustfmt = join(sysroot.stdout.trim(), "bin", process.platform === "win32" ? "rustfmt.exe" : "rustfmt");
+	assert((await stat(rustfmt)).isFile(), "The selected Rust toolchain must include rustfmt");
 	await writeFile(
 		join(home, "lsp-client.json"),
 		JSON.stringify({
@@ -99,6 +107,7 @@ async function fixture(/** @type {import("node:test").TestContext} */ t, /** @ty
 						cargo: { buildScripts: { enable: false }, metadataExtraArgs: ["--locked"] },
 						check: { extraArgs: ["--locked"] },
 						procMacro: { enable: false },
+						rustfmt: { overrideCommand: [rustfmt] },
 					},
 				},
 			},
@@ -158,6 +167,7 @@ async function fixture(/** @type {import("node:test").TestContext} */ t, /** @ty
 }
 
 test("real Rust: diagnostics, selectors, navigation, context and candidate test impact", {
+	skip: !enabled,
 	timeout: 240000,
 }, async (t) => {
 	const f = await fixture(t, "navigation");
@@ -216,7 +226,7 @@ test("real Rust: diagnostics, selectors, navigation, context and candidate test 
 	assert.equal((await f.diagnostics("app/src/lib.rs")).errors, 0, "repairs must clear stale diagnostics");
 });
 
-test("real Rust: rename, rustfmt and Code Action plans write only through apply", { timeout: 240000 }, async (t) => {
+test("real Rust: rename, rustfmt and Code Action plans write only through apply", { skip: !enabled, timeout: 240000 }, async (t) => {
 	const f = await fixture(t, "plans");
 	assert.equal((await f.diagnostics("core/src/lib.rs")).errors, 0);
 	let before = await f.hashes();
@@ -270,7 +280,7 @@ test("real Rust: rename, rustfmt and Code Action plans write only through apply"
 	assert.equal((await f.check()).errors, 0);
 });
 
-test("real Rust: Cargo workspace checks report and clear located compiler failures", { timeout: 180000 }, async (t) => {
+test("real Rust: Cargo workspace checks report and clear located compiler failures", { skip: !enabled, timeout: 180000 }, async (t) => {
 	const f = await fixture(t, "checks");
 	assert.equal((await f.check()).errors, 0);
 	await writeFile(join(f.root, "app/src/lib.rs"), 'pub fn caller() -> i32 { "wrong" }\n');

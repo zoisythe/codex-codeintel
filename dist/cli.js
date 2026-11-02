@@ -626,7 +626,7 @@ function server(value, language, source) {
   const item = builtin ?? value;
   if (!record(item)) throw new Error(`lsp.${language} must be a built-in name, custom server or false`);
   for (const key of Object.keys(item))
-    if (!["command", "extensions", "env", "initialization"].includes(key))
+    if (!["command", "extensions", "env", "initialization", "settings", "languageId"].includes(key))
       throw new Error(`Invalid lsp.${language}.${key}; priority/disabled were removed; use false to disable`);
   const command = item["command"];
   const extensions = item["extensions"];
@@ -636,10 +636,15 @@ function server(value, language, source) {
     throw new Error(`lsp.${language}.extensions requires dot-prefixed extensions`);
   const env = item["env"];
   const initialization = item["initialization"];
+  const settings = item["settings"];
+  const languageId = item["languageId"];
   if (env !== void 0 && (!record(env) || !Object.values(env).every((v) => typeof v === "string")))
     throw new Error(`Invalid lsp.${language}.env`);
   if (initialization !== void 0 && !record(initialization))
     throw new Error(`Invalid lsp.${language}.initialization`);
+  if (settings !== void 0 && !record(settings)) throw new Error(`Invalid lsp.${language}.settings`);
+  if (languageId !== void 0 && (typeof languageId !== "string" || !languageId.trim()))
+    throw new Error(`Invalid lsp.${language}.languageId`);
   return {
     id: typeof value === "string" ? value : language,
     command,
@@ -647,7 +652,9 @@ function server(value, language, source) {
     explicit: !builtin,
     source,
     ...env ? { env } : {},
-    ...initialization ? { initialization } : {}
+    ...initialization ? { initialization } : {},
+    ...settings ? { settings } : {},
+    ...typeof languageId === "string" ? { languageId } : {}
   };
 }
 function freeze(value) {
@@ -1659,7 +1666,9 @@ async function resolveServer(root, path, config, allowTemporary = true) {
       extensions: [...entry.server.extensions],
       priority: 0,
       ...entry.server.env ? { env: { ...entry.server.env } } : {},
-      ...entry.server.initialization ? { initialization: { ...entry.server.initialization } } : {}
+      ...entry.server.initialization ? { initialization: { ...entry.server.initialization } } : {},
+      ...entry.server.settings ? { settings: { ...entry.server.settings } } : {},
+      ...entry.server.languageId ? { languageId: entry.server.languageId } : {}
     }
   };
 }
@@ -4545,7 +4554,8 @@ ${body}`;
 });
 
 // src/lsp/transport.ts
-import { delimiter as delimiter3 } from "node:path";
+import { basename as basename5, delimiter as delimiter3 } from "node:path";
+import { pathToFileURL as pathToFileURL2 } from "node:url";
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -4599,6 +4609,9 @@ var init_transport = __esm({
       command() {
         return [...this.server.command];
       }
+      configurationSettings() {
+        return { json: { validate: { enable: true } }, ...this.server.settings };
+      }
       async start() {
         const env = {
           ...this.environment,
@@ -4630,12 +4643,16 @@ var init_transport = __esm({
         this.connection.onRequest("workspace/configuration", (params) => {
           const items2 = parseConfigurationItems(params);
           return items2.map((item) => {
-            if (item.section === "json") return { validate: { enable: true } };
-            return {};
+            let value = this.configurationSettings();
+            for (const key of item.section?.split(".") ?? []) value = isRecord(value) ? value[key] : void 0;
+            return value ?? {};
           });
         });
         this.connection.onRequest("client/registerCapability", () => null);
         this.connection.onRequest("window/workDoneProgress/create", () => null);
+        this.connection.onRequest("workspace/workspaceFolders", () => [
+          { uri: pathToFileURL2(this.root).href, name: basename5(this.root) }
+        ]);
         this.connection.onClose(() => {
           this.processExited = true;
         });
@@ -4756,7 +4773,7 @@ var init_transport = __esm({
 });
 
 // src/lsp/connection.ts
-import { pathToFileURL as pathToFileURL2 } from "node:url";
+import { pathToFileURL as pathToFileURL3 } from "node:url";
 var INITIALIZE_SETTLE_MS, LspClientConnection;
 var init_connection = __esm({
   "src/lsp/connection.ts"() {
@@ -4765,7 +4782,7 @@ var init_connection = __esm({
     INITIALIZE_SETTLE_MS = 300;
     LspClientConnection = class extends LspClientTransport {
       async initialize() {
-        const rootUri = pathToFileURL2(this.root).href;
+        const rootUri = pathToFileURL3(this.root).href;
         await this.sendRequest("initialize", {
           processId: process.pid,
           rootUri,
@@ -4827,7 +4844,7 @@ var init_connection = __esm({
         });
         await this.sendNotification("initialized");
         await this.sendNotification("workspace/didChangeConfiguration", {
-          settings: { json: { validate: { enable: true } } }
+          settings: this.configurationSettings()
         });
         await new Promise((r) => setTimeout(r, INITIALIZE_SETTLE_MS));
       }
@@ -4981,7 +4998,7 @@ var init_language_mappings = __esm({
 // src/lsp/client.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { extname as extname4, resolve as resolve10 } from "node:path";
-import { pathToFileURL as pathToFileURL3 } from "node:url";
+import { pathToFileURL as pathToFileURL4 } from "node:url";
 var POST_OPEN_DELAY_MS, POST_DIAGNOSTICS_WAIT_MS, LspClient;
 var init_client = __esm({
   "src/lsp/client.ts"() {
@@ -5003,11 +5020,11 @@ var init_client = __esm({
       }
       async openFile(filePath) {
         const absPath = resolve10(filePath);
-        const uri = pathToFileURL3(absPath).href;
+        const uri = pathToFileURL4(absPath).href;
         const text2 = readFileSync2(absPath, "utf-8");
         if (!this.openedFiles.has(absPath)) {
           const ext = extname4(absPath);
-          const languageId = getLanguageId(ext);
+          const languageId = this.server.languageId ?? getLanguageId(ext);
           const version = 1;
           await this.sendNotification("textDocument/didOpen", {
             textDocument: {
@@ -5045,7 +5062,7 @@ var init_client = __esm({
         return this.sendRequest(
           "textDocument/definition",
           {
-            textDocument: { uri: pathToFileURL3(absPath).href },
+            textDocument: { uri: pathToFileURL4(absPath).href },
             position: { line: line - 1, character }
           }
         );
@@ -5054,7 +5071,7 @@ var init_client = __esm({
         const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/references", {
-          textDocument: { uri: pathToFileURL3(absPath).href },
+          textDocument: { uri: pathToFileURL4(absPath).href },
           position: { line: line - 1, character },
           context: { includeDeclaration }
         });
@@ -5063,7 +5080,7 @@ var init_client = __esm({
         const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/documentSymbol", {
-          textDocument: { uri: pathToFileURL3(absPath).href }
+          textDocument: { uri: pathToFileURL4(absPath).href }
         });
       }
       async workspaceSymbols(query) {
@@ -5077,7 +5094,7 @@ var init_client = __esm({
       }
       async diagnostics(filePath) {
         const absPath = resolve10(filePath);
-        const uri = pathToFileURL3(absPath).href;
+        const uri = pathToFileURL4(absPath).href;
         await this.openFile(absPath);
         await new Promise((r) => setTimeout(r, POST_DIAGNOSTICS_WAIT_MS));
         try {
@@ -5100,7 +5117,7 @@ var init_client = __esm({
         return this.sendRequest(
           "textDocument/prepareRename",
           {
-            textDocument: { uri: pathToFileURL3(absPath).href },
+            textDocument: { uri: pathToFileURL4(absPath).href },
             position: { line: line - 1, character }
           }
         );
@@ -5109,7 +5126,7 @@ var init_client = __esm({
         const absPath = resolve10(filePath);
         await this.openFile(absPath);
         return this.sendRequest("textDocument/rename", {
-          textDocument: { uri: pathToFileURL3(absPath).href },
+          textDocument: { uri: pathToFileURL4(absPath).href },
           position: { line: line - 1, character },
           newName
         });
@@ -7103,12 +7120,12 @@ var init_workspace_root = __esm({
 // src/language.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 import { readFile as readFile16, stat as stat6 } from "node:fs/promises";
-import { basename as basename5, dirname as dirname10, extname as extname5, resolve as resolve12 } from "node:path";
-import { fileURLToPath as fileURLToPath5, pathToFileURL as pathToFileURL4 } from "node:url";
+import { basename as basename6, dirname as dirname10, extname as extname5, resolve as resolve12 } from "node:path";
+import { fileURLToPath as fileURLToPath5, pathToFileURL as pathToFileURL5 } from "node:url";
 function diagnosticUriKey(uri) {
   try {
     const path = fileURLToPath5(uri);
-    return pathToFileURL4(
+    return pathToFileURL5(
       process.platform === "win32" ? path.replace(/^[A-Z]:/, (drive) => drive.toLowerCase()) : path
     ).href;
   } catch {
@@ -7281,7 +7298,7 @@ var init_language = __esm({
         if (!this.capabilities[capability[method] ?? ""]) return { status: "unsupported", operation: method };
         await this.openFile(path);
         return this.sendRequest(`textDocument/${method}`, {
-          textDocument: { uri: pathToFileURL4(path).href },
+          textDocument: { uri: pathToFileURL5(path).href },
           position: { line: line - 1, character }
         });
       }
@@ -7323,7 +7340,7 @@ var init_language = __esm({
         await this.openContent(path, await readFile16(path, "utf8"));
       }
       async openContent(path, content, force = false) {
-        const uri = pathToFileURL4(path).href;
+        const uri = pathToFileURL5(path).href;
         const previous = this.versions.get(uri);
         if (!force && previous?.content === content && !this.dirty.has(uri)) return;
         this.dirty.delete(uri);
@@ -7337,14 +7354,19 @@ var init_language = __esm({
           });
         } else {
           await this.sendNotification("textDocument/didOpen", {
-            textDocument: { uri, version, languageId: getLanguageId(extname5(path)), text: content }
+            textDocument: {
+              uri,
+              version,
+              languageId: this.server.languageId ?? getLanguageId(extname5(path)),
+              text: content
+            }
           });
         }
         if (this.isRustAnalyzer()) this.progressAt = Date.now();
       }
       async overlayDiagnostics(path, signal) {
         if (!this.connection) throw new Error("LSP connection unavailable");
-        const uri = pathToFileURL4(path).href;
+        const uri = pathToFileURL5(path).href;
         const version = this.versions.get(uri)?.version;
         if (!this.capabilities["diagnosticProvider"]) {
           if (this.server.command.some((part) => /typescript-language-server/.test(part)))
@@ -7377,7 +7399,7 @@ var init_language = __esm({
         if (this.server.command.some((part) => /clangd(?:\.exe)?$/.test(part))) {
           await this.openContent(path, `${content}
 `, true);
-          await this.query("textDocument/documentSymbol", { textDocument: { uri: pathToFileURL4(path).href } });
+          await this.query("textDocument/documentSymbol", { textDocument: { uri: pathToFileURL5(path).href } });
         }
         await this.openContent(path, content, true);
       }
@@ -7434,7 +7456,7 @@ var init_language = __esm({
           this.pulls.delete(uri);
         }
         for (const { path, type } of changes) {
-          const uri = pathToFileURL4(path).href;
+          const uri = pathToFileURL5(path).href;
           if (type === 3) {
             if (this.versions.has(uri)) await this.sendNotification("textDocument/didClose", { textDocument: { uri } });
             this.versions.delete(uri);
@@ -7444,11 +7466,11 @@ var init_language = __esm({
           } else if (this.versions.has(uri)) await this.openFile(path);
         }
         await this.sendNotification("workspace/didChangeWatchedFiles", {
-          changes: changes.map(({ path, type }) => ({ uri: pathToFileURL4(path).href, type }))
+          changes: changes.map(({ path, type }) => ({ uri: pathToFileURL5(path).href, type }))
         });
       }
       async collect(path, signal) {
-        const uri = pathToFileURL4(path).href;
+        const uri = pathToFileURL5(path).href;
         const cold = !this.versions.has(uri);
         await this.openFile(path);
         const settling = Date.now() + (cold ? BUDGET.lspCold : BUDGET.lspWarm);
@@ -7503,7 +7525,7 @@ var init_language = __esm({
         if (!this.supports("format")) throw new Error("unsupported: document formatting");
         await this.openFile(path);
         return await this.sendRequest("textDocument/formatting", {
-          textDocument: { uri: pathToFileURL4(path).href },
+          textDocument: { uri: pathToFileURL5(path).href },
           options
         }) ?? [];
       }
@@ -7753,7 +7775,7 @@ var init_language = __esm({
               const target = await this.serverTarget(file.absolute, bounded2, false);
               const provider = language === "python" ? "ty" : language === "typescript" ? "typescript" : language === "go" ? "gopls" : "clangd";
               const commands = target.resolved.server.command.join(" ");
-              const known = provider === "typescript" ? /typescript-language-server|(?:^|[\\/ ])(?:tsc|tsgo)(?:\.exe|\.cmd)?(?: |$)/i.test(commands) : target.resolved.server.id === provider || new RegExp(provider, "i").test(basename5(target.resolved.tool.command[0] ?? ""));
+              const known = provider === "typescript" ? /typescript-language-server|(?:^|[\\/ ])(?:tsc|tsgo)(?:\.exe|\.cmd)?(?: |$)/i.test(commands) : target.resolved.server.id === provider || new RegExp(provider, "i").test(basename6(target.resolved.tool.command[0] ?? ""));
               if (!known) throw new Error("unsupported: configured server has no validated overlay adapter");
               if (provider === "gopls")
                 target.resolved.server.initialization = {
@@ -8043,7 +8065,7 @@ var init_language = __esm({
             }
             const pos = await position2(path, args, symbols);
             await client.openFile(path);
-            const textDocument = { uri: pathToFileURL4(path).href };
+            const textDocument = { uri: pathToFileURL5(path).href };
             const point = { line: pos.line - 1, character: pos.column - 1 };
             let result;
             if (operation === "rename") {
@@ -10530,7 +10552,7 @@ var init_project_output = __esm({
 import { randomUUID as randomUUID11 } from "node:crypto";
 import { readdir as readdir6, readFile as readFile21, stat as stat8 } from "node:fs/promises";
 import * as nodePath2 from "node:path";
-import { basename as basename6, join as join18, relative as relative11, resolve as resolve14 } from "node:path";
+import { basename as basename7, join as join18, relative as relative11, resolve as resolve14 } from "node:path";
 import { setTimeout as delay5 } from "node:timers/promises";
 function normalizedPattern(pattern) {
   return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
@@ -10700,7 +10722,7 @@ var init_project_checks = __esm({
                 // Only interpreter launch scripts belong to the tool identity.
                 tool2.command.slice(1).filter(
                   (arg, index, args) => /^(?:node|python(?:\d+(?:\.\d+)*)?|bash|sh)(?:\.exe)?$/.test(
-                    basename6(tool2.command[0] ?? "")
+                    basename7(tool2.command[0] ?? "")
                   ) && /\.(?:[cm]?js|py|sh)$/.test(arg) && !args.slice(0, index).some((previous) => /\.(?:[cm]?js|py|sh)$/.test(previous))
                 ).map(async (arg) => {
                   const info = await stat8(resolve14(cwd, arg)).catch(() => void 0);

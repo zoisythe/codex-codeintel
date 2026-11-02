@@ -94,6 +94,7 @@ describe("plugin package metadata", () => {
 			"CHANGELOG.md",
 			"docs/usage.md",
 			"docs/testing/hooks-host.md",
+			"docs/testing/local-lsp.md",
 			"docs/examples/*.json",
 		]);
 		expect(packageJson.files).toContain("skills");

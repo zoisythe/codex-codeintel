@@ -1,6 +1,7 @@
 // Adapted from zoisythe/lsp-tools-mcp @ 9cc6f753d04834c148d08bbca72e3b483d6301b2.
 // Copyright (c) 2026 Yeongyu Kim. MIT; see NOTICE and src/lsp/LICENSE.
-import { delimiter } from "node:path";
+import { basename, delimiter } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { reportBestEffortCleanupError } from "./cleanup-errors.js";
 import { REQUEST_TIMEOUT_MS, STOP_HARD_KILL_TIMEOUT_MS, STOP_SIGKILL_GRACE_MS } from "./constants.js";
@@ -60,6 +61,10 @@ export class LspClientTransport {
 		return [...this.server.command];
 	}
 
+	protected configurationSettings(): Record<string, unknown> {
+		return { json: { validate: { enable: true } }, ...this.server.settings };
+	}
+
 	async start(): Promise<void> {
 		const env: Record<string, string | undefined> = {
 			...this.environment,
@@ -97,13 +102,17 @@ export class LspClientTransport {
 		this.connection.onRequest("workspace/configuration", (params) => {
 			const items = parseConfigurationItems(params);
 			return items.map((item) => {
-				if (item.section === "json") return { validate: { enable: true } };
-				return {};
+				let value: unknown = this.configurationSettings();
+				for (const key of item.section?.split(".") ?? []) value = isRecord(value) ? value[key] : undefined;
+				return value ?? {};
 			});
 		});
 
 		this.connection.onRequest("client/registerCapability", () => null);
 		this.connection.onRequest("window/workDoneProgress/create", () => null);
+		this.connection.onRequest("workspace/workspaceFolders", () => [
+			{ uri: pathToFileURL(this.root).href, name: basename(this.root) },
+		]);
 
 		this.connection.onClose(() => {
 			this.processExited = true;

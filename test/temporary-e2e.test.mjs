@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { bundleClient } from "./bundle-client.mjs";
 
-test("real temporary ty/Ruff preparation, offline reuse and Hook direct execution", { timeout: 150000, skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
+test("real temporary ty/Ruff preparation, offline reuse and Hook direct execution", { timeout: 150000, skip: process.env["REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
 	const uv = spawnSync("which", ["uv"], { encoding: "utf8" }).stdout.trim();
 	const uvx = spawnSync("which", ["uvx"], { encoding: "utf8" }).stdout.trim();
 	const python = spawnSync(uv, ["python", "find"], { encoding: "utf8" }).stdout.trim();
@@ -51,7 +51,7 @@ test("real temporary ty/Ruff preparation, offline reuse and Hook direct executio
 });
 
 for (const [server, recipe] of [["typescript", "typescript@5.9.3"], ["tsc", "typescript@7.0.2"]]) {
-test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
+test(`real npx ${server} recipe works offline after preparation`, { timeout: 150000, skip: process.env["REAL_TOOLS"] !== "1" || process.platform !== "linux" }, async t => {
 	const npx = spawnSync("which", ["npx"], { encoding: "utf8" }).stdout.trim(); assert(npx);
 	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-npx-"))), root = join(dir, "project"), home = join(dir, "home"), bin = join(dir, "bin");
 	await mkdir(root); await mkdir(home); await mkdir(bin);

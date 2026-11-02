@@ -252,7 +252,12 @@ class Client extends LspClient {
 			});
 		} else {
 			await this.sendNotification("textDocument/didOpen", {
-				textDocument: { uri, version, languageId: getLanguageId(extname(path)), text: content },
+				textDocument: {
+					uri,
+					version,
+					languageId: this.server.languageId ?? getLanguageId(extname(path)),
+					text: content,
+				},
 			});
 		}
 		if (this.isRustAnalyzer()) this.progressAt = Date.now();

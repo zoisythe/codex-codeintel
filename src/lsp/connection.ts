@@ -70,7 +70,7 @@ export class LspClientConnection extends LspClientTransport {
 		});
 		await this.sendNotification("initialized");
 		await this.sendNotification("workspace/didChangeConfiguration", {
-			settings: { json: { validate: { enable: true } } },
+			settings: this.configurationSettings(),
 		});
 		// Some servers accept initialized before their diagnostics/indexing handlers are ready.
 		await new Promise((r) => setTimeout(r, INITIALIZE_SETTLE_MS));

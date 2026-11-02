@@ -83,7 +83,7 @@ test("traditional TypeScript server: symbol selectors, relationships, completion
 	assert(focused.indirect.length);
 	assert.equal(await readFile(join(root, "a.ts"), "utf8"), before);
 });
-test("real Ruff: classified fixes and rule explanation through delivered MCP", { skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
+test("real Ruff: classified fixes and rule explanation through delivered MCP", { skip: process.env["REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
 	const { root, call } = await fixture(t);
 	await writeFile(join(root, "ruff.toml"), '[lint]\nselect=["F401"]\n');
 	const before = '\ufeffimport os\r\nvalue="😀"\r\n'; await writeFile(join(root, "a.py"), before);
@@ -93,7 +93,7 @@ test("real Ruff: classified fixes and rule explanation through delivered MCP", {
 	await call("apply", { plan: preview.plan }); assert.equal(await readFile(join(root, "a.py"), "utf8"), '\ufeffvalue="😀"\r\n');
 	const explained = await call("actions", { operation: "explain", path: "a.py", rule: "F401" }); assert.match(explained.explanation ?? "", /unused-import/i);
 });
-test("real Go/gopls: diagnostics, calls, selectors, rename/format plans, actions and project checks", { skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1", timeout: 60000 }, async t => {
+test("real Go/gopls: diagnostics, calls, selectors, rename/format plans, actions and project checks", { skip: process.env["REAL_TOOLS"] !== "1", timeout: 60000 }, async t => {
 	const { root, client, call } = await fixture(t, { go: "gopls" });
 	await writeFile(join(root, "go.mod"), "module example.com/fixture\n\ngo 1.23\n");
 	await writeFile(join(root, "value.go"), 'package fixture\nfunc Greet(value string) string { return value }\n');
@@ -116,7 +116,7 @@ test("real Go/gopls: diagnostics, calls, selectors, rename/format plans, actions
 	assert(!(await client.call("status", { path: "value.go" })).isError);
 });
 
-test("real ty: type diagnostics and previewed Python rename", { skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
+test("real ty: type diagnostics and previewed Python rename", { skip: process.env["REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
 	const { root, home, dir, client, call } = await fixture(t, { python: "ty" });
 	await writeFile(join(root, "pyproject.toml"), '[project]\nname="fixture"\nversion="0.1.0"\nrequires-python=">=3.13"\n');
 	await writeFile(join(root, "a.py"), 'def greet(value: str) -> str:\n    return value\n\nresult: str = greet("hello")\n');
@@ -137,7 +137,7 @@ test("real ty: type diagnostics and previewed Python rename", { skip: process.en
 	const broken = await call("diagnostics", { path: "a.py", source: "lsp" }); assert(broken.errors > 0);
 });
 
-for (const extension of ["c", "cpp"]) test(`real clangd: ${extension} navigation and cross-file-safe edit plans`, { skip: process.env["CODEX_LSP_REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
+for (const extension of ["c", "cpp"]) test(`real clangd: ${extension} navigation and cross-file-safe edit plans`, { skip: process.env["REAL_TOOLS"] !== "1", timeout: 30000 }, async t => {
 	const { root, call } = await fixture(t, { cpp: "clangd" });
 	await writeFile(join(root, "compile_flags.txt"), extension === "c" ? "-xc\n-std=c17\n" : "-xc++\n-std=c++17\n");
 	const path = `a.${extension}`;

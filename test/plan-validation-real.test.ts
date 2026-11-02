@@ -156,7 +156,7 @@ for (const kind of ["native", "traditional"] as const)
 			await language.close();
 		}
 	}, 30000);
-it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
+it.skipIf(process.env["REAL_TOOLS"] !== "1")(
 	"Ruff stdin preview complements ty without writing source or caches",
 	async () => {
 		const { root, put, validate, language } = await fixture({}, { python: "ruff" });
@@ -176,7 +176,7 @@ it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
 	},
 	30000,
 );
-it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
+it.skipIf(process.env["REAL_TOOLS"] !== "1")(
 	"ty preview checks explicitly selected unchanged dependents",
 	async () => {
 		const { put, validate, language } = await fixture({ python: "ty" });
@@ -194,7 +194,7 @@ it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
 	},
 	30000,
 );
-it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
+it.skipIf(process.env["REAL_TOOLS"] !== "1")(
 	"gopls pull preview sees changed and unchanged package files together",
 	async () => {
 		const { root, put, validate, language } = await fixture({ go: "gopls" });
@@ -247,7 +247,7 @@ it("private project snapshots are removed after an interrupted analysis", async 
 	}
 });
 for (const extension of ["c", "cpp"])
-	it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
+	it.skipIf(process.env["REAL_TOOLS"] !== "1")(
 		`clangd ${extension} preview observes unsaved header overlays in unchanged translation units`,
 		async () => {
 			const { root, put, validate, language } = await fixture({ cpp: "clangd" });

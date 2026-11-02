@@ -134,3 +134,30 @@ test("bundle local priority, ecosystem launchers, failure isolation, trust and m
 	const hook = spawnSync(process.execPath, [resolve("dist/cli.js"), "hook"], { cwd: root, env: { ...process.env, CODEX_HOME: home, PATH: bin, CODEX_LSP_CACHE: join(dir, "cache"), LSP_TOOLS_MCP_USER_CONFIG: "obsolete" }, input: JSON.stringify({ cwd: root, session_id: "s", hook_event_name: "SessionEnd" }), encoding: "utf8" });
 	assert.equal(hook.status, 0); assert.equal(hook.stdout, "", "cleanup survives configuration errors");
 });
+
+test("custom LSP settings and language IDs reach the server without changing extension defaults", { timeout: 30000 }, async t => {
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codeintel-settings-")));
+	const root = join(dir, "project"), home = join(dir, "home");
+	await mkdir(root); await mkdir(home);
+	const client = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
+	t.after(async () => {
+		try { await client.close(); }
+		finally {
+			assert.equal(resolve(dir, ".."), await realpath(tmpdir()));
+			await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		}
+	});
+	await writeFile(join(root, "fixture.m"), "broken\n");
+	for (const languageId of ["matlab", undefined]) {
+		await writeFile(join(home, "lsp-client.json"), JSON.stringify({ schemaVersion: 1, lsp: { matlab: {
+			command: [process.execPath, resolve("test/fixtures/fake-lsp.mjs")], extensions: [".m"],
+			...(languageId ? { languageId } : {}),
+			settings: { MATLAB: { installPath: "fixture-matlab", indexWorkspace: false } },
+			env: { CODEX_LSP_TEST_MODE: "custom-config", CODEX_LSP_TEST_LANGUAGE_ID: languageId ?? "objective-c" },
+		} } }));
+		const result = await client.full("diagnostics", { path: "fixture.m", source: "lsp" });
+		assert(!result.isError, JSON.stringify(result));
+		assert.equal(result.structuredContent.results[0]?.state, "complete");
+		assert.equal(result.structuredContent.errors, 1);
+	}
+});

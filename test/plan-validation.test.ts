@@ -155,7 +155,7 @@ it("preserves confirmed provider findings but leaves aggregate counts unknown fo
 		await language.close();
 	}
 });
-it.skipIf(process.env["CODEX_LSP_REAL_TOOLS"] !== "1")(
+it.skipIf(process.env["REAL_TOOLS"] !== "1")(
 	"real ty: net zero preserves introduced/resolved findings and multi-file dependencies observe the full overlay",
 	async () => {
 		const { root, config } = await fixture("pull", true);
