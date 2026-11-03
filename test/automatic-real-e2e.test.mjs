@@ -10,9 +10,7 @@ import { bundleClient } from "./bundle-client.mjs";
 
 const enabled = process.env["REAL_TOOLS"] === "1";
 test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic edit and repair feedback", { skip: !enabled, timeout: 240000 }, async t => {
-	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-auto-real-"))), tools = join(dir, "tools");
-	const setup = spawnSync("npm", ["install", "--prefix", tools, "--no-audit", "--no-fund", "typescript-language-server", "typescript@5.9.3"], { encoding: "utf8", timeout: 90000 });
-	assert.equal(setup.status, 0, setup.stderr);
+	const dir = await realpath(await mkdtemp(join(tmpdir(), "codex-auto-real-"))), tools = resolve("test/fixtures/legacy-typescript");
 	const summaries = [];
 	const bundleSha256 = createHash("sha256").update(await readFile(resolveCli())).digest("hex");
 	t.after(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
@@ -21,7 +19,12 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 		await mkdir(root); await mkdir(home);
 		await writeFile(join(home, "config.toml"), `[projects.${JSON.stringify(root)}]\ntrust_level = "trusted"\n`);
 		const userConfig = join(home, "lsp-client.json");
-		await writeFile(userConfig, JSON.stringify({ schemaVersion: 1, automaticDiagnostics: {postToolUse:"delta",stop:"errors"}, lint: { javascript: "off", python: "off" }, ...(language === "native-typescript" ? { lsp: { typescript: "tsc" } } : {}) }));
+		const typescript = language === "native-typescript" ? "tsc" : {
+			command: [process.execPath, resolve("node_modules/typescript-language-server/lib/cli.mjs"), "--stdio"],
+			extensions: [".ts"],
+			initialization: { tsserver: { path: join(tools, "node_modules/typescript/lib/tsserver.js") } },
+		};
+		await writeFile(userConfig, JSON.stringify({ schemaVersion: 1, automaticDiagnostics: {postToolUse:"delta",stop:"errors"}, lint: { javascript: "off", python: "off" }, ...(language.includes("typescript") ? { lsp: { typescript } } : {}) }));
 		let path, clean, broken;
 		if (language === "python") { await writeFile(join(root,"pyproject.toml"),"[project]\nname=\"fixture\"\nversion=\"0.1.0\"\n"); path = "main.py"; clean = "value: int = 1\n"; broken = 'value: int = "wrong"\n'; }
 		else if (language.includes("typescript")) {

@@ -1,6 +1,6 @@
 # CodeIntel configuration
 
-Read `$CODEX_HOME/lsp-client.json` (or `~/.codex/lsp-client.json`) and `<workspace>/.codex/lsp-client.json`. Built-in defaults < global < project. Objects merge by field/language; arrays replace wholesale. Both files use `schemaVersion: 1`. Do not overwrite unrelated entries or user-off settings. A malformed existing file needs repair from its existing intent, not replacement with a default file.
+Read `$CODEX_HOME/lsp-client.json` (or `~/.codex/lsp-client.json`) and `<workspace>/.codex/lsp-client.json`. Built-in defaults < global < project. Settings merge by field/language; each language's LSP entry and all arrays replace wholesale. Both files use `schemaVersion: 1`. Preserve unrelated entries and user-off settings. Repair a malformed file according to its existing intent.
 
 A new project feedback configuration can start with:
 

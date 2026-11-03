@@ -56,7 +56,7 @@ test("shared MCP and Hook reuse, explicit writes and connection cleanup", { time
 		};
 		const init = await request("initialize", {});
 		assert.equal(init.serverInfo.name, "codex-codeintel");
-		assert.equal(init.serverInfo.version, "0.10.0");
+		assert.equal(init.serverInfo.version, "0.10.1");
 		return {request, async call(/** @type {string} */ name, args = {}) { let result = await request("tools/call", {name, arguments: {workspace: root, session: "test", ...args}}); assert(!result.isError, JSON.stringify(result)); if (["rename","format"].includes(name)) { result = await request("tools/call", {name:"apply",arguments:{workspace:root,session:"test",plan:result.structuredContent.plan}}); assert(!result.isError,JSON.stringify(result)); } return result.content[0].text; }, async close() { child.stdin.end(); assert.deepEqual(await exit, [0, null]); }};
 	};
 	const hook = (/** @type {string} */ event) => {

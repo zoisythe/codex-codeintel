@@ -1,13 +1,13 @@
-# Codex 原生 Hook 宿主验收
+# Codex native Hook host acceptance
 
-该步骤需要支持 async command Hook、SubagentStop.agent_id 和 Interrupt 的当前 Codex 宿主。先构建交付 bundle、审阅 hooks/hooks.json，再由用户通过 /hooks 重新审阅；在新会话运行。不要复制、修改信任记录或使用绕过 Hook 信任的参数。保留原有自动诊断/门禁选择；需要启用测试模式时只使用用户已经授权的隔离测试配置。
+Use a current Codex host supporting asynchronous command Hooks, `SubagentStop.agent_id` and Interrupt. Build the delivered bundle, inspect `hooks/hooks.json`, then have the user review the definitions through `/hooks` and start a new session. Preserve Hook trust records and existing automatic-diagnostic/gate choices. Use only an already-authorized isolated test configuration when enabling test feedback.
 
-记录宿主版本、插件 bundle SHA-256、六个已审阅事件、测试工作区和运行时间；不要保存凭据或未经筛选的用户 transcript。
+Record the host version, bundle SHA-256, six reviewed events, test workspace and run time. Keep credentials and unfiltered user transcripts out of the record.
 
-1. 在隔离 TypeScript 或 Biome fixture 使用 Bash 读取文件，确认没有启动检查；分别通过 Bash 写入、apply_patch 和 mcp__lsp__apply 修改源码，核对宿主实际投递的规范工具名与 tool_use_id。八个只读 MCP 工具不能触发写分析，rename/format/actions 只预览。
-2. 使用缓慢检查器让 PostToolUse 持续运行，确认原工具结果立即可用，后台结果经宿主原生 async 投递。普通 Stop 应在 1.5 秒内结束，等待后台结果不超过 300 ms，pending 留存；注意宿主只在安全点追加异步上下文，不自动创建新 turn。
-3. 由用户明确授权两个测试子代理，各修改不同文件并并行结束，主任务同时 Stop。核对显式 agent_id 的独立反馈和 shared 标记，子代理不得收到其他代理交付或 decision:block。仅主任务在已启用的全局门禁下，可对当前可靠新增错误每 turn 请求一次续跑。
-4. 正在等待后台结果时使用宿主中断操作，捕获真实 Interrupt 事件。确认中断迅速完成，明确归属的旧等待被解除，其他代理仍可领取结果；共享 LSP 和进行中的 MCP 写入未被中断。结束会话后迟到结果不得重新出现。
-5. 触发 resume、clear、fork 和 compact；前三者按会话语义复用或重建，compact 不重新发现基线。每条反馈最多 2 KiB、五条关键诊断；缓存 diagnostics 可查看详情。核对 stdout 成功写出才 ACK，重试允许使用相同 deliveryId。
+1. In an isolated TypeScript or Biome fixture, read a file through Bash and confirm that no check starts. Modify source through Bash, apply_patch and mcp__lsp__apply, checking the canonical tool names and tool_use_id delivered by the host. The nine read-only MCP tools must not trigger write analysis; rename, format and actions only produce previews.
+2. Use a slow checker to keep PostToolUse running. Confirm that the original tool result is available immediately and the host delivers background results through native async context. Ordinary Stop should finish within 1.5 seconds, wait at most 300 ms for background results and retain pending work. The host appends async context at safe points; it does not automatically create a new turn.
+3. Have the user explicitly authorize two test subagents, each editing a different file and ending in parallel while the main task also stops. Verify independent feedback for explicit agent_id values and shared labels. A subagent must not receive another agent's delivery or decision:block. Only the main task, with an existing global gate enabled, may request one continuation per turn for reliable newly introduced errors.
+4. Interrupt the host while waiting for background results and capture the real Interrupt event. Confirm prompt interruption, release of the interrupted actor's old waits, and continued delivery to other actors. Shared LSP processes and in-progress MCP writes must remain available. Late results must not reappear after the session ends.
+5. Exercise resume, clear, fork and compact. The first three reuse or rebuild state according to session semantics; compact must not rediscover baselines. Each feedback message contains at most 2 KiB and five key diagnostics; cached diagnostics provide details. Verify that ACK follows a successful stdout write and retries may reuse the same deliveryId.
 
-仓库中的 hook-flow、automatic-e2e、background-hooks-e2e 测试验证实际服务/CLI、竞态、输出预算、ACK 和取消；它们直接输入 Hook JSON，不证明宿主 matcher、原生 async 调度或真实 agent_id/Interrupt 投递正确。未完成上述宿主步骤时必须在验收记录中明确标为待验收。Linux/macOS/Windows CI 验证 bundle 行为，不需要本机 Rust。
+The repository's hook-flow, automatic-e2e and background-hooks-e2e tests exercise the actual service/CLI, races, output budgets, ACK and cancellation. They supply Hook JSON directly, so they do not establish correct host matching, native async scheduling or real agent_id/Interrupt delivery. Mark host acceptance as pending in the acceptance record until the steps above are completed. Linux/macOS/Windows CI verifies bundle behavior without requiring local Rust.

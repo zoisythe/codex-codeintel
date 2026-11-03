@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 (2026-11-03)
+
+- Persist completed pre-edit Hook baselines before reporting completion so diagnostic attribution survives service restarts. Guard late baseline writes after session cancellation and configuration changes.
+- Stabilize Hook acceptance with a pinned, isolated TypeScript fixture, retained fixture services and bounded cleanup retries; run automatic feedback regression without spawning npm inside the test on Windows. Clarify navigate and inspect arguments.
+- Standardize Skills and their usage, configuration and acceptance references in English. Update plugin metadata to describe all ten tools.
 
 - Support custom LSP settings, language IDs and workspace-folder requests for MATLAB, preserving the default Objective-C mapping for `.m` files.
 - Add delivered-bundle MATLAB acceptance and portable Rust fixtures, including both suites in `npm test` behind `REAL_TOOLS=1`. Add individual/local suite commands, configurable MATLAB paths and optional MCP traces; locate rustfmt in the selected toolchain and keep Rust references independent of standard-library macro expansion.

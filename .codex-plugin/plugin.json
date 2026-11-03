@@ -1,7 +1,7 @@
 {
 	"name": "codex-codeintel",
-	"version": "0.10.0",
-	"description": "Nine compact MCP tools for checks, navigation, context and previewed edits; apply is the only source writer.",
+	"version": "0.10.1",
+	"description": "Ten compact MCP tools for checks, navigation, context and previewed edits; apply is the only source writer.",
 	"author": {
 		"name": "zoisythe",
 		"url": "https://github.com/zoisythe"
@@ -22,7 +22,7 @@
 	"interface": {
 		"displayName": "Codex CodeIntel",
 		"shortDescription": "Code intelligence and previewed lint/LSP fixes",
-		"longDescription": "Codex CodeIntel shares local LSP and CLI checks across MCP and optional nonblocking Hooks. Nine tools provide diagnostics, navigation, context and edit previews. Only apply writes source files; plans are single-use. Use setupLSP to configure project tools.",
+		"longDescription": "Codex CodeIntel shares local LSP and CLI checks across MCP and optional nonblocking Hooks. Ten tools provide diagnostics, navigation, context and edit previews. Only apply writes source files; plans are single-use. Use setupLSP to configure project tools.",
 		"developerName": "zoisythe",
 		"category": "Developer Tools",
 		"capabilities": [

@@ -1,6 +1,6 @@
 {
 	"name": "@zoisythe/codex-codeintel",
-	"version": "0.10.0",
+	"version": "0.10.1",
 	"description": "Codex code intelligence with LSP/lint diagnostics, symbol navigation, rename, formatting, and automatic Hooks.",
 	"type": "module",
 	"packageManager": "npm@12.2.1",
@@ -50,7 +50,7 @@
 		"check": "npm run typecheck && node ./node_modules/@biomejs/biome/bin/biome check src test scripts && node scripts/build.mjs",
 		"test:install": "node --test test/install-smoke.test.mjs test/runtime-e2e.test.mjs test/resolution-e2e.test.mjs test/diagnostic-e2e.test.mjs test/trust-e2e.test.mjs test/automatic-e2e.test.mjs test/background-hooks-e2e.test.mjs",
 		"test:typescript": "node --test test/typescript-native-e2e.test.mjs",
-		"test:real": "node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs test/automatic-real-e2e.test.mjs test/setup-profile-e2e.test.mjs",
+		"test:real": "node scripts/prepare-features.mjs && node --test test/three-language-e2e.test.mjs test/temporary-e2e.test.mjs test/automatic-real-e2e.test.mjs test/setup-profile-e2e.test.mjs",
 		"test:features": "node scripts/prepare-features.mjs && node --test test/features-e2e.test.mjs",
 		"test:rust": "node --test test/rust-e2e.test.mjs",
 		"test:matlab": "node --test test/matlab-e2e.test.mjs",
