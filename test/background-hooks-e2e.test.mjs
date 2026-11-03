@@ -58,6 +58,14 @@ async function fixture(/** @type {import("node:test").TestContext} */ t, extra =
 			if (value?.id === session) return value;
 		}
 	};
+	/** @returns {Promise<{results: import("../src/project-types.js").CheckerResult[]} | undefined>} */
+	const savedBaseline = async () => {
+		const reference = (await state())?.diagnosticBaseline;
+		if (!reference) return;
+		const path = (await readdir(env.CODEX_LSP_CACHE, { recursive: true })).find(path => path.endsWith(`${reference}.json`));
+		assert(path, "Persisted baseline snapshot missing");
+		return JSON.parse(await readFile(join(env.CODEX_LSP_CACHE, path), "utf8"));
+	};
 	const identity = digest(JSON.stringify([process.getuid?.() ?? homedir(), await realpath(root), await realpath(home), digest(await readFile(cli, "utf8")), 1]));
 	const endpointPath = join(tmpdir(), `clsp6-${process.getuid?.() ?? digest(homedir()).slice(0, 10)}`, `${identity}.endpoint`);
 	const raw = async (/** @type {string} */ operation, /** @type {import("./protocol-types.js").Arguments} */ args) => {
@@ -86,8 +94,40 @@ async function fixture(/** @type {import("node:test").TestContext} */ t, extra =
 		assert.equal(dirname(dir), await realpath(tmpdir())); assert(basename(dir).startsWith("codeintel-background-"));
 		await rm(dir, { recursive: true, force: true });
 	});
-	return { root, home, env, config, configure, hook, pre, post, read, state, records, write, consume, raw, session, client, lspLog };
+	return { root, home, env, config, configure, hook, pre, post, read, state, savedBaseline, records, write, consume, raw, session, client, lspLog };
 }
+
+test("completed pre-edit baselines survive a shared service restart", { timeout: 20000 }, async (t) => {
+	const f = await fixture(t, { CHECK_DELAY: "300" });
+	await f.hook("SessionStart");
+	const client = f.client();
+	await until(async () => (await client.call("check", { run: "cached" })).structuredContent.state === "complete");
+	const baseline = await f.savedBaseline();
+	assert(baseline?.results.length);
+	assert(baseline.results.every(check => check.state === "complete"), "Check completion must include durable baseline results");
+	await client.close();
+	await delay(150);
+	await f.write("broken after restart\n");
+	const introduced = await f.post();
+	assert.match(introduced.text, /introduced=1; resolved=0; unattributed=0; pending=0/);
+	await f.write("clean repaired\n");
+	const repaired = await f.post();
+	assert.match(repaired.text, /introduced=0; resolved=1; unattributed=0; pending=0/);
+});
+
+test("cancelled baseline completion cannot repopulate an ended session", { timeout: 15000 }, async (t) => {
+	const f = await fixture(t, { CHECK_DELAY: "1500" });
+	await f.hook("SessionStart");
+	const client = f.client();
+	await until(async () => (await f.state())?.shown.baselineJob && (await client.call("check", { run: "cached" })).structuredContent.state === "running");
+	await f.hook("SessionEnd");
+	const ended = await f.state();
+	await until(async () => (await client.call("check", { run: "cached" })).structuredContent.state === "failed");
+	const final = await f.state();
+	assert.equal(final.epoch, ended.epoch);
+	assert.equal(final.turn, "__ended__");
+	assert.equal(final.diagnosticBaseline, null);
+});
 
 test("cold shell passthrough, bounded startup and uncertain late baseline", { timeout: 30000 }, async (t) => {
 	const f = await fixture(t, { CODEINTEL_SERVICE_DELAY: "5200", CHECK_DELAY: "1500" });

@@ -36,6 +36,8 @@ async function fixture(
 			schemaVersion: 1,
 			automaticDiagnostics: { postToolUse: "delta", stop: "errors" },
 			stopGate: "introduced-errors",
+			lsp: { typescript: false },
+			lint: { javascript: "off", python: "off" },
 		}),
 	);
 	await writeFile(join(root, "a.ts"), "clean");

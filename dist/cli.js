@@ -10587,6 +10587,7 @@ var init_project_checks = __esm({
     init_files();
     init_go_output();
     init_identity();
+    init_log();
     init_metadata();
     init_project_output();
     init_results();
@@ -10637,7 +10638,9 @@ var init_project_checks = __esm({
         return { introduced, resolved, unattributed };
       }
       get active() {
-        return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
+        return [...this.jobs.values()].some(
+          (job) => job.persisting || job.results.some((result) => result.state === "running")
+        );
       }
       async discover(config, signal) {
         if (config.projectChecks !== "auto") return [...config.projectChecks];
@@ -10743,7 +10746,7 @@ var init_project_checks = __esm({
       }
       output(job, cursor2 = 0) {
         const diagnostics = job.results.flatMap((result) => result.findings);
-        const state = job.results.some((result) => result.state === "running") ? "running" : job.results.some((result) => result.state === "stale") ? "stale" : job.results.some((result) => result.state === "failed") || !job.checks.length ? "failed" : "complete";
+        const state = job.persisting || job.results.some((result) => result.state === "running") ? "running" : job.results.some((result) => result.state === "stale") ? "stale" : job.results.some((result) => result.state === "failed") || !job.checks.length ? "failed" : "complete";
         return {
           operation: "check",
           job: job.id,
@@ -10807,7 +10810,7 @@ var init_project_checks = __esm({
         if (!Number.isInteger(cursor2) || cursor2 < 0) throw new Error("Invalid project cursor");
         return cursor2;
       }
-      async start(checks, config, environment, identity, before) {
+      async start(checks, config, environment, identity, before, baseline) {
         const job = {
           id: randomUUID11(),
           identity,
@@ -10824,8 +10827,18 @@ var init_project_checks = __esm({
             state: "running",
             findings: []
           })),
-          done: []
+          done: [],
+          persisting: !!baseline
         };
+        if (baseline) {
+          const state = await new Metadata(this.root).update(baseline.session, job.controller.signal, (current) => {
+            if (current.epoch !== baseline.epoch || current.edited || current.turn === "__ended__") return false;
+            current.shown["baselineJob"] = job.id;
+            return true;
+          });
+          if (state.shown["baselineJob"] !== job.id) throw new Error("Session changed before baseline started");
+          this.sessionJobs.set(baseline.session, job.id);
+        }
         this.jobs.set(job.id, job);
         this.latest = job.id;
         for (const [index, check] of checks.entries())
@@ -10917,14 +10930,48 @@ var init_project_checks = __esm({
               }
             })
           );
+        if (baseline)
+          job.done.push(
+            Promise.allSettled(job.done).then(async () => {
+              try {
+                await withExecution(
+                  environment,
+                  true,
+                  () => this.saveBaseline(
+                    job,
+                    baseline,
+                    AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.lock)])
+                  )
+                );
+              } catch {
+                if (!job.controller.signal.aborted) await logEvent("background-failure");
+              } finally {
+                job.persisting = false;
+              }
+            })
+          );
         while (this.jobs.size > 32) {
           const first = [...this.jobs.values()].find(
-            (entry) => entry.id !== job.id && entry.results.every((result) => result.state !== "running")
+            (entry) => entry.id !== job.id && !entry.persisting && entry.results.every((result) => result.state !== "running")
           );
           if (!first) break;
           this.jobs.delete(first.id);
         }
         return job;
+      }
+      async saveBaseline(job, baseline, signal) {
+        const store = new Metadata(this.root);
+        let reference = "";
+        await store.update(baseline.session, signal, async (current) => {
+          if (current.epoch !== baseline.epoch || current.turn === "__ended__" || current.shown["baselineJob"] !== job.id || (await configuration(this.root)).version !== job.configuration)
+            return false;
+          reference = await store.shared({ identity: job.identity, results: job.results, before: job.before });
+          current.diagnosticBaseline = reference;
+          current.configuration = job.configuration;
+          return true;
+        });
+        if (!reference) throw new Error("Session or configuration changed before baseline was saved");
+        return reference;
       }
       async baseline(session, paths, environment, signal, wait) {
         const config = await configuration(this.root);
@@ -10960,13 +11007,7 @@ var init_project_checks = __esm({
               if (!record(before) || Object.keys(before).length !== snapshot2.files.size || [...snapshot2.files].some(([path, content]) => before[path] !== content))
                 throw new Error("Files changed before baseline started; diagnostics remain unattributed");
             }
-            job = await this.start(checks, config, environment, identity, snapshot2);
-            this.sessionJobs.set(session, job.id);
-            await store.update(session, signal, (current2) => {
-              if (current2.epoch !== state.epoch || current2.turn === "__ended__") return false;
-              current2.shown["baselineJob"] = job?.id ?? "";
-              return true;
-            });
+            job = await this.start(checks, config, environment, identity, snapshot2, { session, epoch: state.epoch });
           }
           const selected = job.checks.map((check, index) => ({ check, index })).filter(({ check }) => !paths || paths.some((path) => covers(check, path)));
           await Promise.race([
@@ -10976,13 +11017,7 @@ var init_project_checks = __esm({
           recovered = { identity, results: job.results, before: job.before };
         }
         const results = recovered.results;
-        const reference = await store.shared(recovered);
-        await store.update(session, signal, (current) => {
-          if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-          current.diagnosticBaseline = reference;
-          current.configuration = config.version;
-          return true;
-        });
+        const reference = job ? await this.saveBaseline(job, { session, epoch: state.epoch }, signal) : await store.shared(recovered);
         const snapshot = paths ? void 0 : await inventory(this.root, BUDGET.files, signal, config.exclude);
         const targets = paths ?? [...snapshot?.files.keys() ?? []].filter(
           (path) => codeLanguage(config, path) && !/(?:json|yaml|css|html)$/.test(codeLanguage(config, path) ?? "")

@@ -11,7 +11,14 @@ Use status for configuration, local tools, capabilities and failures without sta
 
 Use warmup for explicit initialization of installed local servers, independent of automatic feedback. Pass path/paths or omit them for two representative languages. Follow next when paged. Warmup does not collect diagnostic baselines or download tools; status remains passive. The CLI is codeintel, including codeintel check and codeintel warmup.
 
-Use navigate for atomic queries. symbols shows a top-level outline; symbol expands a node, query searches the workspace. Use inspect operation=symbol for a compact overview, source=true only when source is needed; operation=impact finds callers and candidate tests. Test association is not runtime coverage, and zero references is not proof of safe deletion.
+Use navigate for atomic queries. Set `operation="symbols"` for a top-level outline. Keep `operation="symbols"` and add the `symbol` parameter to expand a node, or add `query` to search workspace symbols.
+
+| Goal | Tool and arguments, alongside workspace/path |
+| --- | --- |
+| Expand a class's members | `navigate(operation="symbols", symbol="CatalogScreen")` |
+| Read a compact symbol overview | `inspect(operation="symbol", symbol="CatalogScreen", source=false)` |
+
+Pass `source` only to inspect; set `source=true` when source text is needed. Use inspect with `operation="impact"` for callers and candidate tests. Test association is not runtime coverage, and zero references is not proof of safe deletion.
 
 Use actions operation=list/explain/preview for lint/LSP fixes. Batch preview selects only vendor-safe actions; select ids explicitly for unsafe/unknown/suggestions. Command/resource actions are unsupported. Never infer safety from fixable alone.
 

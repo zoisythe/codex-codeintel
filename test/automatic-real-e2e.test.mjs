@@ -15,7 +15,7 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 	assert.equal(setup.status, 0, setup.stderr);
 	const summaries = [];
 	const bundleSha256 = createHash("sha256").update(await readFile(resolveCli())).digest("hex");
-	t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+	t.after(async () => { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 	for (const language of ["python", "typescript", "native-typescript", "c", "cpp", ...(process.env["CODEX_LSP_TEST_RUST"] === "1" ? ["rust"] : [])]) {
 		const root = join(dir, language), home = join(dir, `${language}-home`);
 		await mkdir(root); await mkdir(home);
@@ -48,36 +48,36 @@ test("actual ty, legacy/native TypeScript, clangd C/C++, rust-analyzer automatic
 			let out = "", err = "";
 			child.stdout.setEncoding("utf8").on("data", chunk => { out += chunk; }); child.stderr.setEncoding("utf8").on("data", chunk => { err += chunk; });
 			child.on("error", reject); child.on("exit", code => { if (code !== 0) reject(new Error(err)); else { feedback.push(out); resolve({ output: out, elapsed: performance.now() - started }); } });
-			child.stdin.end(JSON.stringify({ cwd: root, session_id: language, hook_event_name: event, tool_name:"Write", tool_input:{path} }));
+			child.stdin.end(JSON.stringify({ cwd: root, session_id: language, turn_id: language, hook_event_name: event, tool_name:"apply_patch", tool_input:{path} }));
 		});
 		await hook("SessionStart");
 		const baselineClient = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
 		try {
+			let baseline;
 			for (let attempt = 0; attempt < 60; attempt++) {
-				const result = (await baselineClient.call("check", { run: "cached" })).structuredContent;
-				if (result.state !== "missing" && result.state !== "running") { assert.equal(result.state, "complete", JSON.stringify(result)); break; }
+				baseline = (await baselineClient.call("check", { run: "cached" })).structuredContent;
+				if (baseline.state !== "missing" && baseline.state !== "running") break;
 				await delay(200);
 			}
-		} finally { await baselineClient.close(); }
-		const pre = await hook("PreToolUse"); assert(!pre.output || !JSON.parse(pre.output).hookSpecificOutput?.permissionDecision, `${language}: ${pre.output}`);
-		await writeFile(join(root, path), broken);
-		const cold = await hook("PostToolUse");
-		for (let attempt = 0; attempt < 8 && !feedback.some(output => /error \[/.test(output)); attempt++) { await delay(1500); await hook("PostToolUse"); }
-		assert(feedback.some(output => /error \[/.test(output)), `${language}: no automatic error: ${feedback.join("\n")}`);
-		await writeFile(join(root, path), clean);
-		const hot = await hook("PostToolUse");
-		for (let attempt = 0; attempt < 8 && !feedback.some(output => /introduced diagnostics repaired/g.test(output)); attempt++) { await delay(1500); await hook("PostToolUse"); }
-		assert(feedback.some(output => /introduced diagnostics repaired/g.test(output)), `${language}: no automatic clearing: ${feedback.join("\n")}`);
-		const stop = await hook("Stop"); if (stop.output) assert.equal(JSON.parse(stop.output).decision, undefined);
-		// Status is read after automatic feedback; diagnosis never calls MCP.
-		const c = bundleClient(root, home, { CODEX_LSP_CACHE: join(dir, "cache") });
-		try {
-			const status = (await c.call("status", { path })).structuredContent;
+			assert.equal(baseline?.state, "complete", `${language}: baseline incomplete: ${JSON.stringify(baseline)}`);
+			await writeFile(join(root, path), broken);
+			const cold = await hook("PostToolUse");
+			for (let attempt = 0; attempt < 8 && !feedback.some(output => /error \[/.test(output)); attempt++) { await delay(1500); await hook("PostToolUse"); }
+			assert(feedback.some(output => /error \[/.test(output)), `${language}: no automatic error: ${feedback.join("\n")}`);
+			assert(feedback.some(output => /introduced=1; resolved=0; unattributed=0; pending=0/.test(output)), `${language}: error attribution: ${feedback.join("\n")}`);
+			await writeFile(join(root, path), clean);
+			const hot = await hook("PostToolUse");
+			for (let attempt = 0; attempt < 8 && !feedback.some(output => /introduced=0; resolved=1; unattributed=0; pending=0/.test(output)); attempt++) { await delay(1500); await hook("PostToolUse"); }
+			assert(feedback.some(output => /introduced=0; resolved=1; unattributed=0; pending=0/.test(output)), `${language}: no automatic clearing: ${feedback.join("\n")}`);
+			const cached = (await baselineClient.call("diagnostics", { run: "cached", scope: "session", session: language })).structuredContent;
+			assert.equal(cached.errors, 0, `${language}: stale errors after repair`);
+			const stop = await hook("Stop"); if (stop.output) assert.equal(JSON.parse(stop.output).decision, undefined);
+			// Status is read after automatic feedback; diagnosis never calls MCP.
+			const status = (await baselineClient.call("status", { path })).structuredContent;
 			assert.equal(status.tools[0]?.running, true, JSON.stringify(status.tools));
 			summaries.push({ language, coldMs: cold.elapsed, hotMs: hot.elapsed, processStarts: status.clients.processStarts, command: status.tools[0]?.tool.command, serviceIdentity: status.service.identity });
 			await hook("SessionEnd");
-			process.kill(status.service.pid ?? assert.fail("Service missing"), "SIGTERM");
-		} finally { await c.close(); }
+		} finally { await baselineClient.close(); }
 	}
 	t.diagnostic(JSON.stringify({bundleSha256, summaries}));
 });

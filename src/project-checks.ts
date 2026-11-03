@@ -12,6 +12,7 @@ import { withExecution } from "./environment.js";
 import { hash, type Inventory, inventory, workspacePath } from "./files.js";
 import { goFiles } from "./go-output.js";
 import { analysisIdentity } from "./identity.js";
+import { logEvent } from "./log.js";
 import { Metadata } from "./metadata.js";
 import { projectOutput } from "./project-output.js";
 import type { CheckerResult, ProjectCheck, ProjectResult } from "./project-types.js";
@@ -29,6 +30,11 @@ interface Job {
 	before: string;
 	configuration: string;
 	environment: NodeJS.ProcessEnv;
+	persisting: boolean;
+}
+interface BaselineSession {
+	session: string;
+	epoch: string;
 }
 function normalizedPattern(pattern: string): string {
 	return pattern.replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
@@ -128,7 +134,9 @@ export class ProjectChecks {
 		return { introduced, resolved, unattributed };
 	}
 	get active(): boolean {
-		return [...this.jobs.values()].some((job) => job.results.some((result) => result.state === "running"));
+		return [...this.jobs.values()].some(
+			(job) => job.persisting || job.results.some((result) => result.state === "running"),
+		);
 	}
 	private async discover(config: Config, signal: AbortSignal): Promise<ProjectCheck[]> {
 		if (config.projectChecks !== "auto") return [...config.projectChecks];
@@ -254,13 +262,14 @@ export class ProjectChecks {
 	}
 	private output(job: Job, cursor = 0): ProjectResult {
 		const diagnostics = job.results.flatMap((result) => result.findings);
-		const state = job.results.some((result) => result.state === "running")
-			? "running"
-			: job.results.some((result) => result.state === "stale")
-				? "stale"
-				: job.results.some((result) => result.state === "failed") || !job.checks.length
-					? "failed"
-					: "complete";
+		const state =
+			job.persisting || job.results.some((result) => result.state === "running")
+				? "running"
+				: job.results.some((result) => result.state === "stale")
+					? "stale"
+					: job.results.some((result) => result.state === "failed") || !job.checks.length
+						? "failed"
+						: "complete";
 		return {
 			operation: "check",
 			job: job.id,
@@ -339,6 +348,7 @@ export class ProjectChecks {
 		environment: NodeJS.ProcessEnv,
 		identity: string,
 		before: Inventory,
+		baseline?: BaselineSession,
 	): Promise<Job> {
 		const job: Job = {
 			id: randomUUID(),
@@ -357,7 +367,17 @@ export class ProjectChecks {
 				findings: [],
 			})),
 			done: [],
+			persisting: !!baseline,
 		};
+		if (baseline) {
+			const state = await new Metadata(this.root).update(baseline.session, job.controller.signal, (current) => {
+				if (current.epoch !== baseline.epoch || current.edited || current.turn === "__ended__") return false;
+				current.shown["baselineJob"] = job.id;
+				return true;
+			});
+			if (state.shown["baselineJob"] !== job.id) throw new Error("Session changed before baseline started");
+			this.sessionJobs.set(baseline.session, job.id);
+		}
 		this.jobs.set(job.id, job);
 		this.latest = job.id;
 		for (const [index, check] of checks.entries())
@@ -481,14 +501,54 @@ export class ProjectChecks {
 					}
 				}),
 			);
+		if (baseline)
+			// Report completion only after the background baseline has been saved for service restarts.
+			job.done.push(
+				Promise.allSettled(job.done).then(async () => {
+					try {
+						await withExecution(environment, true, () =>
+							this.saveBaseline(
+								job,
+								baseline,
+								AbortSignal.any([job.controller.signal, AbortSignal.timeout(BUDGET.lock)]),
+							),
+						);
+					} catch {
+						if (!job.controller.signal.aborted) await logEvent("background-failure");
+					} finally {
+						job.persisting = false;
+					}
+				}),
+			);
 		while (this.jobs.size > 32) {
 			const first = [...this.jobs.values()].find(
-				(entry) => entry.id !== job.id && entry.results.every((result) => result.state !== "running"),
+				(entry) =>
+					entry.id !== job.id && !entry.persisting && entry.results.every((result) => result.state !== "running"),
 			);
 			if (!first) break;
 			this.jobs.delete(first.id);
 		}
 		return job;
+	}
+	private async saveBaseline(job: Job, baseline: BaselineSession, signal: AbortSignal): Promise<string> {
+		const store = new Metadata(this.root);
+		let reference = "";
+		await store.update(baseline.session, signal, async (current) => {
+			if (
+				current.epoch !== baseline.epoch ||
+				current.turn === "__ended__" ||
+				current.shown["baselineJob"] !== job.id ||
+				(await configuration(this.root)).version !== job.configuration
+			)
+				return false;
+			// Read current results under the lock so an earlier partial save cannot overwrite final results.
+			reference = await store.shared({ identity: job.identity, results: job.results, before: job.before });
+			current.diagnosticBaseline = reference;
+			current.configuration = job.configuration;
+			return true;
+		});
+		if (!reference) throw new Error("Session or configuration changed before baseline was saved");
+		return reference;
 	}
 	async baseline(
 		session: string,
@@ -541,13 +601,7 @@ export class ProjectChecks {
 					)
 						throw new Error("Files changed before baseline started; diagnostics remain unattributed");
 				}
-				job = await this.start(checks, config, environment, identity, snapshot);
-				this.sessionJobs.set(session, job.id);
-				await store.update(session, signal, (current) => {
-					if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-					current.shown["baselineJob"] = job?.id ?? "";
-					return true;
-				});
+				job = await this.start(checks, config, environment, identity, snapshot, { session, epoch: state.epoch });
 			}
 			const selected = job.checks
 				.map((check, index) => ({ check, index }))
@@ -559,13 +613,9 @@ export class ProjectChecks {
 			recovered = { identity, results: job.results, before: job.before };
 		}
 		const results = recovered.results;
-		const reference = await store.shared(recovered);
-		await store.update(session, signal, (current) => {
-			if (current.epoch !== state.epoch || current.turn === "__ended__") return false;
-			current.diagnosticBaseline = reference;
-			current.configuration = config.version;
-			return true;
-		});
+		const reference = job
+			? await this.saveBaseline(job, { session, epoch: state.epoch }, signal)
+			: await store.shared(recovered);
 		const snapshot = paths ? undefined : await inventory(this.root, BUDGET.files, signal, config.exclude);
 		const targets =
 			paths ??

@@ -106,13 +106,15 @@ navigate 支持 definition、declaration、references、symbols、prepare_rename
 {"workspace":"/project","path":"src/main.ts","operation":"symbols"}
 ```
 
-outline 默认只展示顶层；传入 symbol 展开该节点的直接成员。成员过多会分页，不再因一个大 class 超限而返回空列表。关系查询返回直接关系；进一步展开需重新定位对应符号。服务器不支持时明确返回 unsupported。
+outline 默认只展示顶层；保持 navigate 的 operation="symbols"，传入 symbol 参数展开该节点的直接成员。成员过多会分页，不再因一个大 class 超限而返回空列表。关系查询返回直接关系；进一步展开需重新定位对应符号。服务器不支持时明确返回 unsupported。
+
+使用 inspect 的 operation="symbol" 获取符号概览；source 参数属于 inspect，按需设为 true 包含源码：
 
 ```json
 {"workspace":"/project","path":"src/main.ts","operation":"symbol","symbol":"greet","source":true}
 ```
 
-使用 inspect 聚合签名/文档、定义、引用摘要和调用关系；source 默认省略。operation=impact 接收明确 path/paths 或定位符，汇总顶层类型/函数及类型成员的引用，排除局部变量、字段噪声。symbols 可指定文件内的符号路径集合，逐项保留歧义或失败；调用方来自调用层级，普通引用单独统计。transitive=true 最多追加一层，预算不足明确 partial。各子查询独立报告失败。
+inspect 聚合签名/文档、定义、引用摘要和调用关系；source 默认省略。operation=impact 接收明确 path/paths 或定位符，汇总顶层类型/函数及类型成员的引用，排除局部变量、字段噪声。symbols 可指定文件内的符号路径集合，逐项保留歧义或失败；调用方来自调用层级，普通引用单独统计。transitive=true 最多追加一层，预算不足明确 partial。各子查询独立报告失败。
 
 候选测试仅依据文件命名和符号引用，不是运行时覆盖证明。零引用不证明可安全删除；没有并发安全或死代码自动裁决。
 
